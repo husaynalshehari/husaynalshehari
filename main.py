@@ -1,12 +1,8 @@
-from flask import Flask
-import os
+from commands import execute_command
 
-app = Flask(__name__)
-
-@app.route('/')
-def index():
-    return "✅ السكربت شغال على Render!"
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+# مثال على تنفيذ مهمة لايك لحسابات TikTok
+execute_command(
+    platform="tiktok",
+    action="like",
+    target="https://www.tiktok.com/@someuser/video/1234567890"
+)

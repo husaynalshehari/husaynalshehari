@@ -1,0 +1,12 @@
+[
+  {
+    "platform": "tiktok",
+    "username": "user1@example.com",
+    "password": "password1"
+  },
+  {
+    "platform": "twitter",
+    "username": "user2@example.com",
+    "password": "password2"
+  }
+]
