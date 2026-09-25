@@ -19,7 +19,7 @@ import story_forge as sf  # noqa: E402  (بعد ضبط مسار المكتبة)
 STORY = "\n\n".join([
     "دفعت حساب القهوة وطلعت.",
     "وقفت عند الباب.",
-    "ورقة عليها اسمي مو لي.",
+    "ورقة مكتوب فيها «قرض شخصي» واسمي تحتها مو لي.",
     "أخوي الكبير، قبل 6 سنين، أخذ قرض 40 ألف باسمي.",
     "يسدد 900 كل شهر من راتبه.",
     "ما أدري ليش ما قال لي.",
@@ -155,6 +155,37 @@ class Helpers(unittest.TestCase):
         self.assertTrue(ids["dialect"]["ok"])
         ids = {c["id"]: c for c in sf.run_checks(fusha, "medium", "self", "dilemma", [], dialect="fusha")}
         self.assertNotIn("dialect", ids)
+
+    def test_quote_and_now_checks_are_advisory(self):
+        plain = "رحت للبنك.\n\nقالوا لي إن القرض باسمي.\n\nأخوي أخذه قبل 6 سنين.\n\nأروح له ولا أسكت؟"
+        ids = {c["id"]: c for c in sf.run_checks(plain, "short", "self", "dilemma", [])}
+        self.assertFalse(ids["quote"]["ok"])
+        self.assertFalse(ids["now"]["ok"])
+        self.assertNotIn("quote", sf.CRITICAL)
+        quoted = plain.replace("قالوا لي إن القرض باسمي.", "الموظف قال: «القرض باسمك من 2019».\n\nهو الحين قاعد برا ينتظرني.")
+        ids = {c["id"]: c for c in sf.run_checks(quoted, "short", "self", "dilemma", [])}
+        self.assertTrue(ids["quote"]["ok"])
+        self.assertTrue(ids["now"]["ok"])
+
+    def test_parse_ideas_reads_evidence_and_motive(self):
+        raw = json.dumps({"ideas": [{"hidden": "أخوي أخذ قرض باسمي", "evidence": "«القرض باسمك»",
+                                     "motive": "عشان الورث", "facts": ["قبل 6 سنين"]}]}, ensure_ascii=False)
+        idea = sf.parse_ideas(raw)[0]
+        self.assertEqual(idea["motive"], "عشان الورث")
+        self.assertIn("الدليل بحرفه", sf.premise_text(idea))
+        self.assertIn("دافع الطرف الآخر: عشان الورث", sf.premise_text(idea))
+
+    def test_opening_styles_are_weighted_toward_acts(self):
+        seen = {sf.fresh_dna()["open"] for _ in range(300)}
+        self.assertIn("act", seen)
+        self.assertTrue(seen <= set(sf.OPEN_STYLES))
+
+    def test_numbers_check_wants_digits_not_words(self):
+        self.assertEqual(sf.count_numbers("قبل تسع سنين ومليوني ريال"), 0)
+        self.assertEqual(sf.count_numbers("قبل 9 سنين و٤٨ ساعة"), 2)
+        self.assertTrue(sf.QUOTE_RE.search("لقيت ورقة مكتوب فيها بخط يده:"))
+        self.assertTrue(sf.QUOTE_RE.search("قالت لي أمي بالحرف:"))
+        self.assertFalse(sf.QUOTE_RE.search("كان مكتوب اسمي على الورقة"))
 
     def test_polish_only_for_critical_failures(self):
         checks = [{"id": "doubt", "ok": False, "fix": "x"}, {"id": "lines", "ok": False, "fix": "y"},
