@@ -46,7 +46,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "3.1"
+VERSION = "3.2"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -1393,312 +1393,367 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>مِسنّ — منشورات قصصية</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141C31'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%23D4577C'/%3E%3C/svg%3E">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231B3A5C'/%3E%3Ccircle cx='16' cy='16' r='6.5' fill='%23FFFFFF'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Sans+Arabic:wght@300;400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root{
-    --ink:#141C31; --panel:#1C2745; --rule:#2C3A61; --dim:#8C9BC4;
-    --paper:#F6F5F3; --graphite:#1A1F2B; --rose:#D4577C; --sage:#7FC7C2; --amber:#E2B15A;
+    --bg:#F4F5F7; --surface:#FFFFFF; --line:#E4E7EC; --line-2:#D0D5DD;
+    --ink:#101828; --ink-2:#344054; --muted:#667085; --faint:#98A2B3;
+    --primary:#1B3A5C; --primary-2:#14304D; --primary-soft:#EAF0F7; --primary-line:#B9CBE0;
+    --ok:#067647; --ok-bg:#ECFDF3; --ok-line:#ABEFC6;
+    --bad:#B42318; --bad-bg:#FEF3F2; --bad-line:#FECDCA;
+    --warn:#B54708; --warn-bg:#FFFAEB; --warn-line:#FEDF89;
+    --shadow:0 1px 2px rgba(16,24,40,.05); --shadow-lg:0 14px 36px rgba(16,24,40,.09);
+    --r:12px;
   }
   *{box-sizing:border-box}
   html,body{margin:0}
   body{
-    background:var(--ink); color:#E6EAF5; padding:0 20px 90px;
-    font-family:"IBM Plex Sans Arabic",system-ui,sans-serif; font-weight:300;
-    line-height:1.75; -webkit-font-smoothing:antialiased;
+    background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans Arabic",system-ui,sans-serif; font-size:15px; line-height:1.7;
+    -webkit-font-smoothing:antialiased;
   }
-  .wrap{max-width:720px; margin:0 auto}
+  .wrap{max-width:1140px; margin:0 auto; padding:0 20px 80px}
 
-  header{padding:54px 0 30px}
-  .mark{font-size:13px; color:var(--dim); letter-spacing:.04em}
-  .hero{
-    font-family:"Amiri",serif; font-size:clamp(26px,5.4vw,40px); line-height:1.55;
-    margin:14px 0 0; min-height:2.6em; color:#F3F1EC;
-  }
-  .caret{display:inline-block; width:2px; height:.95em; background:var(--rose);
-         vertical-align:-.1em; margin-inline-start:2px; animation:blink 1s step-end infinite}
-  @keyframes blink{50%{opacity:0}}
-  .sub{color:var(--dim); margin:18px 0 0; font-size:15px; max-width:52ch}
+  /* الشريط العلوي */
+  .top{display:flex; align-items:center; justify-content:space-between; gap:16px; padding:18px 0 22px}
+  .brand{display:flex; align-items:center; gap:10px; font-weight:700; font-size:17px}
+  .logo{width:30px; height:30px; border-radius:9px; background:var(--primary); position:relative; flex:none}
+  .logo::after{content:""; position:absolute; inset:9px; border-radius:50%; background:#fff}
+  .ver{font-weight:500; font-size:12px; color:var(--muted); background:#fff; border:1px solid var(--line); border-radius:999px; padding:2px 9px}
+  .pill{font-size:12px; color:var(--ink-2); background:#fff; border:1px solid var(--line); border-radius:999px; padding:5px 12px; display:flex; align-items:center; gap:7px}
+  .pill::before{content:""; width:7px; height:7px; border-radius:50%; background:var(--ok)}
 
-  .desk{border-top:1px solid var(--rule); border-bottom:1px solid var(--rule);
-        padding:22px 0; margin:30px 0 0;
-        display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:18px 20px}
-  label{display:block; font-size:13px; color:var(--dim); margin-bottom:7px}
-  select,input,textarea{
-    width:100%; background:var(--panel); color:#E6EAF5; border:1px solid var(--rule);
-    border-radius:7px; padding:10px 12px; font-family:inherit; font-size:15px; font-weight:300;
+  /* التخطيط */
+  .layout{display:grid; grid-template-columns:minmax(0,1fr); gap:22px}
+  @media (min-width:980px){
+    .layout{grid-template-columns:372px minmax(0,1fr); align-items:start}
+    .side{position:sticky; top:18px}
   }
-  textarea{resize:vertical; line-height:1.8}
-  select:focus,input:focus,textarea:focus{outline:2px solid var(--rose); outline-offset:1px; border-color:transparent}
+  .side{display:flex; flex-direction:column; gap:14px}
+  .main{display:flex; flex-direction:column; gap:16px; min-width:0}
+
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); padding:20px}
+  .panel h2{font-size:13px; font-weight:600; color:var(--muted); letter-spacing:.02em; margin:0 0 14px; text-transform:uppercase}
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:12px 12px}
   .full{grid-column:1/-1}
-  .check{display:flex; align-items:center; gap:8px; font-size:13px; color:var(--dim); margin-top:8px}
-  .check input{width:auto}
-
-  .seedpanel{border-bottom:1px solid var(--rule); padding:14px 0 18px; font-size:13px; color:var(--dim)}
-  .seedpanel summary{cursor:pointer; color:var(--sage); font-size:14px}
-  .seedpanel .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px 16px; margin-top:14px}
-  .seedpanel select{font-size:13px; padding:8px 10px}
-  .seedpanel select.locked{border-color:var(--sage)}
-
-  .actions{display:flex; gap:10px; margin-top:24px; flex-wrap:wrap}
-  .run{
-    flex:1; min-width:180px; background:var(--rose); color:#fff; border:0;
-    border-radius:8px; padding:16px; font-family:inherit; font-size:17px; font-weight:600;
-    cursor:pointer;
+  label{display:block; font-size:12.5px; font-weight:500; color:var(--ink-2); margin-bottom:6px}
+  select,input,textarea{
+    width:100%; background:#fff; color:var(--ink); border:1px solid var(--line-2);
+    border-radius:9px; padding:9px 11px; font-family:inherit; font-size:14px; line-height:1.5;
+    transition:border-color .15s, box-shadow .15s;
   }
-  .run:disabled{background:#43304A; color:#9A8FA4; cursor:not-allowed}
-  .ghost{background:none; color:#E6EAF5; border:1px solid var(--rule); border-radius:8px;
-         padding:14px 18px; font-family:inherit; font-size:15px; cursor:pointer}
-  .ghost:hover{border-color:var(--sage); color:var(--sage)}
-  .ghost:disabled{opacity:.4; cursor:not-allowed}
-  .ghost.danger:hover{border-color:var(--rose); color:var(--rose)}
+  select{appearance:none; -webkit-appearance:none; padding-inline-end:32px;
+         background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23667085' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+         background-repeat:no-repeat; background-position:left 11px center}
+  textarea{resize:vertical; min-height:64px}
+  select:hover,input:hover,textarea:hover{border-color:#AEB5C2}
+  select:focus,input:focus,textarea:focus{outline:none; border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-soft)}
+  .check{display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink-2); margin-top:10px; font-weight:400}
+  .check input{width:auto; accent-color:var(--primary)}
+  .hint{font-size:12px; color:var(--muted); margin:6px 0 0; line-height:1.6}
+  #creds{margin-top:2px; padding:14px; background:#FAFBFC; border:1px dashed var(--line-2); border-radius:10px}
+  #creds label{margin-top:10px} #creds label:first-child{margin-top:0}
 
-  .steps{list-style:none; margin:20px 0 0; padding:0; display:flex; gap:6px; font-size:12px; color:var(--dim)}
-  .steps li{flex:1; text-align:center; padding:8px 4px 10px; border-top:2px solid var(--rule); transition:border-color .3s, color .3s}
-  .steps li.done{border-top-color:var(--sage); color:var(--sage)}
-  .steps li.active{border-top-color:var(--rose); color:#fff}
-  .steps li.active::after{content:""; display:block; width:6px; height:6px; border-radius:50%; background:var(--rose); margin:6px auto 0; animation:blink 1s step-end infinite}
+  /* البذرة */
+  .seedpanel summary{cursor:pointer; list-style:none; display:flex; align-items:center; justify-content:space-between; font-size:13.5px; font-weight:600; color:var(--ink-2)}
+  .seedpanel summary::-webkit-details-marker{display:none}
+  .seedpanel summary::after{content:"+"; font-size:18px; color:var(--muted); font-weight:400}
+  .seedpanel[open] summary::after{content:"–"}
+  .seedpanel .grid{margin-top:14px}
+  .seedpanel select.locked{border-color:var(--primary); background-color:var(--primary-soft)}
+  .seedpanel .hint{margin-top:12px}
+
+  /* الأزرار */
+  .btn{font:inherit; font-weight:600; font-size:14.5px; border-radius:10px; padding:11px 16px; cursor:pointer; border:1px solid transparent; transition:background .15s, border-color .15s, color .15s}
+  .btn.primary{background:var(--primary); color:#fff; width:100%; padding:13px 16px; font-size:15.5px}
+  .btn.primary:hover{background:var(--primary-2)}
+  .btn.primary:disabled{background:#B7C1CF; cursor:not-allowed}
+  .btn.secondary{background:#fff; border-color:var(--line-2); color:var(--ink-2)}
+  .btn.secondary:hover{border-color:var(--primary); color:var(--primary)}
+  .btn.secondary:disabled{opacity:.45; cursor:not-allowed}
+  .btn.danger{background:#fff; border-color:var(--bad-line); color:var(--bad)}
+  .btn.danger:hover{background:var(--bad-bg)}
+  .actions{display:flex; flex-direction:column; gap:8px; margin-top:16px; padding-top:16px; border-top:1px solid var(--line)}
+  .actions .row{display:flex; gap:8px}
+  .actions .row .btn{flex:1}
+  kbd{font-family:inherit; font-size:11px; border:1px solid var(--line-2); border-bottom-width:2px; border-radius:5px; padding:0 5px; color:var(--muted); background:#fff}
+
+  /* البطاقة التعريفية */
+  .hero-card{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); padding:22px 24px}
+  .hero{font-family:"Amiri",serif; font-size:clamp(22px,3vw,30px); line-height:1.6; margin:0; min-height:1.7em; color:var(--ink)}
+  .caret{display:inline-block; width:2px; height:.9em; background:var(--primary); vertical-align:-.1em; margin-inline-start:2px; animation:blink 1s step-end infinite}
+  @keyframes blink{50%{opacity:0}}
+  .sub{color:var(--muted); margin:10px 0 0; font-size:13.5px; line-height:1.8; max-width:70ch}
+
+  /* المراحل والحالة */
+  .progress{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); padding:16px 20px}
+  .steps{list-style:none; margin:0; padding:0; display:flex; gap:6px}
+  .steps li{flex:1; display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--faint); min-width:0; white-space:nowrap}
+  .steps li::before{content:attr(data-n); width:24px; height:24px; border-radius:50%; border:1.5px solid var(--line-2); background:#fff; display:grid; place-items:center; font-size:11px; font-weight:600; flex:none}
+  .steps li:not(:last-child)::after{content:""; flex:1; height:1.5px; background:var(--line); margin:0 4px}
+  .steps li.done{color:var(--ok)} .steps li.done::before{content:"✓"; background:var(--ok-bg); border-color:var(--ok-line); color:var(--ok)}
+  .steps li.done:not(:last-child)::after{background:var(--ok-line)}
+  .steps li.active{color:var(--primary); font-weight:600} .steps li.active::before{border-color:var(--primary); background:var(--primary); color:#fff}
   .steps li.hidden{display:none}
-  .state{margin:10px 0 0; font-size:14px; color:var(--sage); min-height:1.4em}
-  #state.bad{color:#FF9DAF}
-  .elapsed{color:var(--dim); margin-inline-start:10px; font-variant-numeric:tabular-nums}
+  .state{margin:12px 0 0; font-size:13.5px; color:var(--ink-2); min-height:1.4em; display:flex; align-items:center; gap:10px}
+  #state.bad{color:var(--bad)}
+  .elapsed{color:var(--muted); font-variant-numeric:tabular-nums; font-size:12.5px}
 
-  .sheet{
-    background:var(--paper); color:var(--graphite); border-radius:3px;
-    padding:40px 40px 34px; margin:30px 0 0; display:none; position:relative;
-    box-shadow:0 26px 60px rgba(0,0,0,.42);
-  }
+  /* الورقة */
+  .sheet{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-lg); padding:26px 32px 22px; display:none}
   .sheet.on{display:block}
-  .tag{position:absolute; top:14px; inset-inline-start:40px; font-size:12px; color:#8A8E98; letter-spacing:.03em}
-  .tag.live{color:var(--rose)}
-  .sheet .body{
-    font-family:"Amiri",serif; font-size:21px; line-height:2.05; white-space:pre-wrap;
-    min-height:3em; margin-top:8px;
-  }
+  .tag{display:inline-block; font-size:11.5px; font-weight:600; color:var(--muted); background:var(--bg); border:1px solid var(--line); border-radius:999px; padding:3px 10px; min-height:1.6em}
+  .tag:empty{display:none}
+  .tag.live{color:var(--primary); background:var(--primary-soft); border-color:var(--primary-line)}
+  .tag.live::before{content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--primary); margin-inline-end:6px; animation:blink 1s step-end infinite}
+  .sheet .body{font-family:"Amiri",serif; font-size:20.5px; line-height:2; white-space:pre-wrap; min-height:3em; margin-top:14px; color:var(--ink)}
   .sheet .body::first-line{font-weight:700}
-  .sheet.busy .body{color:#5A5E68}
-  .foot{display:flex; flex-wrap:wrap; gap:14px; align-items:center;
-        border-top:1px solid #DDD9D2; margin-top:28px; padding-top:16px;
-        font-size:13px; color:#6B6F7A}
+  .sheet.busy .body{color:var(--muted)}
+  .foot{display:flex; flex-wrap:wrap; gap:10px; align-items:center; border-top:1px solid var(--line); margin-top:22px; padding-top:14px; font-size:12.5px; color:var(--muted)}
   .foot .grow{flex:1}
-  .act{background:none; border:1px solid #CFCAC2; color:var(--graphite); border-radius:6px;
-       padding:8px 14px; font-family:inherit; font-size:14px; cursor:pointer}
-  .act:hover{border-color:var(--rose); color:var(--rose)}
-  .act:disabled{opacity:.4; cursor:not-allowed}
-  .act.solid{background:var(--graphite); color:var(--paper); border-color:var(--graphite)}
-  .act.solid:hover{background:var(--rose); border-color:var(--rose); color:#fff}
+  .act{background:#fff; border:1px solid var(--line-2); color:var(--ink-2); border-radius:8px; padding:7px 13px; font-family:inherit; font-size:13px; font-weight:500; cursor:pointer}
+  .act:hover{border-color:var(--primary); color:var(--primary)}
+  .act:disabled{opacity:.45; cursor:not-allowed}
+  .act.solid{background:var(--primary); color:#fff; border-color:var(--primary)}
+  .act.solid:hover{background:var(--primary-2); color:#fff}
 
-  .hooks{margin-top:18px; display:none}
+  .hooks{margin-top:16px; display:none}
   .hooks.on{display:block}
-  .hooks p{font-size:13px; color:#6B6F7A; margin:0 0 10px}
-  .hook{display:block; width:100%; text-align:start; background:#EDEAE4; border:0;
-        border-inline-start:3px solid transparent; padding:11px 14px; margin-bottom:7px;
-        font-family:"Amiri",serif; font-size:18px; color:var(--graphite); cursor:pointer}
-  .hook:hover{border-inline-start-color:var(--rose); background:#E7E3DC}
+  .hooks p{font-size:12.5px; color:var(--muted); margin:0 0 8px}
+  .hook{display:block; width:100%; text-align:start; background:var(--bg); border:1px solid var(--line); border-radius:9px; padding:10px 14px; margin-bottom:6px; font-family:"Amiri",serif; font-size:18px; color:var(--ink); cursor:pointer}
+  .hook:hover{border-color:var(--primary); background:var(--primary-soft)}
 
-  .card{display:none; margin-top:18px; background:var(--panel); border:1px solid var(--rule);
-        border-radius:10px; padding:18px 20px; gap:20px; align-items:flex-start}
+  /* بطاقة الجودة */
+  .card{display:none; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); padding:18px 20px; gap:20px; align-items:flex-start}
   .card.on{display:flex}
-  .ring{--p:0; width:76px; height:76px; border-radius:50%; flex:none; display:grid; place-items:center;
-        font-size:22px; font-weight:600; color:#fff;
-        background:conic-gradient(var(--c) calc(var(--p)*1%), var(--rule) 0)}
-  .ring::before{content:""; position:absolute; width:60px; height:60px; border-radius:50%; background:var(--panel)}
+  .ring{--p:0; --c:var(--ok); position:relative; width:78px; height:78px; border-radius:50%; flex:none; display:grid; place-items:center; font-size:22px; font-weight:700; color:var(--ink);
+        background:conic-gradient(var(--c) calc(var(--p)*1%), var(--line) 0)}
+  .ring::before{content:""; position:absolute; width:62px; height:62px; border-radius:50%; background:#fff}
   .ring span{position:relative}
-  .ring{position:relative}
-  .ring.good{--c:var(--sage)} .ring.mid{--c:var(--amber)} .ring.low{--c:var(--rose)}
+  .ring.good{--c:var(--ok)} .ring.mid{--c:#DC6803} .ring.low{--c:var(--bad)}
   .card .info{flex:1; min-width:0}
-  .card h3{margin:0 0 8px; font-size:14px; font-weight:400; color:var(--dim)}
+  .card h3{margin:0 0 10px; font-size:13px; font-weight:600; color:var(--muted)}
   .chips{list-style:none; margin:0; padding:0; display:flex; flex-wrap:wrap; gap:6px}
-  .chip{font-size:12px; padding:4px 10px; border-radius:999px; border:1px solid var(--rule); color:#D8DEEE}
-  .chip.ok{border-color:rgba(127,199,194,.5)} .chip.ok::before{content:"✓ "; color:var(--sage)}
-  .chip.bad{border-color:rgba(212,87,124,.6)} .chip.bad::before{content:"✗ "; color:var(--rose)}
-  .chip small{color:var(--dim); margin-inline-start:4px}
-  .cardnote{font-size:12px; color:var(--dim); margin:10px 0 0}
+  .chip{font-size:12px; font-weight:500; padding:4px 10px; border-radius:999px; border:1px solid var(--line); color:var(--ink-2); background:#fff}
+  .chip.ok{background:var(--ok-bg); border-color:var(--ok-line); color:var(--ok)} .chip.ok::before{content:"✓ "}
+  .chip.bad{background:var(--bad-bg); border-color:var(--bad-line); color:var(--bad)} .chip.bad::before{content:"✗ "}
+  .chip small{opacity:.8; margin-inline-start:4px; font-weight:400}
+  .cardnote{font-size:12.5px; color:var(--muted); margin:10px 0 0}
 
-  .seedbox{margin-top:18px; font-size:13px; color:var(--dim)}
-  .seedbox summary{cursor:pointer; color:var(--sage)}
-  .seedbox ul{margin:10px 0 0; padding-inline-start:18px; line-height:1.9}
-  .seedbox h4{margin:12px 0 0; font-size:12px; font-weight:400; color:var(--dim)}
+  .seedbox{font-size:13px; color:var(--ink-2); display:none}
+  .seedbox summary{cursor:pointer; color:var(--primary); font-weight:600; font-size:13.5px}
+  .seedbox ul{margin:8px 0 0; padding-inline-start:18px; line-height:1.9}
+  .seedbox h4{margin:14px 0 0; font-size:12px; font-weight:600; color:var(--muted)}
 
-  .shelf{margin-top:56px; border-top:1px solid var(--rule); padding-top:26px}
-  .shelf .head{display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:16px}
-  .shelf h2{font-family:"Amiri",serif; font-weight:400; font-size:22px; margin:0; flex:1}
-  .shelf input{width:auto; min-width:180px; font-size:13px; padding:8px 10px}
-  .shelf a{color:var(--dim); font-size:13px; text-decoration:none; border:1px solid var(--rule); border-radius:6px; padding:7px 10px}
-  .shelf a:hover{color:var(--sage); border-color:var(--sage)}
-  .saved{border-bottom:1px solid var(--rule); padding:14px 0; display:flex; gap:14px; align-items:flex-start}
-  .saved .txt{flex:1; font-family:"Amiri",serif; font-size:17px; line-height:1.8; color:#D8DEEE;
-              max-height:3.6em; overflow:hidden; cursor:pointer}
-  .saved .side{display:flex; flex-direction:column; align-items:flex-end; gap:4px; font-size:12px; color:var(--dim); white-space:nowrap}
-  .saved .badge{color:var(--sage)}
-  .saved button{background:none; border:0; color:var(--dim); cursor:pointer; font-family:inherit; font-size:13px; padding:0}
-  .saved button:hover{color:#FF9DAF}
-  .empty{color:var(--dim); font-size:14px}
-  kbd{font-family:inherit; font-size:11px; border:1px solid var(--rule); border-radius:4px; padding:1px 5px; color:var(--dim)}
+  /* المحفوظات */
+  .shelf .head{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px}
+  .shelf .head h2{margin:0; flex:1}
+  .shelf input{width:auto; min-width:190px; font-size:13px; padding:7px 10px}
+  .shelf a{color:var(--ink-2); font-size:12.5px; font-weight:500; text-decoration:none; border:1px solid var(--line-2); border-radius:8px; padding:6px 10px; background:#fff}
+  .shelf a:hover{color:var(--primary); border-color:var(--primary)}
+  .saved{border-top:1px solid var(--line); padding:14px 0; display:flex; gap:14px; align-items:flex-start}
+  .saved .txt{flex:1; font-family:"Amiri",serif; font-size:17px; line-height:1.8; color:var(--ink); max-height:3.6em; overflow:hidden; cursor:pointer}
+  .saved .txt:hover{color:var(--primary)}
+  .saved .side{display:flex; flex-direction:column; align-items:flex-end; gap:4px; font-size:12px; color:var(--muted); white-space:nowrap}
+  .saved .badge{color:var(--ok); font-weight:600}
+  .saved button{background:none; border:0; color:var(--muted); cursor:pointer; font-family:inherit; font-size:12.5px; padding:0}
+  .saved button:hover{color:var(--primary)}
+  .empty{color:var(--muted); font-size:13.5px; margin:8px 0 0}
 
-  @media (max-width:560px){ .sheet{padding:36px 22px 26px} .sheet .body{font-size:19px} .tag{inset-inline-start:22px} .steps{font-size:11px} }
+  @media (max-width:640px){
+    .wrap{padding:0 14px 60px}
+    .sheet{padding:20px 18px 18px} .sheet .body{font-size:19px}
+    .steps li{font-size:0} .steps li::before{font-size:11px}   /* أرقام فقط على الشاشات الضيقة */
+    .steps li.active{font-size:12.5px}
+    .grid{grid-template-columns:1fr}
+  }
   @media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
-  :focus-visible{outline:2px solid var(--rose); outline-offset:2px}
+  :focus-visible{outline:2px solid var(--primary); outline-offset:2px}
 </style>
 </head>
 <body>
 <div class="wrap">
 
-  <header>
-    <div class="mark">مِسنّ القصص · الإصدار __VER__</div>
-    <p class="hero" id="hero"><span class="caret"></span></p>
-    <p class="sub">منشورات قصصية مؤلَّفة، بأسلوب من عاشها وكتبها على جواله: سطر أول عادي،
-       كشف في النصف الثاني، ومعضلة في الآخر. المحرّك يولّد خمس حبكات بورقة حقائق ثابتة،
-       يستبعد المتداول، يكتب، يشدّ كل سطر، يدقّق الأرقام والمنطق، ثم يمرّر النص على نحو
-       عشرة فحوصات محلية ويصقل ما رسب منها. عشرون نوع موقف، أربعة أنماط افتتاحية، وثلاثة منظورات للسرد.</p>
+  <header class="top">
+    <div class="brand"><span class="logo"></span>مِسنّ القصص <span class="ver">__VER__</span></div>
+    <div class="pill" id="engine">مجاني بلا مفتاح</div>
   </header>
 
-  <div class="desk">
-    <div class="full">
-      <label for="topic">موضوع أو موقف تريد البناء عليه (اتركه فارغًا ليختار المحرّك)</label>
-      <textarea id="topic" rows="2" placeholder="مثال: شي صار في مكتب محامي، أو سر طلع من كشف حساب"></textarea>
-    </div>
-    <div>
-      <label for="format">الشكل</label>
-      <select id="format" data-keep>
-        <option value="short">قصير · نحو 85 كلمة</option>
-        <option value="medium" selected>متوسط · نحو 140 كلمة</option>
-        <option value="long">طويل · نحو 230 كلمة</option>
-        <option value="thread">خيط مرقّم</option>
-      </select>
-    </div>
-    <div>
-      <label for="dialect">اللهجة</label>
-      <select id="dialect" data-keep>
-        <option value="saudi" selected>سعودية بيضاء</option>
-        <option value="gulf">خليجية</option>
-        <option value="egy">مصرية</option>
-        <option value="sham">شامية</option>
-        <option value="fusha">فصحى مبسّطة</option>
-      </select>
-    </div>
-    <div>
-      <label for="core">نوع الموقف</label>
-      <select id="core" data-keep></select>
-    </div>
-    <div>
-      <label for="drama">حجم الحدث</label>
-      <select id="drama" data-keep>
-        <option value="small">عادي جدًا · أقرب للتصديق</option>
-        <option value="mid" selected>متوسط</option>
-        <option value="big">قوي · مع بقائه معقولًا</option>
-      </select>
-    </div>
-    <div>
-      <label for="pov">المنشور</label>
-      <select id="pov" data-keep>
-        <option value="self" selected>شخصي · بضمير المتكلم</option>
-        <option value="third">عام · عن شخص آخر</option>
-        <option value="heard">منقول · سمعتها من أحدهم</option>
-      </select>
-    </div>
-    <div>
-      <label for="provider">المحرّك</label>
-      <select id="provider" data-keep>
-        <option value="free" selected>مجاني بلا مفتاح</option>
-        <option value="openai">مزوّد خاص</option>
-      </select>
-    </div>
-    <div>
-      <label for="mode">الوضع</label>
-      <select id="mode" data-keep>
-        <option value="full" selected>متأنٍ · مع تدقيق منطقي</option>
-        <option value="fast">سريع · بلا تدقيق، طلب أقل</option>
-      </select>
-    </div>
-    <div class="full" id="creds" style="display:none">
-      <label for="base">عنوان المزوّد ومفتاحه واسم النموذج</label>
-      <input id="base" placeholder="https://api.openai.com/v1" data-keep>
-      <input id="key" type="password" placeholder="sk-…" style="margin-top:8px" autocomplete="off">
-      <input id="model" placeholder="gpt-4o-mini" style="margin-top:8px" data-keep>
-      <label class="check"><input type="checkbox" id="rememberkey"> تذكّر المفتاح في هذا المتصفح</label>
-      <label for="think" style="margin-top:12px">قدر تفكير النموذج — للنماذج المفكّرة مثل Gemini؛ يُهمل تلقائيًا إن لم يعرفه المزوّد</label>
-      <select id="think" data-keep>
-        <option value="">افتراضي الخادم</option>
-        <option value="none">بلا تفكير · الأسرع</option>
-        <option value="minimal">أدنى</option>
-        <option value="low">قليل · موصى به</option>
-        <option value="medium">متوسط</option>
-        <option value="high">عالٍ · الأبطأ</option>
-      </select>
-    </div>
+  <div class="layout">
+
+    <aside class="side">
+      <section class="panel">
+        <h2>الإعدادات</h2>
+        <div class="grid">
+          <div class="full">
+            <label for="topic">موضوع أو موقف (اختياري — اتركه فارغًا ليختار المحرّك)</label>
+            <textarea id="topic" rows="2" placeholder="مثال: شي صار في مكتب محامي، أو سر طلع من كشف حساب"></textarea>
+          </div>
+          <div>
+            <label for="format">الشكل</label>
+            <select id="format" data-keep>
+              <option value="short">قصير · 85 كلمة</option>
+              <option value="medium" selected>متوسط · 140 كلمة</option>
+              <option value="long">طويل · 230 كلمة</option>
+              <option value="thread">خيط مرقّم</option>
+            </select>
+          </div>
+          <div>
+            <label for="dialect">اللهجة</label>
+            <select id="dialect" data-keep>
+              <option value="saudi" selected>سعودية بيضاء</option>
+              <option value="gulf">خليجية</option>
+              <option value="egy">مصرية</option>
+              <option value="sham">شامية</option>
+              <option value="fusha">فصحى مبسّطة</option>
+            </select>
+          </div>
+          <div>
+            <label for="core">نوع الموقف</label>
+            <select id="core" data-keep></select>
+          </div>
+          <div>
+            <label for="drama">حجم الحدث</label>
+            <select id="drama" data-keep>
+              <option value="small">عادي جدًا</option>
+              <option value="mid" selected>متوسط</option>
+              <option value="big">قوي ومعقول</option>
+            </select>
+          </div>
+          <div>
+            <label for="pov">المنشور</label>
+            <select id="pov" data-keep>
+              <option value="self" selected>شخصي · بضمير المتكلم</option>
+              <option value="third">عام · بضمير الغائب</option>
+              <option value="heard">منقول · سمعتها</option>
+            </select>
+          </div>
+          <div>
+            <label for="mode">الوضع</label>
+            <select id="mode" data-keep>
+              <option value="full" selected>متأنٍ · مع تدقيق</option>
+              <option value="fast">سريع · بلا تدقيق</option>
+            </select>
+          </div>
+          <div class="full">
+            <label for="provider">المحرّك</label>
+            <select id="provider" data-keep>
+              <option value="free" selected>مجاني بلا مفتاح</option>
+              <option value="openai">مزوّد خاص (OpenAI / Gemini / متوافق)</option>
+            </select>
+          </div>
+          <div class="full" id="creds" style="display:none">
+            <label for="base">عنوان المزوّد</label>
+            <input id="base" placeholder="https://api.openai.com/v1" data-keep>
+            <label for="key">المفتاح</label>
+            <input id="key" type="password" placeholder="sk-…" autocomplete="off">
+            <label for="model">اسم النموذج</label>
+            <input id="model" placeholder="gpt-4o-mini" data-keep>
+            <label class="check"><input type="checkbox" id="rememberkey"> تذكّر المفتاح في هذا المتصفح</label>
+            <label for="think">قدر تفكير النموذج</label>
+            <select id="think" data-keep>
+              <option value="">افتراضي الخادم</option>
+              <option value="none">بلا تفكير · الأسرع</option>
+              <option value="minimal">أدنى</option>
+              <option value="low">قليل · موصى به</option>
+              <option value="medium">متوسط</option>
+              <option value="high">عالٍ · الأبطأ</option>
+            </select>
+            <p class="hint">للنماذج المفكّرة مثل Gemini. يُهمل تلقائيًا إن لم يعرفه المزوّد.</p>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button class="btn primary" id="run">اكتب قصة</button>
+          <div class="row">
+            <button class="btn secondary" id="again" disabled title="نفس البذرة، حبكة ونص جديدان">أعد بنفس البذرة</button>
+            <button class="btn danger" id="cancel" style="display:none">إلغاء</button>
+          </div>
+          <p class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> للكتابة · <kbd>Esc</kbd> للإلغاء</p>
+        </div>
+      </section>
+
+      <details class="panel seedpanel" id="seedpanel">
+        <summary>البذرة — اتركها عشوائية أو ثبّت ما تريد</summary>
+        <div class="grid">
+          <div><label for="seed_who">الطرف الآخر</label><select id="seed_who"></select></div>
+          <div><label for="seed_secret">السر</label><select id="seed_secret"></select></div>
+          <div><label for="seed_device">أداة الكشف</label><select id="seed_device"></select></div>
+          <div><label for="seed_place">مكان الكشف</label><select id="seed_place"></select></div>
+          <div><label for="seed_cost">الثمن</label><select id="seed_cost"></select></div>
+          <div><label for="seed_dilemma">النهاية</label><select id="seed_dilemma"></select></div>
+          <div class="full"><label for="seed_open">نمط السطر الأول</label><select id="seed_open"></select></div>
+        </div>
+        <p class="hint">ما تثبّته هنا يبقى كما هو في كل القصص القادمة؛ الباقي يتبدّل عشوائيًا ويتجنّب التركيبات المحفوظة.</p>
+      </details>
+    </aside>
+
+    <section class="main">
+      <div class="hero-card">
+        <p class="hero" id="hero"><span class="caret"></span></p>
+        <p class="sub">منشورات قصصية مؤلَّفة بأسلوب من عاشها وكتبها على جواله: سطر أول عادي، كشف في النصف
+           الثاني، ومعضلة في الآخر. المحرّك يولّد خمس حبكات بورقة حقائق ثابتة، يستبعد المتداول، يكتب،
+           يشدّ كل سطر، يدقّق الأرقام والمنطق، ثم يمرّر النص على نحو عشرة فحوصات محلية ويصقل ما رسب.</p>
+      </div>
+
+      <div class="progress">
+        <ol class="steps" id="steps" aria-hidden="true">
+          <li data-s="premise" data-n="1">حبكة</li>
+          <li data-s="draft" data-n="2">مسودة</li>
+          <li data-s="edit" data-n="3">تحرير</li>
+          <li data-s="audit" data-n="4">تدقيق</li>
+          <li data-s="polish" data-n="5" class="hidden">صقل</li>
+        </ol>
+        <p class="state" aria-live="polite"><span id="state">جاهز.</span><span id="elapsed" class="elapsed"></span></p>
+      </div>
+
+      <article class="sheet" id="sheet">
+        <div class="tag" id="tag"></div>
+        <div class="body" id="story"></div>
+        <div class="hooks" id="hooks">
+          <p>اختر افتتاحية بديلة لتحلّ محل السطر الأول</p>
+          <div id="hooklist"></div>
+        </div>
+        <div class="foot">
+          <span id="meta" class="grow"></span>
+          <button class="act" id="rehook">بدائل للافتتاحية</button>
+          <button class="act" id="save">احفظ</button>
+          <button class="act solid" id="copy">انسخ النص</button>
+        </div>
+      </article>
+
+      <section class="card" id="card">
+        <div class="ring" id="ring"><span id="ringval">0</span></div>
+        <div class="info">
+          <h3>بطاقة الجودة — فحوصات محلية لا تعتمد على النموذج</h3>
+          <ul class="chips" id="chips"></ul>
+          <p class="cardnote" id="cardnote"></p>
+        </div>
+      </section>
+
+      <details class="panel seedbox" id="seedbox">
+        <summary>بذرة هذه القصة، وورقة الحقائق، وما أصلحه المدقّق</summary>
+        <h4>البذرة</h4><ul id="seedlist"></ul>
+        <h4>ورقة الحقائق</h4><ul id="factlist"></ul>
+        <h4>المدقّق</h4><ul id="auditbox"></ul>
+      </details>
+
+      <section class="panel shelf">
+        <div class="head">
+          <h2>المحفوظات</h2>
+          <input id="search" placeholder="ابحث في المحفوظات">
+          <a href="/library/export?fmt=md" download>تصدير Markdown</a>
+          <a href="/library/export?fmt=txt" download>تصدير نصي</a>
+        </div>
+        <div id="shelf"><p class="empty">لا شيء محفوظ بعد.</p></div>
+      </section>
+    </section>
+
   </div>
-
-  <details class="seedpanel" id="seedpanel">
-    <summary>البذرة — اتركها عشوائية أو ثبّت ما تريد</summary>
-    <div class="grid">
-      <div><label for="seed_who">الطرف الآخر</label><select id="seed_who"></select></div>
-      <div><label for="seed_secret">السر</label><select id="seed_secret"></select></div>
-      <div><label for="seed_device">أداة الكشف</label><select id="seed_device"></select></div>
-      <div><label for="seed_place">مكان الكشف</label><select id="seed_place"></select></div>
-      <div><label for="seed_cost">الثمن</label><select id="seed_cost"></select></div>
-      <div><label for="seed_dilemma">النهاية</label><select id="seed_dilemma"></select></div>
-      <div><label for="seed_open">نمط السطر الأول</label><select id="seed_open"></select></div>
-    </div>
-  </details>
-
-  <div class="actions">
-    <button class="run" id="run">اكتب قصة</button>
-    <button class="ghost" id="again" disabled title="نفس البذرة، حبكة ونص جديدان">أعد بنفس البذرة</button>
-    <button class="ghost danger" id="cancel" style="display:none">إلغاء</button>
-  </div>
-  <ol class="steps" id="steps" aria-hidden="true">
-    <li data-s="premise">حبكة</li>
-    <li data-s="draft">مسودة</li>
-    <li data-s="edit">تحرير</li>
-    <li data-s="audit">تدقيق</li>
-    <li data-s="polish" class="hidden">صقل</li>
-  </ol>
-  <p class="state" aria-live="polite"><span id="state"></span><span id="elapsed" class="elapsed"></span></p>
-
-  <article class="sheet" id="sheet">
-    <div class="tag" id="tag"></div>
-    <div class="body" id="story"></div>
-    <div class="hooks" id="hooks">
-      <p>اختر افتتاحية بديلة لتحلّ محل السطر الأول</p>
-      <div id="hooklist"></div>
-    </div>
-    <div class="foot">
-      <span id="meta" class="grow"></span>
-      <button class="act" id="rehook">بدائل للافتتاحية</button>
-      <button class="act" id="save">احفظ</button>
-      <button class="act solid" id="copy">انسخ النص</button>
-    </div>
-  </article>
-
-  <section class="card" id="card">
-    <div class="ring" id="ring"><span id="ringval">0</span></div>
-    <div class="info">
-      <h3>بطاقة الجودة — فحوصات محلية لا تعتمد على النموذج</h3>
-      <ul class="chips" id="chips"></ul>
-      <p class="cardnote" id="cardnote"></p>
-    </div>
-  </section>
-
-  <details class="seedbox" id="seedbox" style="display:none">
-    <summary>بذرة هذه القصة، وورقة الحقائق، وما أصلحه المدقّق</summary>
-    <h4>البذرة</h4><ul id="seedlist"></ul>
-    <h4>ورقة الحقائق</h4><ul id="factlist"></ul>
-    <h4>المدقّق</h4><ul id="auditbox"></ul>
-  </details>
-
-  <section class="shelf">
-    <div class="head">
-      <h2>المحفوظات</h2>
-      <input id="search" placeholder="ابحث في المحفوظات">
-      <a href="/library/export?fmt=md" download>تصدير Markdown</a>
-      <a href="/library/export?fmt=txt" download>تصدير نصي</a>
-    </div>
-    <div id="shelf"><p class="empty">لا شيء محفوظ بعد.</p></div>
-  </section>
-
 </div>
 
 <script>
@@ -1750,8 +1805,11 @@ document.addEventListener('change', e => {
 });
 
 $('provider').onchange = () => {
-  $('creds').style.display = $('provider').value === 'openai' ? '' : 'none';
+  const priv = $('provider').value === 'openai';
+  $('creds').style.display = priv ? '' : 'none';
+  $('engine').textContent = priv ? ('مزوّد خاص' + ($('model').value ? ' · ' + $('model').value : '')) : 'مجاني بلا مفتاح';
 };
+$('model').oninput = () => $('provider').onchange();
 
 const creds = () => ({
   provider: $('provider').value,
@@ -1811,6 +1869,7 @@ async function run(seed) {
   document.querySelectorAll('#steps li').forEach(li => { li.classList.remove('done','active'); if (li.dataset.s === 'polish') li.classList.add('hidden'); });
   steps('seed');
   state(STAGE.seed);
+  if (window.innerWidth < 980) $('sheet').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   let job;
   try {
@@ -1835,10 +1894,8 @@ async function run(seed) {
 /* بثّ حي عبر EventSource، وإن تعذّر نرجع للاستطلاع */
 function follow(job) {
   if (!window.EventSource) return pollJob(job);
-  let got = false;
   es = new EventSource('/write/' + job + '/stream');
   es.onmessage = e => {
-    got = true;
     let m; try { m = JSON.parse(e.data); } catch (err) { return; }
     apply(m);
     if (m.final) { es.close(); es = null; }
@@ -1889,7 +1946,7 @@ function apply(m) {
     $('meta').textContent = j.words + ' كلمة · ' + (j.numbers || 0) + ' رقم محدد · جودة ' + (j.score || 0) + '٪';
     renderCard(j);
     showSeed(j.dna || current.dna, j.facts || [], j.issues || []);
-    finish('');
+    finish('اكتملت.');
   }
   if (j.stage === 'error' && !finished) { finished = true; finish(j.error, true); }
   if (j.stage === 'cancelled' && !finished) { finished = true; $('tag').textContent = 'أُلغي'; $('tag').classList.remove('live'); finish(STAGE.cancelled); }
@@ -1931,7 +1988,7 @@ function list(el, items, empty) {
 }
 
 function showSeed(dna, facts, issues) {
-  $('seedbox').style.display = '';
+  $('seedbox').style.display = 'block';
   list($('seedlist'), Object.keys(dna || {}).filter(k => k !== 'locked').map(k => {
     let v = dna[k];
     if (k === 'open') { const o = $('seed_open').querySelector('option[value="' + v + '"]'); v = o ? o.textContent : v; }
@@ -2038,7 +2095,7 @@ function drawShelf() {
       $('card').classList.remove('on');
       $('sheet').classList.add('on');
       if (it.dna) showSeed(it.dna, it.facts || [], []);
-      window.scrollTo({ top: $('sheet').offsetTop - 40, behavior: 'smooth' });
+      window.scrollTo({ top: $('sheet').offsetTop - 20, behavior: 'smooth' });
     };
     cp.onclick = async () => {
       try { await navigator.clipboard.writeText(it.text); cp.textContent = 'نُسخ'; setTimeout(() => cp.textContent = 'انسخ', 1400); } catch (e) {}
