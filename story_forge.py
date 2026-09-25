@@ -47,7 +47,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "4.5"
+VERSION = "4.6"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -935,6 +935,32 @@ VIRAL = (
     "- لا سطر أطول من ١٤ كلمة. المتوسط بين ٧ و٩ كلمات."
 )
 
+# حرارة الخطاف: كم نبالغ في السطر الأول والطُعم. المبالغة البلاغية مسموحة ويصحّحها الجزء الثاني؛
+# المخترع (رقم، دراسة، واقعة) ممنوع في كل الدرجات.
+HEAT = {
+    "warm": ("عادي", "السطر الأول والطُعم بلا مبالغة: واقعة محددة جافة تكفي وحدها."),
+    "hot": ("حار",
+            "السطر الأول والطُعم يجب أن يصدما: استعمل اثنين على الأقل من هذه الأدوات: إطلاق "
+            "(الأخطر، الوحيد، أكبر، كل بيت)، اتهام مباشر للقارئ بصيغة «أنت»، مقارنة قاسية، "
+            "رقم، أو قلب لما يعتقده الجميع. المبالغة البلاغية مسموحة بشرط أن يصحّحها النص "
+            "بعد الكشف أو في الجزء الثاني بجملة صريحة مثل «مبالغة؟ شوي. لكن..» ثم الحقيقة "
+            "الدقيقة. الممنوع الوحيد: رقم أو دراسة أو واقعة مخترعة تُقدَّم كحقيقة."),
+    "blazing": ("ناري",
+                "السطر الأول والطُعم يضربان القارئ في وجهه: اتهام مباشر بصيغة «أنت» أو «بيتك» "
+                "أو «أبوك»، تهويل أقصى (يدمّر، يقتل، آخر مرة، ما راح)، إطلاق مطلق، وقلب صريح "
+                "لما يعتقده الجميع، كلها معًا إن أمكن. النبرة وقحة وواثقة بلا أي تحفظ في "
+                "الجزء الأول. ثم في الجزء الثاني تصحيح صريح للمبالغة بجملة مثل «قلت يقتل؟ "
+                "مبالغة. اللي يصير فعلًا..» ثم الحقيقة الدقيقة، بحيث يشعر القارئ أنه صُدم ثم "
+                "احتُرم. الممنوع الوحيد: رقم أو دراسة أو واقعة مخترعة تُقدَّم كحقيقة، أو إساءة "
+                "لشخص أو فئة."),
+}
+
+
+def heat_block(heat):
+    label, rules = HEAT.get(heat, HEAT["hot"])
+    return f"حرارة الخطاف ({label}): {rules}"
+
+
 # مستخلص من منشورات حقيقية حققت مشاهدات عالية — هذا هو الأسلوب المستهدف
 STYLE = (
     "أسلوب المنشورات التي تنتشر فعلًا، التزم به:\n"
@@ -1044,7 +1070,7 @@ def premise_text(idea):
     return "\n".join(parts)
 
 
-def write_prompt(dna, idea, fmt, dialect, core, pov, drama):
+def write_prompt(dna, idea, fmt, dialect, core, pov, drama, heat="hot"):
     label, low, high = FORMATS.get(fmt, FORMATS["medium"])
     core_label, core_desc, _, ending = CORES.get(core, CORES["betrayal"])
     dlabel, ddesc = DRAMA.get(drama, DRAMA["mid"])
@@ -1072,6 +1098,8 @@ def write_prompt(dna, idea, fmt, dialect, core, pov, drama):
         "",
         STYLE,
         "",
+        heat_block(heat),
+        "",
         VIRAL,
         "",
         beats(pov, ending, dna.get("open", "scene")),
@@ -1083,7 +1111,7 @@ def write_prompt(dna, idea, fmt, dialect, core, pov, drama):
     ])
 
 
-def edit_prompt(fmt, pov, ending, facts, dialect="saudi"):
+def edit_prompt(fmt, pov, ending, facts, dialect="saudi", heat="hot"):
     label, low, high = FORMATS.get(fmt, FORMATS["medium"])
     closing = ("آخر سطر: سؤال يسأله لنفسه بخيارين محددين متناقضين بصيغة «أسوي كذا "
                "ولا كذا؟» وعلامة استفهام. لا مخاطبة للقارئ ولا دعوة تعليق."
@@ -1091,8 +1119,8 @@ def edit_prompt(fmt, pov, ending, facts, dialect="saudi"):
                "آخر سطرين: لحظة أو قرار صغير أو صورة تغيّر معنى ما سبق. لا معضلة "
                "ولا عبرة ولا سؤال للقارئ.")
     steps = [
-        "السطر الأول: فعل له ثمن أو اكتشاف، بصيغة خبرية جافة، بلا تشويق جاهز وبلا "
-        "سؤال. إن كان مجرد وصف جو أو مشاعر، بدّله بفعل.",
+        "السطر الأول: فعل له ثمن أو اكتشاف، بصيغة خبرية، بلا تشويق جاهز وبلا سؤال. "
+        "إن كان مجرد وصف جو أو مشاعر، بدّله بفعل. " + heat_block(heat),
         "الدليل يُقتبس بحرفه في سطر مستقل خلال أول ثلث النص: نص الرسالة أو التقرير "
         "أو النتيجة. إن كان الدليل مرويًا بلا اقتباس، حوّله إلى اقتباس.",
         "الكشف يأتي مع دافع الطرف الآخر في جملة واحدة. إن لم يكن الدافع مكتوبًا، أضفه.",
@@ -1142,7 +1170,8 @@ def audit_prompt(facts, ending="dilemma", core="betrayal"):
         "2. المنطق: هل يوجد تصرّف لا يفعله عاقل في هذا الموقف؟\n"
         "3. الإخفاء: هل يُفهم لماذا بقي الأمر مخفيًا، ولماذا انكشف الآن؟\n"
         "4. المصادفة: هل تعتمد القصة على صدفة كبيرة يصعب تصديقها؟\n"
-        "5. المبالغة: الحدث الكبير (موت، ورث، طلاق، اختلاس) مقبول ما دام مثبتًا "
+        "5. المبالغة: السطر الأول والطُعم مسموح فيهما تهويل بلاغي مقصود؛ لا تطفئهما، "
+        "فقط تأكد أن النص يصحّح المبالغة لاحقًا. الحدث الكبير (موت، ورث، طلاق، اختلاس) مقبول ما دام مثبتًا "
         "بورقة أو رسالة أو نتيجة مكتوبة. ما يُرفض هو المصادفة والاعتراف التلقائي "
         "وشخص يعرف ما لا يمكن أن يعرفه.\n"
         "6. الزمن: هل تسلسل الأحداث ممكن؟ (لا يعمل أحد وظيفتين قبل أن يتخرج مثلًا).\n"
@@ -1239,7 +1268,8 @@ INFO_THREAD_RULES = (
     "بالضبط اللي بيخليه بعد 10 سنين..». الصدمة تجي من رقم (بعد 10 سنين، 3 من كل 4)، أو "
     "كلمة قوية (يدمّر، يخسر، أخطر، يفقد)، أو قلب ما يعتقده الجميع. ثم سطر وحيد فيه «---». "
     "أول سطر في الجزء الثاني يكمل الجملة نفسها من حيث انقطعت: «..ينهار أول ما يواجه مشكلة "
-    "بدون شاشة.» ثم فك سوء الفهم بأي معنى هذا صحيح، ثم الآلية والنقاط. شرط الطُعم: صحيح "
+    "بدون شاشة.» ثم سطر يصحّح المبالغة صراحة إن وُجدت («مبالغة؟ شوي. لكن..») ثم الحقيقة "
+    "الدقيقة، ثم الآلية والنقاط. شرط الطُعم: صحيح "
     "بمعنى محدد يتضح بعده، لا كذبة ولا معلومة تضر لو قُرئت وحدها. الأجزاء التالية لا "
     f"يتجاوز الواحد {THREAD_MAX} حرفًا."
 )
@@ -1631,7 +1661,7 @@ def info_beats(fmt, kind="info"):
     )
 
 
-def info_write_prompt(spec, idea, fmt, dialect):
+def info_write_prompt(spec, idea, fmt, dialect, heat="hot"):
     cfg = topic_cfg(spec.get("kind"))
     label, low, high = FORMATS.get(fmt, FORMATS["short"])
     return "\n".join([
@@ -1649,6 +1679,8 @@ def info_write_prompt(spec, idea, fmt, dialect):
         "",
         cfg["style"],
         "",
+        heat_block(heat),
+        "",
         info_beats(fmt, spec.get("kind", "info")),
         "",
         "ممنوع استعمال هذه العبارات أو ما يشبهها:",
@@ -1658,11 +1690,11 @@ def info_write_prompt(spec, idea, fmt, dialect):
     ])
 
 
-def info_edit_prompt(fmt, facts, dialect, kind="info"):
+def info_edit_prompt(fmt, facts, dialect, kind="info", heat="hot"):
     cfg = topic_cfg(kind)
     label, low, high = FORMATS.get(fmt, FORMATS["short"])
     steps = [
-        f"السطر الأول: {cfg['hook']}. إن كان عامًا أو مقدمة، بدّله.",
+        f"السطر الأول: {cfg['hook']}. إن كان عامًا أو مقدمة، بدّله. " + heat_block(heat),
         "احذف كل سطر لا يضيف معلومة أو مثالًا أو خطوة. لا كلمة زائدة.",
         f"الطول النهائي بين {low} و{high} كلمة؛ إن قصر فأضف نقطة أو مثالًا، لا حشوًا.",
         "الأمانة: احذف أي رقم أو دراسة أو اسم ليس في ورقة الحقائق. حوّل أي ادعاء طبي "
@@ -1693,8 +1725,9 @@ def info_audit_prompt(facts, spec):
         "افحص بالترتيب:\n"
         "1. الأرقام والدراسات: أي رقم أو نسبة أو دراسة أو اسم ليس في ورقة الحقائق ولا "
         "يُعد معرفة عامة مؤكدة → احذفه أو حوّله إلى صياغة بلا رقم.\n"
-        "2. الادعاءات الجازمة: «يسبب»، «يشفي»، «يمنع»، «دائمًا»، «كل» → صياغة حذرة "
-        "(«يرتبط»، «غالبًا»، «عند كثيرين») أو حذف.\n"
+        "2. الادعاءات الجازمة في جسم النص: «يسبب»، «يشفي»، «يمنع»، «دائمًا»، «كل» → صياغة حذرة "
+        "(«يرتبط»، «غالبًا»، «عند كثيرين») أو حذف. أما السطر الأول والطُعم قبل «---» فالتهويل "
+        "البلاغي فيهما مقصود: لا تطفئه، وتأكد فقط أن النص يصحّحه بعد ذلك صراحة.\n"
         "3. الصحة: لا تشخيص ولا جرعات ولا وعود؛ الأمور الخطيرة تُحال إلى مختص بجملة واحدة.\n"
         "4. التعميم الجارح على فئة → أعد الصياغة لتكون عن عادة أو ظرف.\n"
         "5. التناقض الداخلي بين السطور.\n"
@@ -2041,7 +2074,8 @@ def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha",
             + (" آخر سطر قبل «---» يبقى الطُعم." if info else
                " ولا تحرّك موضع القطع عن أول كلمة أو كلمتين من الجملة المفصلية."))
         last_line = head.split("\n")[-1] if head else ""
-        cliff = "---" in lines and first <= THREAD_MAX and not re.search(r"[؟?]\s*$", last_line)
+        cliff = ("---" in lines and first <= THREAD_MAX and not re.search(r"[؟?]\s*$", last_line)
+                 and bool(SHOCK_RE.search(last_line) or SHOCK_RE.search(head)))
         if info:
             cliff = (cliff and bool(re.search(r"(?:\.\.|…)\s*$", last_line))
                      and word_count(last_line) >= 5 and bool(SHOCK_RE.search(last_line))
@@ -2083,7 +2117,7 @@ def plan_creds(creds):
     return dict(creds, model=model) if model else creds
 
 
-def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode="full"):
+def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode="full", heat="hot"):
     seen_plots = recent_plots()
     prev_openings = recent_openings()
     blocked = TIRED_PLOTS + seen_plots
@@ -2114,7 +2148,7 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
     job["stage"] = "draft"
     job["text"] = ""
     draft = clean(chat(
-        [system, {"role": "user", "content": write_prompt(dna, idea, fmt, dialect, core, pov, drama)}],
+        [system, {"role": "user", "content": write_prompt(dna, idea, fmt, dialect, core, pov, drama, heat)}],
         provider, creds, on_token=token, timeout=200))
     _guard(job)
 
@@ -2122,7 +2156,7 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
     job["stage"] = "edit"
     job["text"] = ""
     final = clean(chat(
-        [system, {"role": "user", "content": edit_prompt(fmt, pov, ending, facts, dialect)
+        [system, {"role": "user", "content": edit_prompt(fmt, pov, ending, facts, dialect, heat)
                   + "\n\nالمسودة:\n" + draft}],
         provider, creds, on_token=token, temperature=0.75, timeout=200))
     _guard(job)
@@ -2199,7 +2233,7 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
     job["stage"] = "done"
 
 
-def write_info(job, spec, fmt, dialect, provider, creds, mode="full"):
+def write_info(job, spec, fmt, dialect, provider, creds, mode="full", heat="hot"):
     """خط إنتاج منشورات المعلومات — منفصل عن القصص ومكتبتها."""
     kind = spec.get("kind") if spec.get("kind") in TOPIC_KINDS else "info"
     seen = recent_plots(kind=kind)
@@ -2228,14 +2262,14 @@ def write_info(job, spec, fmt, dialect, provider, creds, mode="full"):
     job["stage"] = "draft"
     job["text"] = ""
     draft = clean(chat(
-        [system, {"role": "user", "content": info_write_prompt(spec, idea, fmt, dialect)}],
+        [system, {"role": "user", "content": info_write_prompt(spec, idea, fmt, dialect, heat)}],
         provider, creds, on_token=token, temperature=0.9, timeout=200))
     _guard(job)
 
     job["stage"] = "edit"
     job["text"] = ""
     final = clean(chat(
-        [system, {"role": "user", "content": info_edit_prompt(fmt, facts, dialect, kind) + "\n\nالمسودة:\n" + draft}],
+        [system, {"role": "user", "content": info_edit_prompt(fmt, facts, dialect, kind, heat) + "\n\nالمسودة:\n" + draft}],
         provider, creds, on_token=token, temperature=0.6, timeout=200))
     _guard(job)
 
@@ -2293,11 +2327,12 @@ def write_info(job, spec, fmt, dialect, provider, creds, mode="full"):
 
 def _worker(job_id, dna, fmt, dialect, core, pov, drama, provider, creds, mode):
     job = JOBS[job_id]
+    heat = job.get("heat", "hot")
     try:
         if job.get("kind") in TOPIC_KINDS:
-            write_info(job, dna, fmt, dialect, provider, creds, mode)
+            write_info(job, dna, fmt, dialect, provider, creds, mode, heat)
         else:
-            write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode)
+            write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode, heat)
     except Cancelled:
         job["stage"] = "cancelled"
     except Exception as exc:
@@ -2368,6 +2403,7 @@ def write():
         return jsonify(error="أدخل عنوان المزوّد ومفتاحه، أو اختر المحرّك المجاني."), 400
 
     mode = "fast" if data.get("mode") == "fast" else "full"
+    heat = data.get("heat") if data.get("heat") in HEAT else "hot"
     seed = data.get("seed") if isinstance(data.get("seed"), dict) else None
     kind = data.get("kind") if data.get("kind") in TOPIC_KINDS else "story"
     if kind != "story":
@@ -2384,7 +2420,7 @@ def write():
                         "words": 0, "cliches": [], "premise": "", "issues": [],
                         "facts": [], "checks": [], "score": 0, "format": fmt,
                         "core": core, "pov": pov, "dialect": dialect, "mode": mode,
-                        "kind": kind, "at": time.time()}
+                        "kind": kind, "heat": heat, "at": time.time()}
 
     threading.Thread(target=_worker,
                      args=(job_id, dna, fmt, dialect, core, pov, drama, provider, creds, mode),
@@ -2767,6 +2803,12 @@ PAGE = r"""<!doctype html>
           <option value="mid">متوسط</option>
           <option value="big" selected>قوي ومثبت</option>
         </select></div>
+      <div class="f"><label for="heat">حرارة الخطاف</label>
+        <select id="heat" data-keep>
+          <option value="warm">عادي</option>
+          <option value="hot" selected>حار · مبالغة تُصحَّح</option>
+          <option value="blazing">ناري · صدمة قصوى</option>
+        </select></div>
       <div class="f"><label for="mode">الوضع</label>
         <select id="mode" data-keep>
           <option value="full" selected>متأنٍ · مع تدقيق</option>
@@ -3082,7 +3124,7 @@ async function run(seed) {
       body: JSON.stringify({
         topic: $('topic').value.trim(), format: $('format').value, kind: $('kind').value,
         domain: $('domain').value, angle: $('angle').value,
-        dialect: $('dialect').value, core: $('core').value, mode: $('mode').value,
+        dialect: $('dialect').value, core: $('core').value, mode: $('mode').value, heat: $('heat').value,
         pov: $('pov').value, drama: $('drama').value, seed, ...creds()
       })
     });

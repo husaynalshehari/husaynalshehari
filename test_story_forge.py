@@ -235,7 +235,7 @@ class Helpers(unittest.TestCase):
         self.assertEqual(sf.split_thread(""), [])
 
     def test_thread_checks_parts_and_cliff(self):
-        good = "وقعت ورقة فصل الأجهزة عن أبوي.\n\nلقيت التقرير بخط يده: المريض يتجاوب.\n\nيحتاج..\n\n---\n\n48 ساعة ويفيق.\n\nكذب علي عشان الورث قبل 6 شهور.\n\nهو الحين جالس يضحك..\n\nأوديه للشرطة ولا آخذ حقي بيدي؟"
+        good = "وقعت ورقة فصل الأجهزة عن أبوي.\n\nبعد 6 شهور لقيت التقرير بخط يده: المريض يتجاوب.\n\nيحتاج..\n\n---\n\n48 ساعة ويفيق.\n\nكذب علي عشان الورث قبل 6 شهور.\n\nهو الحين جالس يضحك..\n\nأوديه للشرطة ولا آخذ حقي بيدي؟"
         ids = {c["id"]: c for c in sf.run_checks(good, "thread", "self", "dilemma", [])}
         self.assertTrue(ids["thread"]["ok"], ids["thread"])
         self.assertTrue(ids["cliff"]["ok"])
@@ -639,6 +639,23 @@ class Info(unittest.TestCase):
         r = c.post("/write", json={"kind": "fire", "domain": "divorce", "angle": "scene", "mode": "fast"})
         self.assertEqual(r.get_json()["dna"]["kind"], "fire")
         self.assertIn("fire", c.get("/config").get_json()["topics"])
+
+    def test_heat_levels_reach_prompts_and_route(self):
+        dna = sf.fresh_dna("", "betrayal")
+        idea = {"hook": "", "hidden": "x", "why_hidden": "", "why_now": "", "evidence": "", "motive": "", "facts": []}
+        for heat, word in (("warm", "بلا مبالغة"), ("hot", "مبالغة؟ شوي"), ("blazing", "قلت يقتل؟")):
+            self.assertIn(word, sf.write_prompt(dna, idea, "short", "saudi", "betrayal", "self", "big", heat))
+            self.assertIn(word, sf.edit_prompt("short", "self", "dilemma", [], "saudi", heat))
+            spec = sf.fresh_info("kids", "why")
+            self.assertIn(word, sf.info_write_prompt(spec, {"hook": "", "claim": "x", "why": "", "points": [],
+                                                            "example": "", "facts": [], "bait": "", "resolve": ""}, "short", "saudi", heat))
+        self.assertIn("مخترعة", sf.heat_block("blazing"))
+        self.assertIn("لا تطفئ", sf.audit_prompt([], "dilemma", "betrayal"))
+        c = sf.app.test_client(); sf.JOBS.clear(); sf.chat = FakeProvider()
+        r = c.post("/write", json={"kind": "story", "heat": "blazing", "mode": "fast"})
+        self.assertEqual(sf.JOBS[r.get_json()["job"]]["heat"], "blazing")
+        r = c.post("/write", json={"kind": "story", "heat": "bogus", "mode": "fast"})
+        self.assertEqual(sf.JOBS[r.get_json()["job"]]["heat"], "hot")
 
     def test_library_keeps_kinds_apart(self):
         sf.lib_write([{"id": "s", "text": STORY, "plot": "قرض", "dna": {"who": "أمي", "secret": "س", "device": "د"}},
