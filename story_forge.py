@@ -47,7 +47,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "3.9"
+VERSION = "4.0"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -1219,6 +1219,17 @@ INFO_FRAMES = [
 ]
 INFO_KEYS = ("domain", "angle", "frame")
 
+INFO_THREAD_RULES = (
+    "شكل الثريد المعلوماتي: اكتب سطورًا كالعادة بلا ترقيم أجزاء. الجزء الأول (بين "
+    f"{THREAD_FIRST_MIN} و{THREAD_MAX} حرفًا بالمسافات) يُبنى هكذا: الافتتاحية، ثم سطران أو "
+    "ثلاثة تمهيد، ثم آخر سطر فيه هو «الطُعم»: جملة صادمة بصيغة جازمة تبدو خاطئة أو تناقض "
+    "ما يعتقده الجميع، مثل «الأطفال اللي يملّون كثير يطلعون أذكى» أو «مذاكرة الدرس 3 مرات "
+    "ورا بعض أسوأ من مرة وحدة». شرطها: أن تكون صحيحة بمعنى محدد يتضح في الجزء الثاني، لا "
+    "كذبة ولا معلومة ضارة لو قُرئت وحدها؛ بلا «لكن» ولا تحفظ ولا نقاط حذف بعدها. ثم سطر "
+    "وحيد فيه «---». الجزء الثاني يبدأ فورًا بفك سوء الفهم: «المقصود..» أو «اللي ما انتبهت "
+    f"له..» ثم الآلية والنقاط. الأجزاء التالية لا يتجاوز الواحد {THREAD_MAX} حرفًا."
+)
+
 INFO_CRAFT = (
     "أنت كاتب منشورات معلوماتية عربية تنتشر: معلومة مفيدة مباشرة، جمل قصيرة، كل جملة في "
     "سطر مستقل وبين السطور سطر فارغ، لا حشو ولا وعظ ولا مقدمات.\n"
@@ -1295,12 +1306,15 @@ def info_premise_prompt(spec, avoid_claims):
         "- example: مثال واحد من الحياة اليومية.",
         "- facts: حقائق رقمية مؤكدة ومعروفة فقط (مثل: البالغ يحتاج 7 إلى 9 ساعات نوم). "
         "إن لم يوجد رقم مؤكد فاترك القائمة فارغة؛ الرقم المخترع أسوأ من غيابه.",
+        "- bait: جملة «طُعم» جازمة تبدو خاطئة أو تناقض الشائع لكنها صحيحة بمعنى محدد "
+        "(مفارقة)، من ٥ إلى ١٢ كلمة، بلا تحفظ.",
+        "- resolve: جملة تفك سوء الفهم: بأي معنى الطُعم صحيح.",
         "ممنوع: أرقام أو دراسات غير مؤكدة، وعود علاج، تعميمات جارحة، أفكار مكررة.",
         *(["", "وممنوع كذلك أي فكرة تشبه ما كُتب سابقًا:",
            "\n".join("• " + p for p in avoid_claims)] if avoid_claims else []),
         "",
         'أعد JSON فقط: {"ideas":[{"hook":"...","claim":"...","why":"...",'
-        '"points":["...","..."],"example":"...","facts":["..."]}, ...]}',
+        '"points":["...","..."],"example":"...","facts":["..."],"bait":"...","resolve":"..."}, ...]}',
     ])
 
 
@@ -1310,7 +1324,7 @@ def parse_info_ideas(raw):
     for it in data.get("ideas", []) if isinstance(data, dict) else []:
         if not isinstance(it, dict):
             continue
-        idea = {k: str(it.get(k) or "").strip() for k in ("hook", "claim", "why", "example")}
+        idea = {k: str(it.get(k) or "").strip() for k in ("hook", "claim", "why", "example", "bait", "resolve")}
         pts = it.get("points") or []
         idea["points"] = [str(p).strip() for p in (pts if isinstance(pts, list) else [pts]) if str(p).strip()][:6]
         facts = it.get("facts") or []
@@ -1349,13 +1363,16 @@ def info_premise_text(idea):
         parts.append("النقاط: " + " | ".join(idea["points"]))
     if idea["example"]:
         parts.append("المثال: " + idea["example"])
+    if idea.get("bait"):
+        parts.append("الطُعم (آخر سطر في الجزء الأول إن كان ثريدًا): " + idea["bait"])
+    if idea.get("resolve"):
+        parts.append("فك سوء الفهم (أول الجزء الثاني): " + idea["resolve"])
     return "\n".join(parts)
 
 
 def info_beats(fmt):
     closing = ("النهاية: فعل واحد يبدأ به القارئ اليوم، أو سؤال قصير يجيب عنه في التعليقات.")
-    thread = (" " + THREAD_RULES.replace("الجملة المفصلية", "السبب أو النقطة الأولى")
-              if fmt == "thread" else "")
+    thread = (" " + INFO_THREAD_RULES) if fmt == "thread" else ""
     return (
         "البناء الإلزامي، بهذا الترتيب:\n"
         "1. سطر أول: الادعاء الجريء أو سؤال «ليش»، بصيغة محددة، بلا تشويق جاهز.\n"
@@ -1406,7 +1423,7 @@ def info_edit_prompt(fmt, facts, dialect):
         "أبقِ مثالًا يوميًا واحدًا وسطرًا يصلح للاقتباس.",
         "النهاية فعل واحد يبدأ به القارئ اليوم أو سؤال قصير للتعليقات.",
         "كل جملة في سطر مستقل وبينها سطر فارغ. لا سطر أطول من ١٤ كلمة."
-        + (" " + THREAD_RULES.replace("الجملة المفصلية", "السبب أو النقطة الأولى") if fmt == "thread" else ""),
+        + (" " + INFO_THREAD_RULES if fmt == "thread" else ""),
         f"اللهجة: {DIALECT_HINT.get(dialect, DIALECT_HINT['saudi'])}",
         "احذف أي عبارة جاهزة وأي حكمة عامة.",
     ]
@@ -1443,7 +1460,7 @@ def info_polish_prompt(problems, fmt, facts, dialect):
             + "\n".join(f"{i}. {p}" for i, p in enumerate(problems, 1))
             + "\n\nثوابت: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
             + " لا أرقام غير مؤكدة ولا وعود علاج."
-            + ((" " + THREAD_RULES.replace("الجملة المفصلية", "السبب أو النقطة الأولى")) if fmt == "thread" else "")
+            + ((" " + INFO_THREAD_RULES) if fmt == "thread" else "")
             + "\n" + facts_block(facts) + "\n\nأعد النص وحده، بلا أي تعليق.")
 
 
@@ -1745,19 +1762,29 @@ def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha",
         parts = split_thread(text)
         longest = max((len(p) for p in parts), default=0)
         lo_p, hi_p = THREAD_PARTS
-        first = len(parts[0]) if parts else 0
+        # الجزء الأول هو ما قبل «---» كاملًا؛ إن طال عن الحدّ فقد انقسم وضاعت الفجوة
+        head = "\n\n".join(lines[:lines.index("---")]) if "---" in lines else (parts[0] if parts else "")
+        first = len(head)
         add("thread", "أجزاء الثريد", lo_p <= len(parts) <= hi_p and longest <= THREAD_MAX,
             f"{len(parts)} أجزاء، أطول جزء {longest} حرفًا",
             f"الثريد يجب أن يكون بين {lo_p} و{hi_p} أجزاء لا يتجاوز الواحد {THREAD_MAX} حرفًا: "
             + ("قصّر النص." if len(parts) > hi_p else "اضبط الطول والقطع."))
-        add("first", "امتلاء الجزء الأول", first >= THREAD_FIRST_MIN, f"{first} حرفًا",
-            f"الجزء الأول {first} حرفًا والمطلوب بين {THREAD_FIRST_MIN} و{THREAD_MAX}: أضف "
-            "سطر خلفية أو تفصيلًا محسوسًا قبل الجملة المفصلية (قبل «---»)، ولا تحرّك "
-            "موضع القطع عن أول كلمة أو كلمتين من الجملة المفصلية.")
-        cliff = "---" in lines and parts and not re.search(r"[؟?]\s*$", parts[0])
-        add("cliff", "فجوة الجزء الأول", bool(cliff), "",
-            "الجزء الأول لا ينتهي بفجوة: اقطع الجملة المفصلية بعد أول كلمة أو كلمتين، "
-            "وضع سطرًا فيه «---» بعدها مباشرة، بحيث يحتاج القارئ الجزء الثاني ليفهم.")
+        add("first", "امتلاء الجزء الأول", THREAD_FIRST_MIN <= first <= THREAD_MAX, f"{first} حرفًا",
+            f"الجزء الأول (ما قبل «---») {first} حرفًا والمطلوب بين {THREAD_FIRST_MIN} و{THREAD_MAX}: "
+            + ("احذف أو قصّر سطرًا من التمهيد قبل «---»." if first > THREAD_MAX else
+               "أضف سطر خلفية أو تفصيلًا محسوسًا قبل «---».")
+            + (" آخر سطر قبل «---» يبقى الطُعم." if info else
+               " ولا تحرّك موضع القطع عن أول كلمة أو كلمتين من الجملة المفصلية."))
+        last_line = head.split("\n")[-1] if head else ""
+        cliff = "---" in lines and first <= THREAD_MAX and not re.search(r"[؟?]\s*$", last_line)
+        if info:
+            cliff = cliff and not re.search(r"(?:\.\.|…|لكن|بس )\s*$", last_line)
+        add("cliff", "طُعم الجزء الأول" if info else "فجوة الجزء الأول", bool(cliff), "",
+            ("الجزء الأول لا ينتهي بطُعم: اجعل آخر سطر فيه جملة جازمة تبدو خاطئة وتناقض "
+             "الشائع، صحيحة بمعنى يتضح في الجزء الثاني، بلا تحفظ ولا نقاط حذف، ثم سطر «---».")
+            if info else
+            ("الجزء الأول لا ينتهي بفجوة: اقطع الجملة المفصلية بعد أول كلمة أو كلمتين، "
+             "وضع سطرًا فيه «---» بعدها مباشرة، بحيث يحتاج القارئ الجزء الثاني ليفهم."))
 
     if prev_openings:
         add("opening", "افتتاحية جديدة", not opening_clash(text, prev_openings),
