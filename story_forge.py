@@ -47,7 +47,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "3.7"
+VERSION = "3.8"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -76,26 +76,65 @@ class Cancelled(Exception):
 
 # ------------------------------------------------------------------ بذرة القصة
 # القصة تُبنى من تركيبة محددة، لا من طلب عام، حتى لا ينزلق النموذج لأشهر ما حفظ.
-WHO = [
-    "صديق عمر", "شريك عمل", "أخي الأكبر", "أختي", "زوجتي", "حماي",
-    "جار العمارة", "موظف يشتغل عندي", "مديري في الدوام", "ابن عمي",
-    "زميل دراسة", "سائق البيت", "صاحب المحل اللي جنبي", "محاسب الشركة",
-    "شريك سكن أيام الغربة", "معلّمي القديم", "ابن خالتي", "عامل في ورشتي",
-    "أبوي", "أمي", "ولدي الكبير", "صاحب العمارة اللي كنت مستأجر فيها",
-    "أخوي الصغير", "أختي الكبيرة", "زوجي", "خطيبي السابق", "طليقتي", "عمي", "خالي",
-    "عمتي", "خالتي", "جدي", "جدتي", "بنتي", "ولدي الصغير", "حماتي", "أخو زوجتي",
-    "زوجة أخوي", "زوج أختي", "بنت خالتي", "ابن عمتي", "صديقة أمي", "صديق أبوي",
-    "جارنا القديم", "جارتنا", "حارس العمارة", "عامل البقالة اللي جنبنا",
-    "الدكتور اللي يتابع أبوي", "المعلمة اللي درّست بنتي", "زميلي في الشغل",
-    "موظف جديد عندنا", "مديري القديم", "صاحب الشركة", "الشريك اللي طلع من الشركة",
-    "العميل اللي نتعامل معه من سنين", "المقاول اللي بنى بيتنا", "العقاري",
-    "المحامي اللي وكّلته", "سائق الأجرة اللي أركب معه كل يوم", "مدرّب النادي",
-    "إمام المسجد", "الممرضة", "زميلي في الدورة العسكرية", "صديقي من الجامعة اللي انقطع",
-    "صاحب المطعم اللي نتغدى فيه", "الخياط", "الحلاق", "صاحب الورشة اللي يصلح سيارتي",
-    "المستأجر عندي", "الجار في المزرعة", "ابن الجيران اللي كبر", "شاب التوصيل",
-    "عامل النظافة في العمارة", "الكاشير", "خطيبة أخوي", "جدي من جهة أمي",
-    "الشيخ اللي كتب عقدنا", "صيدلي الحي", "مشرف السكن أيام الجامعة",
-]
+# الطرف الآخر مصنّف بفئات، حتى يتبع نوعَ الموقف: «بين الجيران» لا يجيب مديرًا
+WHO_TAGS = {
+    "family": [
+        "أخي الأكبر", "أختي", "زوجتي", "حماي", "ابن عمي", "أبوي", "أمي", "ولدي الكبير",
+        "ابن خالتي", "أخوي الصغير", "أختي الكبيرة", "زوجي", "خطيبي السابق", "طليقتي",
+        "عمي", "خالي", "عمتي", "خالتي", "جدي", "جدتي", "بنتي", "ولدي الصغير", "حماتي",
+        "أخو زوجتي", "زوجة أخوي", "زوج أختي", "بنت خالتي", "ابن عمتي", "خطيبة أخوي",
+        "جدي من جهة أمي",
+    ],
+    "friends": [
+        "صديق عمر", "زميل دراسة", "شريك سكن أيام الغربة", "صديقة أمي", "صديق أبوي",
+        "صديقي من الجامعة اللي انقطع", "زميلي في الدورة العسكرية",
+    ],
+    "work": [
+        "شريك عمل", "موظف يشتغل عندي", "مديري في الدوام", "محاسب الشركة", "عامل في ورشتي",
+        "زميلي في الشغل", "موظف جديد عندنا", "مديري القديم", "صاحب الشركة",
+        "الشريك اللي طلع من الشركة", "العميل اللي نتعامل معه من سنين",
+        "المقاول اللي بنى بيتنا", "العقاري", "المحامي اللي وكّلته", "المستأجر عندي",
+        "الشيخ اللي كتب عقدنا",
+    ],
+    "neighbors": [
+        "جار العمارة", "صاحب المحل اللي جنبي", "صاحب العمارة اللي كنت مستأجر فيها",
+        "جارنا القديم", "جارتنا", "حارس العمارة", "عامل البقالة اللي جنبنا",
+        "الجار في المزرعة", "ابن الجيران اللي كبر", "عامل النظافة في العمارة",
+        "إمام المسجد", "صيدلي الحي",
+    ],
+    "school": ["معلّمي القديم", "المعلمة اللي درّست بنتي", "مدرّب النادي", "مشرف السكن أيام الجامعة"],
+    "medical": ["الدكتور اللي يتابع أبوي", "الممرضة"],
+    "services": [
+        "سائق البيت", "سائق الأجرة اللي أركب معه كل يوم", "صاحب المطعم اللي نتغدى فيه",
+        "الخياط", "الحلاق", "صاحب الورشة اللي يصلح سيارتي", "شاب التوصيل", "الكاشير",
+    ],
+}
+WHO = [w for pool in WHO_TAGS.values() for w in pool]
+
+# فئات الطرف الآخر المناسبة لكل نوع موقف
+CORE_WHO = {
+    "betrayal": ("family", "friends", "work"), "injustice": ("family", "work", "friends"),
+    "guilt": ("family", "friends", "neighbors"), "loss": ("family", "friends"),
+    "sacrifice": ("family", "friends"), "money": ("family", "work"),
+    "secretill": ("family", "friends"), "pride": ("family", "friends"),
+    "misread": ("family", "friends", "neighbors"), "return": ("services", "neighbors", "school", "friends"),
+    "gratitude": ("school", "friends", "work", "services"), "loyalty": ("friends", "work", "neighbors"),
+    "reversal": ("work", "neighbors", "family"), "surprise": ("neighbors", "services", "friends"),
+    "chance": ("services", "neighbors"), "funny": ("family", "neighbors", "services"),
+    "nostalgia": ("school", "friends", "family"), "parenting": ("family",),
+    "work": ("work",), "neighbors": ("neighbors",),
+    "marriage": ("family",), "engagement": ("family", "friends"), "inlaws": ("family",),
+    "siblings": ("family",), "friendship": ("friends",), "distance": ("family", "friends"),
+    "inheritance": ("family",), "debt": ("family", "friends", "work"), "partner": ("work",),
+    "hire": ("work",), "boss": ("work",), "customer": ("work", "services"), "failure": ("work", "friends"),
+    "hospital": ("medical", "family"), "caregiver": ("family", "medical", "services"),
+    "oldage": ("family",), "accident": ("family", "friends", "services"),
+    "childhood": ("family", "school", "friends"), "school": ("school",), "home": ("family",),
+    "abroad": ("family", "friends"), "district": ("neighbors", "services"),
+    "charity": ("neighbors", "services", "school"), "promise": ("friends", "family"),
+    "apology": ("family", "friends", "work"), "rival": ("work", "neighbors"),
+    "reputation": ("neighbors", "work", "family"),
+}
 
 # النواة المخفية — مجموعتان: ثقيلة وخفيفة، يُختار منها حسب نوع الموقف
 SECRET_DARK = [
@@ -613,7 +652,8 @@ def fresh_dna(topic="", core="betrayal", seed=None, avoid=()):
     endings = DILEMMA if ending == "dilemma" else CLOSERS
     avoid = set(avoid)
     dna = {
-        "who": seed.get("who") or random.choice(WHO),
+        "who": seed.get("who") or random.choice(
+            [w for t in CORE_WHO.get(core, ()) for w in WHO_TAGS[t]] or WHO),
         "secret": seed.get("secret") or random.choice(secrets),
         "device": seed.get("device") or random.choice(DEVICE),
         "place": seed.get("place") or random.choice(PLACE),
@@ -627,7 +667,8 @@ def fresh_dna(topic="", core="betrayal", seed=None, avoid=()):
         return (d["who"], d["secret"], d["device"]) in avoid
 
     # تركيبة مستعملة في المحفوظات؟ بدّل محورًا واحدًا غير مثبّت حتى تصير جديدة
-    for key, pool in (("device", DEVICE), ("secret", secrets), ("who", WHO)):
+    who_pool = [w for t in CORE_WHO.get(core, ()) for w in WHO_TAGS[t]] or WHO
+    for key, pool in (("device", DEVICE), ("secret", secrets), ("who", who_pool)):
         if not used(dna):
             break
         if key in seed:
@@ -938,11 +979,13 @@ def premise_prompt(dna, core, drama, avoid_plots):
     label, desc, _, _ = CORES.get(core, CORES["betrayal"])
     dlabel, ddesc = DRAMA.get(drama, DRAMA["mid"])
     return "\n".join([
+        f"نوع الموقف المطلوب، وهو الحاكم على كل ما يلي: {label} — {desc}.",
+        "كل فكرة من الخمس يجب أن تكون بوضوح من هذا النوع تحديدًا: الكشف والطرف الآخر "
+        "والنهاية كلها تدور حوله. فكرة من نوع آخر تُرفض حتى لو كانت أقوى.",
         "اقترح خمس أفكار مختلفة لحبكة منشور قصصي قصير.",
-        f"نوع الموقف المطلوب: {label} — {desc}.",
         f"حجم الحدث: {dlabel} — {ddesc}.",
         "",
-        "ابنِ كل فكرة على هذه العناصر:",
+        "ابنِ كل فكرة على هذه العناصر، وإن تعارض عنصر مع نوع الموقف فعدّله ليخدم النوع:",
         dna_text(dna),
         "",
         "لكل فكرة أعطِ:",
@@ -953,6 +996,7 @@ def premise_prompt(dna, core, drama, avoid_plots):
         "- evidence: نص الدليل بحرفه كما قرأه أو سمعه صاحب القصة: جملة الرسالة، "
         "سطر التقرير، كلمتا النتيجة. جملة واحدة قصيرة بين علامتي تنصيص.",
         "- motive: دافع الطرف الآخر في كلمات قليلة: ورث، زواج، تغطية عجز، خوف، كبرياء.",
+        f"- fit: جملة واحدة تثبت أن الفكرة من نوع «{label}» تحديدًا.",
         "- facts: ثلاث إلى خمس حقائق رقمية ثابتة للقصة (كم سنة، كم مبلغ، كم عمر، "
         "كم مرة)، كل حقيقة جملة قصيرة فيها رقم واحد. هذه الأرقام ستُلزم الكاتب.",
         "أي فكرة بلا why_hidden أو why_now أو evidence أو motive مقنعة تُرفض. وأي فكرة "
@@ -993,6 +1037,8 @@ def write_prompt(dna, idea, fmt, dialect, core, pov, drama):
     return "\n".join([
         f"اكتب {label} بلهجة {DIALECTS.get(dialect, DIALECTS['saudi'])}، "
         f"من {low} إلى {high} كلمة.",
+        f"نوع الموقف الحاكم: {core_label} — {core_desc}. القصة كلها من هذا النوع: "
+        "الطرف الآخر والكشف والنهاية. إن تعارض عنصر من البذرة معه فعدّل العنصر لا النوع.",
         shape,
         "",
         "الحبكة التي ستكتبها:",
@@ -1067,7 +1113,8 @@ def edit_prompt(fmt, pov, ending, facts, dialect="saudi"):
             + "\n\nأعد النص النهائي وحده، بلا أي تعليق.")
 
 
-def audit_prompt(facts, ending="dilemma"):
+def audit_prompt(facts, ending="dilemma", core="betrayal"):
+    core_label, core_desc, _, _ = CORES.get(core, CORES["betrayal"])
     closing = ("معضلة بخيارين واضحين يواجهها صاحب القصة" if ending == "dilemma"
                else "لحظة أو قرار صغير أو صورة، بلا عبرة")
     return (
@@ -1084,6 +1131,9 @@ def audit_prompt(facts, ending="dilemma"):
         "وشخص يعرف ما لا يمكن أن يعرفه.\n"
         "6. الزمن: هل تسلسل الأحداث ممكن؟ (لا يعمل أحد وظيفتين قبل أن يتخرج مثلًا).\n"
         "7. الحِكم: أي سطر عام يصلح لأي قصة (حكمة، مثل، خلاصة) يُحذف.\n"
+        f"8. نوع الموقف: هل القصة فعلًا من نوع «{core_label} — {core_desc}»؟ إن كانت "
+        "الحكاية تدور حول شيء آخر، أعد توجيه الكشف والطرف الآخر والنهاية إلى هذا النوع "
+        "بأقل تغيير، وسجّل ذلك في issues.\n"
         "ثم أصلح كل خلل وجدته بأقل تغيير ممكن، مع الحفاظ على اللهجة والبناء "
         "وتقسيم السطور كما هي، ودون إضافة عبارات جاهزة. لا تُقصّر النص: ما تحذفه "
         f"عوّضه بواقعة. والنهاية تبقى {closing}؛ إن حذفت السطر الأخير فأعد كتابة "
@@ -1495,7 +1545,7 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
         job["stage"] = "audit"
         try:
             checked = json_obj(chat(
-                [system, {"role": "user", "content": audit_prompt(facts, ending) + "\n\nالنص:\n" + final
+                [system, {"role": "user", "content": audit_prompt(facts, ending, core) + "\n\nالنص:\n" + final
                           + "\n\nالأرقام الواردة فيه: " + "، ".join(numbers_in(final))}],
                 provider, creds, temperature=0.3, timeout=150))
             fixed = clean(str(checked.get("text") or ""))

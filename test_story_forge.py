@@ -531,5 +531,32 @@ class Routes(unittest.TestCase):
         self.assertEqual(self.c.post("/hooks", json={"text": "قصير"}).status_code, 400)
 
 
+
+
+class CoreRelevance(unittest.TestCase):
+    def test_every_core_maps_to_valid_who_tags(self):
+        for core in sf.CORES:
+            self.assertIn(core, sf.CORE_WHO, core)
+            for tag in sf.CORE_WHO[core]:
+                self.assertIn(tag, sf.WHO_TAGS, (core, tag))
+
+    def test_counterpart_follows_the_core(self):
+        for _ in range(40):
+            self.assertIn(sf.fresh_dna("", "neighbors")["who"], sf.WHO_TAGS["neighbors"])
+            self.assertIn(sf.fresh_dna("", "work")["who"], sf.WHO_TAGS["work"])
+            self.assertIn(sf.fresh_dna("", "siblings")["who"], sf.WHO_TAGS["family"])
+        self.assertEqual(sf.fresh_dna("", "work", {"who": "أمي"})["who"], "أمي")   # المثبّت يبقى
+
+    def test_prompts_put_the_core_first(self):
+        dna = sf.fresh_dna("", "neighbors")
+        p = sf.premise_prompt(dna, "neighbors", "big", [])
+        self.assertTrue(p.startswith("نوع الموقف المطلوب، وهو الحاكم"))
+        self.assertIn("بين الجيران", p)
+        idea = {"hook": "", "hidden": "x", "why_hidden": "", "why_now": "", "evidence": "", "motive": "", "facts": []}
+        w = sf.write_prompt(dna, idea, "short", "saudi", "neighbors", "self", "big")
+        self.assertIn("نوع الموقف الحاكم: بين الجيران", w)
+        self.assertIn("بين الجيران", sf.audit_prompt([], "closer", "neighbors"))
+
+
 if __name__ == "__main__":
     unittest.main()
