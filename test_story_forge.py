@@ -612,8 +612,33 @@ class Info(unittest.TestCase):
         self.assertEqual(c.get("/library").get_json()["items"][0]["kind"], "satire")
         self.assertEqual(sf.recent_plots(kind="critique"), [])
         cfg = c.get("/config").get_json()["topics"]
-        self.assertEqual(sorted(cfg), ["critique", "info", "satire"])
+        self.assertEqual(sorted(cfg), ["critique", "fire", "info", "satire"])
         self.assertEqual(len(cfg["satire"]["domains"]), len(sf.SAT_DOMAINS))
+
+    def test_fire_kind_provokes_by_scene_not_by_gender_or_harm(self):
+        cfg = sf.topic_cfg("fire")
+        self.assertEqual(len(cfg["domains"]), 20); self.assertEqual(len(cfg["angles"]), 10)
+        self.assertNotIn("اغتصاب", " ".join(v[0] + v[1] for v in cfg["domains"].values()))
+        self.assertIn("ممنوع «كل النساء»", sf.info_system_prompt("saudi", "fire"))
+        ok_text = INFO_STORY.replace("خلّه يشوفك تقرأ.", "طلّقها بعد 11 سنة لأنها قالت له شكرًا.")
+        ids = {c["id"]: c for c in sf.run_checks(ok_text, "short", "self", "closer", [], kind="fire")}
+        self.assertTrue(ids["gender"]["ok"]); self.assertTrue(ids["harm"]["ok"]); self.assertTrue(ids["faith"]["ok"])
+        bad = INFO_STORY.replace("خلّه يشوفك تقرأ.", "كل النساء كذا، اضربها عشان تتأدب.")
+        ids = {c["id"]: c for c in sf.run_checks(bad, "short", "self", "closer", [], kind="fire")}
+        self.assertFalse(ids["gender"]["ok"]); self.assertFalse(ids["harm"]["ok"])
+        self.assertTrue({"gender", "harm"} <= sf.CRITICAL)
+        assault = INFO_STORY.replace("خلّه يشوفك تقرأ.", "قصة اغتصاب في الحي.")
+        ids = {c["id"]: c for c in sf.run_checks(assault, "short", "self", "closer", [], kind="fire")}
+        self.assertFalse(ids["harm"]["ok"])
+        fake = FakeProvider(story=INFO_STORY, audit_text=INFO_STORY, polish_text=INFO_STORY)
+        sf.chat = fake
+        job = {"stage": "seed", "text": "", "kind": "fire", "issues": [], "checks": []}
+        sf.write_info(job, sf.fresh_info("husband", "both", "", None, "fire"), "short", "saudi", "free", {}, mode="fast")
+        self.assertEqual(job["stage"], "done"); self.assertIn("audit", fake.calls)
+        c = sf.app.test_client(); sf.JOBS.clear()
+        r = c.post("/write", json={"kind": "fire", "domain": "divorce", "angle": "scene", "mode": "fast"})
+        self.assertEqual(r.get_json()["dna"]["kind"], "fire")
+        self.assertIn("fire", c.get("/config").get_json()["topics"])
 
     def test_library_keeps_kinds_apart(self):
         sf.lib_write([{"id": "s", "text": STORY, "plot": "قرض", "dna": {"who": "أمي", "secret": "س", "device": "د"}},
