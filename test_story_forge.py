@@ -586,6 +586,16 @@ class Info(unittest.TestCase):
             self.assertFalse(ids["points"]["ok"]); self.assertIsNone(ids["points"]["fix"])
         ids = {c["id"]: c for c in sf.run_checks(text, "short", "self", "closer", [], kind="info")}
         self.assertTrue(ids["points"]["fix"])
+        self.assertNotIn("faith", ids)
+        holy = INFO_STORY.replace("خلّه يشوفك تقرأ.", "اللي يرسل آية كل صباح يبغى يثبت إنه حي.")
+        ids = {c["id"]: c for c in sf.run_checks(holy, "short", "self", "closer", [], kind="satire")}
+        self.assertFalse(ids["faith"]["ok"]); self.assertIn("faith", sf.CRITICAL)
+        # الانتقاد والسخرية يُدقَّقان حتى في الوضع السريع
+        fake2 = FakeProvider(story=INFO_STORY, audit_text=INFO_STORY, polish_text=INFO_STORY)
+        sf.chat = fake2
+        job = {"stage": "seed", "text": "", "kind": "critique", "issues": [], "checks": []}
+        sf.write_info(job, sf.fresh_info("habit", "cost", "", None, "critique"), "short", "saudi", "free", {}, mode="fast")
+        self.assertIn("audit", fake2.calls)
         # خط الإنتاج والمكتبة مفصولان
         fake = FakeProvider(story=INFO_STORY, audit_text=INFO_STORY, polish_text=INFO_STORY)
         sf.chat = fake
