@@ -15,8 +15,9 @@
     STORY_NO_BROWSER=1                   # لا تفتح المتصفح
 لاستخدام مزوّد خاص بدل المجاني، من داخل الصفحة أو عبر البيئة:
     OPENAI_BASE=https://generativelanguage.googleapis.com/v1beta/openai
-    OPENAI_KEY=...   OPENAI_MODEL=gemini-2.5-flash
-    STORY_THINK=low                      # قدر تفكير النموذج: none/minimal/low/medium/high
+    OPENAI_KEY=...   OPENAI_MODEL=gemini-3.7-flash
+    OPENAI_PLAN_MODEL=gemini-3.1-pro-preview   # اختياري: نموذج أقوى للحبكة فقط (طلب واحد من خمسة)
+    STORY_THINK=low                     # قدر تفكير النموذج: none/minimal/low/medium/high
                                          # (يُرسل كـ reasoning_effort، ويُهمل تلقائيًا إن رفضه المزوّد)
 
 ملاحظة عن Gemini المجاني: الحدّ 20 طلبًا في اليوم لكل نموذج، والقصة تحتاج
@@ -46,13 +47,14 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "3.4"
+VERSION = "3.5"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
 OPENAI_BASE = os.environ.get("OPENAI_BASE", "")
 OPENAI_KEY = os.environ.get("OPENAI_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_PLAN_MODEL = os.environ.get("OPENAI_PLAN_MODEL", "")   # نموذج أقوى لمرحلة الحبكة فقط
 THINK = os.environ.get("STORY_THINK", "low")
 THINK_LEVELS = ("none", "minimal", "low", "medium", "high")
 THINK_OK = [True]          # يصير False إذا رفض المزوّد الخيار، فلا نرسله بعدها
@@ -1362,6 +1364,12 @@ def _guard(job):
         raise Cancelled()
 
 
+def plan_creds(creds):
+    """بيانات المزوّد لمرحلة الحبكة: نموذج أقوى إن حُدّد، وإلا نفس النموذج."""
+    model = creds.get("plan_model") or OPENAI_PLAN_MODEL
+    return dict(creds, model=model) if model else creds
+
+
 def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode="full"):
     seen_plots = recent_plots()
     prev_openings = recent_openings()
@@ -1381,7 +1389,7 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
     job["stage"] = "premise"
     ideas = parse_ideas(chat(
         [system, {"role": "user", "content": premise_prompt(dna, core, drama, seen_plots)}],
-        provider, creds, temperature=1.05, timeout=150))
+        provider, plan_creds(creds), temperature=1.05, timeout=150))
     idea, novelty = pick_idea(ideas, blocked)
     facts = idea["facts"]
     job["premise"] = premise_text(idea)
@@ -1492,6 +1500,7 @@ def _creds(data):
     creds = {"base": (data.get("base") or "").strip(),
              "key": (data.get("key") or "").strip(),
              "model": (data.get("model") or "").strip(),
+             "plan_model": (data.get("plan_model") or "").strip(),
              "think": think if think in THINK_LEVELS else ""}
     return provider, creds
 
@@ -1518,7 +1527,8 @@ def config():
              "place": PLACE, "cost": COST_DARK + COST_LIGHT, "dilemma": DILEMMA + CLOSERS,
              "open": [{"id": k, "label": v[0]} for k, v in OPEN_STYLES.items()]}
     return jsonify(version=VERSION, openai_ready=bool(OPENAI_BASE and OPENAI_KEY),
-                   model=OPENAI_MODEL, think=THINK, saved=len(lib_read()), cores=cores, seeds=seeds,
+                   model=OPENAI_MODEL, plan_model=OPENAI_PLAN_MODEL, think=THINK,
+                   saved=len(lib_read()), cores=cores, seeds=seeds,
                    povs=[{"id": k, "label": v[0]} for k, v in POVS.items()])
 
 
@@ -1929,7 +1939,8 @@ PAGE = r"""<!doctype html>
       <div id="creds" style="display:none">
         <div class="f"><label for="base">عنوان المزوّد (OpenAI / Gemini / متوافق)</label><input id="base" placeholder="https://api.openai.com/v1" data-keep></div>
         <div class="f"><label for="key">المفتاح</label><input id="key" type="password" placeholder="sk-…" autocomplete="off"></div>
-        <div class="f"><label for="model">النموذج</label><input id="model" placeholder="gpt-4o-mini" data-keep></div>
+        <div class="f"><label for="model">النموذج</label><input id="model" placeholder="gemini-3.7-flash" data-keep></div>
+        <div class="f"><label for="plan_model">نموذج الحبكة فقط (اختياري، أقوى)</label><input id="plan_model" placeholder="gemini-3.1-pro-preview" data-keep></div>
         <div class="f"><label for="think">قدر التفكير</label>
           <select id="think" data-keep>
             <option value="">افتراضي الخادم</option>
@@ -1941,7 +1952,7 @@ PAGE = r"""<!doctype html>
           </select></div>
         <div class="wide">
           <label class="check"><input type="checkbox" id="rememberkey"> تذكّر المفتاح في هذا المتصفح</label>
-          <p class="hint">قدر التفكير للنماذج المفكّرة مثل Gemini، ويُهمل تلقائيًا إن لم يعرفه المزوّد.</p>
+          <p class="hint">نموذج الحبكة يُستعمل في طلب واحد من خمسة (توليد الحبكات)، والباقي على النموذج الأساسي — ذكاء Pro بربع التكلفة. قدر التفكير للنماذج المفكّرة مثل Gemini، ويُهمل إن لم يعرفه المزوّد.</p>
         </div>
       </div>
     </div>
@@ -2076,13 +2087,17 @@ document.addEventListener('change', e => {
 $('provider').onchange = () => {
   const priv = $('provider').value === 'openai';
   $('creds').style.display = priv ? '' : 'none';
-  $('engine').textContent = priv ? ('مزوّد خاص' + ($('model').value ? ' · ' + $('model').value : '')) : 'مجاني بلا مفتاح';
+  $('engine').textContent = priv
+    ? ('مزوّد خاص' + ($('model').value ? ' · ' + $('model').value : '') + ($('plan_model').value ? ' · حبكة: ' + $('plan_model').value : ''))
+    : 'مجاني بلا مفتاح';
 };
 $('model').oninput = () => $('provider').onchange();
+$('plan_model').oninput = () => $('provider').onchange();
 
 const creds = () => ({
   provider: $('provider').value,
-  base: $('base').value, key: $('key').value, model: $('model').value, think: $('think').value
+  base: $('base').value, key: $('key').value, model: $('model').value,
+  plan_model: $('plan_model').value, think: $('think').value
 });
 
 /* عدّاد الثواني بجانب الحالة: النماذج المفكّرة تصمت طويلًا قبل أول حرف */
@@ -2404,7 +2419,7 @@ fetch('/config').then(r => r.json()).then(c => {
   sel.value = 'betrayal';
   fillSeeds(c.seeds || {});
   restore();
-  if (c.openai_ready && !kept('provider')) { $('provider').value = 'openai'; $('model').value = c.model; }
+  if (c.openai_ready && !kept('provider')) { $('provider').value = 'openai'; $('model').value = c.model; if (c.plan_model) $('plan_model').value = c.plan_model; }
   $('provider').onchange();
 }).catch(() => { restore(); $('provider').onchange(); });
 shelf();

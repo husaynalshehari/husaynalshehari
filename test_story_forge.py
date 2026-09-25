@@ -48,10 +48,11 @@ class FakeProvider:
     def __init__(self, story=STORY, audit_text=None, polish_text=None, hooks=None,
                  ideas=IDEAS):
         self.story, self.audit_text, self.polish_text = story, audit_text, polish_text
-        self.hooks, self.ideas, self.calls = hooks, ideas, []
+        self.hooks, self.ideas, self.calls, self.models = hooks, ideas, [], []
 
     def __call__(self, messages, provider, creds, on_token=None, temperature=0.95, timeout=240):
         user = messages[-1]["content"]
+        self.models.append(creds.get("model"))
         if '"ideas"' in user:
             self.calls.append("premise")
             return "```json\n" + json.dumps(self.ideas, ensure_ascii=False) + "\n```"
@@ -293,6 +294,17 @@ class Pipeline(unittest.TestCase):
         with self.assertRaises(sf.Cancelled):
             sf.write_story(job, sf.fresh_dna(), "short", "saudi", "betrayal", "self", "mid", "free", {})
         self.assertEqual(fake.calls, ["premise"])
+
+    def test_plan_model_is_used_for_the_premise_only(self):
+        fake = FakeProvider()
+        sf.chat = fake
+        job = new_job()
+        creds = {"base": "https://x", "key": "k", "model": "flash", "plan_model": "pro", "think": ""}
+        sf.write_story(job, sf.fresh_dna(), "short", "saudi", "betrayal", "self", "big", "openai", creds)
+        self.assertEqual(job["stage"], "done")
+        self.assertEqual(fake.models[0], "pro")
+        self.assertTrue(all(m == "flash" for m in fake.models[1:]), fake.models)
+        self.assertEqual(sf.plan_creds({"model": "flash", "plan_model": ""})["model"], "flash")
 
     def test_fast_mode_skips_audit(self):
         fake = FakeProvider()
