@@ -16,6 +16,11 @@
 لاستخدام مزوّد خاص بدل المجاني، من داخل الصفحة أو عبر البيئة:
     OPENAI_BASE=https://generativelanguage.googleapis.com/v1beta/openai
     OPENAI_KEY=...   OPENAI_MODEL=gemini-2.5-flash
+    STORY_THINK=low                      # قدر تفكير النموذج: none/minimal/low/medium/high
+                                         # (يُرسل كـ reasoning_effort، ويُهمل تلقائيًا إن رفضه المزوّد)
+
+ملاحظة عن Gemini المجاني: الحدّ 20 طلبًا في اليوم لكل نموذج، والقصة تحتاج
+3 إلى 5 طلبات حسب الوضع (سريع/متأنٍ)، أي نحو 4 إلى 6 قصص يوميًا لكل نموذج.
 
 الاختبار بلا مزوّد ولا شبكة:
     python -m unittest test_story_forge
@@ -41,13 +46,16 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "3.0"
+VERSION = "3.1"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
 OPENAI_BASE = os.environ.get("OPENAI_BASE", "")
 OPENAI_KEY = os.environ.get("OPENAI_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+THINK = os.environ.get("STORY_THINK", "low")
+THINK_LEVELS = ("none", "minimal", "low", "medium", "high")
+THINK_OK = [True]          # يصير False إذا رفض المزوّد الخيار، فلا نرسله بعدها
 LIB_PATH = os.environ.get("STORY_LIB",
                           os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                        "stories.json"))
@@ -203,6 +211,33 @@ DIALECTS = {
     "fusha": "فصحى مبسّطة قريبة من المحكي",
 }
 
+# كيف تُكتب كل لهجة — تدخل في طلب النظام لكل المراحل، لأن النموذج ينزلق للفصحى
+DIALECT_HINT = {
+    "saudi": "اكتب بلهجة سعودية بيضاء محكية: «وش، ليش، ما أدري، الحين، عشان، اللي، شفت، "
+             "رحت، مو، كذا، أبوي». ممنوع الفصحى الكتابية مثل «لم، لن، إنّ، الذي، ذهبت، رأيت، إما».",
+    "gulf": "اكتب بلهجة خليجية محكية: «شنو، ليش، الحين، عشان، يبي، اللي، شفت، رحت، مو، وايد، "
+            "شلون». ممنوع الفصحى الكتابية مثل «لم، لن، إنّ، الذي، ذهبت، رأيت».",
+    "egy": "اكتب بلهجة مصرية محكية: «إيه، ليه، مش، عايز، دلوقتي، علشان، كده، اللي، فين، إزاي، "
+           "لسه». ممنوع الفصحى الكتابية مثل «لم، لن، إنّ، الذي، ذهبت، رأيت».",
+    "sham": "اكتب بلهجة شامية محكية: «شو، ليش، هلق، بدي، مو، هيك، اللي، كتير، وين، عم، رح، "
+            "لسا». ممنوع الفصحى الكتابية مثل «لم، لن، إنّ، الذي، ذهبت، رأيت».",
+    "fusha": "اكتب بفصحى مبسّطة قريبة من الكلام، بلا تقعّر وبلا إعراب متكلّف.",
+}
+
+# علامات اللهجة التي يُتوقع أن تظهر في نص محكي — للفحص المحلي
+DIALECT_MARKERS = {
+    "saudi": ["وش ", "ليش", "ما أدري", "ما ادري", "الحين", "عشان", "علشان", "يبي", "اللي",
+              "شفت", "رحت", "جيت", "مو ", "كذا", "أبوي", "وين", "ليه", "بس ", "زين", "توني",
+              "ودي", "قلت له", "ما عرفت", "يالله", "هالـ", "ها الـ", "أبغى", "أبي "],
+    "gulf": ["شنو", "ليش", "الحين", "عشان", "يبي", "اللي", "شفت", "رحت", "مو ", "وايد", "شلون",
+             "وين", "توه", "توّه", "ما أدري", "هني", "بس ", "زين", "چذي", "جذي"],
+    "egy": ["إيه", "ايه", "ليه", "مش ", "عايز", "دلوقتي", "علشان", "عشان", "كده", "اللي", "فين",
+            "إزاي", "ازاي", "بتاع", "خالص", "أوي", "قوي", "لسه", "برضه", "طب ", "شفت", "روحت",
+            "قلتله", "مكنتش", "ماكنتش", "عمري ما"],
+    "sham": ["شو ", "ليش", "هلق", "بدي", "مو ", "هيك", "اللي", "كتير", "وين", "لسا", "منيح",
+             "عم ", "رح ", "شفت", "رحت", "قلتله", "ما بعرف", "هاد", "هيدا", "بس "],
+}
+
 FORMATS = {
     "short": ("منشور قصير", 70, 100),
     "medium": ("منشور متوسط", 120, 165),
@@ -284,8 +319,12 @@ STOP = set("""
 COINCIDENCE = ("فراش الموت", "مشهور", "بالصدفة", "صدفة", "مصادفة", "معجزة")
 
 DOUBT_RE = re.compile(
-    r"ما أدري|ما ادري|ما أعرف|ما اعرف|لا أعرف|لا أدري|مش عارف|ما بعرف|يمكن|ربما|"
-    r"مو متأكد|مش متأكد|لعل|ما فهمت|ما أفهم|ما عرفت ليش|لليوم ما")
+    r"ما أدري|ما ادري|ما أعرف|ما اعرف|لا أعرف|لا أدري|لا أعلم|ما أعلم|مش عارف|مو عارف|"
+    r"ما بعرف|يمكن|ربما|مو متأكد|مش متأكد|لست متأكد|لعل|ما فهمت|لم أفهم|ما أفهم|لا أفهم|"
+    r"مش فاهم|ما عرفت|لم أعرف|ما كنت أعرف|ما كنت أدري|مو واضح|لليوم ما|إلى اليوم لا")
+
+# الفحوصات التي يستحق رسوبها نداءً إضافيًا للصقل؛ الباقي إرشادي يظهر في البطاقة فقط
+CRITICAL = {"words", "cliches", "pov", "facts", "ending", "thread", "clean", "dialect"}
 
 AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 TASHKEEL = re.compile(r"[ً-ْٰـ]")
@@ -422,8 +461,30 @@ def opening_clash(text, previous):
 
 
 # -------------------------------------------------------------- نداء المزوّد
+def provider_error(raw):
+    """رسالة مفهومة من خطأ المزوّد: Google وOpenAI يرسلان JSON فيه error.message."""
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list) and data:
+            data = data[0]
+        err = data.get("error", data) if isinstance(data, dict) else {}
+        msg = err.get("message") if isinstance(err, dict) else None
+        if not msg:
+            return raw[:300]
+        msg = msg.split("\n")[0].strip()
+        m = re.search(r"Quota exceeded for metric.*?limit:\s*(\d+)", raw, re.S)
+        if m:
+            msg = f"تجاوزت حصة المزوّد لهذا النموذج (الحدّ {m.group(1)} طلبًا). " + msg
+        m = re.search(r'"retryDelay":\s*"(\d+)', raw)
+        if m:
+            msg += f" — أعد المحاولة بعد {m.group(1)} ثانية."
+        return msg[:400]
+    except ValueError:
+        return raw[:300]
+
+
 def chat(messages, provider, creds, on_token=None, temperature=0.95, timeout=240):
-    """نداء دردشة متوافق مع OpenAI، مع بثّ اختياري حرفًا حرفًا."""
+    """نداء دردشة متوافق مع OpenAI، مع بثّ اختياري حرفًا حرفًا وضبط لقدر التفكير."""
     if provider == "openai":
         base = (creds.get("base") or OPENAI_BASE).rstrip("/")
         key = creds.get("key") or OPENAI_KEY
@@ -440,10 +501,14 @@ def chat(messages, provider, creds, on_token=None, temperature=0.95, timeout=240
 
     body = {"model": model, "messages": messages, "temperature": temperature,
             "stream": bool(on_token)}
-    data = json.dumps(body).encode("utf-8")
+    think = creds.get("think") or THINK
+    if THINK_OK[0] and think in THINK_LEVELS:
+        body["reasoning_effort"] = think          # النماذج المفكّرة تبطئ كثيرًا بلا هذا
 
     backoff = [3, 9, 20]
-    for attempt in range(len(backoff) + 1):
+    attempt = 0
+    while True:
+        data = json.dumps(body).encode("utf-8")
         try:
             req = urllib.request.Request(url, data=data, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as res:
@@ -453,11 +518,23 @@ def chat(messages, provider, creds, on_token=None, temperature=0.95, timeout=240
                 return _read_stream(res, on_token)
 
         except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "ignore")[:200]
+            raw = e.read().decode("utf-8", "ignore")
+            detail = provider_error(raw)
+            if e.code == 400 and "reasoning_effort" in body and "reasoning" in raw.lower():
+                THINK_OK[0] = False               # المزوّد لا يعرف الخيار: أعد الطلب بدونه
+                body.pop("reasoning_effort", None)
+                continue
+            if e.code == 429 and "PerDay" in raw:
+                raise RuntimeError("انتهت حصة اليوم لهذا النموذج عند المزوّد. " + detail)
             if e.code in (429, 500, 502, 503, 504, 529) and attempt < len(backoff):
+                wait = backoff[attempt]
+                m = re.search(r'"retryDelay":\s*"(\d+)', raw)
+                if m:
+                    wait = min(60, max(wait, int(m.group(1)) + 1))
                 if on_token:
-                    on_token(None, f"الخدمة مشغولة، إعادة المحاولة بعد {backoff[attempt]} ثانية")
-                time.sleep(backoff[attempt])
+                    on_token(None, f"الخدمة مشغولة، إعادة المحاولة بعد {wait} ثانية")
+                time.sleep(wait)
+                attempt += 1
                 continue
             if e.code in (401, 403):
                 raise RuntimeError("المفتاح مرفوض: " + detail)
@@ -466,10 +543,9 @@ def chat(messages, provider, creds, on_token=None, temperature=0.95, timeout=240
         except (urllib.error.URLError, TimeoutError) as e:
             if attempt < len(backoff):
                 time.sleep(backoff[attempt])
+                attempt += 1
                 continue
             raise RuntimeError(f"تعذّر الاتصال: {e}")
-
-    raise RuntimeError("تعذّر إتمام الطلب.")
 
 
 def _read_stream(res, on_token):
@@ -504,8 +580,14 @@ CRAFT = (
     "- كل سطر يشدّ القارئ للسطر الذي بعده: يضيف واقعة أو يفتح سؤالًا ضمنيًا.\n"
     "- أرقام محددة: كم سنة، كم مبلغ، كم نسبة. الأرقام هي ما يصدّق القارئ.\n"
     "- لا تسمِّ المشاعر. بدل «حزنت» اكتب الفعل أو التفصيل اللي يدل عليها.\n"
-    "- لا رموز تعبيرية، لا عناوين، لا وسوم، لا أقواس شارحة، لا تمهيد قبل القصة."
+    "- لا رموز تعبيرية، لا عناوين، لا وسوم، لا أقواس شارحة، لا تمهيد قبل القصة.\n"
+    "- لا حِكم ولا أمثال ولا خلاصات: أي جملة عامة تصلح لأي قصة تُحذف."
 )
+
+
+def system_prompt(dialect):
+    return CRAFT + "\nاللهجة: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
+
 
 REALISM = (
     "شروط الواقعية، وهي الأهم، وأي إخلال بها يفسد المنشور:\n"
@@ -531,7 +613,8 @@ VIRAL = (
     "- لا كلمة زائدة: احذف الصفات والظروف والتكرار التي لا تحمل معلومة.\n"
     "- الموقف يعرفه ثمانون بالمئة من القرّاء: عائلة، شغل، دين، جيران، فقد. "
     "لا مهن نادرة ولا مراجع محلية ضيقة ولا أسماء أماكن.\n"
-    "- سطر واحد على الأقل يصلح للاقتباس وحده: قصير، محدد، بلا حكمة.\n"
+    "- سطر واحد على الأقل يصلح للاقتباس وحده: واقعة من القصة نفسها (رقم، فعل، شيء)، "
+    "قصير ومحدد. ليس حكمة ولا مثلًا ولا جملة عامة تصلح لأي قصة.\n"
     "- الكشف يقلب الصورة التي بناها القارئ في النصف الأول، لا يضيف إليها فقط.\n"
     "- النهاية تجعل القارئ يريد أن يقول رأيه من دون أن يُطلب منه ذلك.\n"
     "- لا سطر أطول من ١٤ كلمة. المتوسط بين ٧ و٩ كلمات."
@@ -644,7 +727,8 @@ def write_prompt(dna, idea, fmt, dialect, core, pov, drama):
     ])
 
 
-def edit_prompt(fmt, pov, ending, facts):
+def edit_prompt(fmt, pov, ending, facts, dialect="saudi"):
+    label, low, high = FORMATS.get(fmt, FORMATS["medium"])
     closing = ("آخر سطرين: معضلة بخيارين واضحين محددين، حيرة شخصية، بلا سؤال موجّه "
                "للقارئ وبلا دعوة تعليق."
                if ending == "dilemma" else
@@ -656,6 +740,8 @@ def edit_prompt(fmt, pov, ending, facts):
         "امشِ على النص سطرًا سطرًا: كل سطر لازم إما يضيف واقعة جديدة أو يفتح سؤالًا "
         "ضمنيًا يحتاج السطر التالي. السطر الذي لا يفعل أحدهما يُحذف، لا يُجمَّل.",
         "احذف كل كلمة لا تحمل معلومة: الصفات والظروف والتكرار. الجملة القصيرة أقوى.",
+        f"الطول النهائي بين {low} و{high} كلمة. الحذف لا يهبط بالنص تحت {low}: إن قصر "
+        "فأضف وقائع محسوسة من ورقة الحقائق أو تفصيلًا من الحاضر، لا حشوًا.",
         "استبدل كل جملة تسمّي شعورًا بفعل أو تفصيل مادي.",
         "الكشف في النصف الثاني لا في البداية، وعلى دفعتين: سطر تمهيد ينتهي بنقاط "
         "حذف، ثم الجملة القاصمة وحدها في سطر.",
@@ -664,21 +750,26 @@ def edit_prompt(fmt, pov, ending, facts):
         "تأكد أن النص يوضّح ضمنيًا لماذا بقي الأمر مخفيًا ولماذا ظهر الآن.",
         "أبقِ سطرًا فيه شك أو جهل من صاحب القصة، وتفصيلًا واحدًا زائدًا لا علاقة "
         "له بالحبكة.",
-        "سطر واحد على الأقل يصلح للاقتباس وحده: قصير ومحدد وبلا حكمة.",
+        "سطر واحد على الأقل يصلح للاقتباس وحده: واقعة محددة من القصة، لا حكمة ولا "
+        "جملة عامة. واحذف أي حكمة أو مثل أو خلاصة موجودة.",
         closing,
         "كل جملة في سطر مستقل وبينها سطر فارغ. لا سطر أطول من ١٤ كلمة."
         + (" حافظ على ترقيم مقاطع الخيط ١، ٢، ٣ في بداية كل مقطع." if fmt == "thread" else ""),
         f"منظور السرد يبقى كما هو: {POVS.get(pov, POVS['self'])[1]}.",
+        f"اللهجة: {DIALECT_HINT.get(dialect, DIALECT_HINT['saudi'])} إن كانت المسودة "
+        "بالفصحى فحوّلها إلى اللهجة المطلوبة جملةً جملة.",
         "احذف أي عبارة جاهزة أو مألوفة واستبدلها بتفصيل محدد.",
     ]
-    return ("أنت محرّر منشورات. أمامك مسودة. أعد كتابتها أقوى بنفس الحكاية ونفس اللهجة.\n"
+    return ("أنت محرّر منشورات. أمامك مسودة. أعد كتابتها أقوى بنفس الحكاية.\n"
             "افعل هذا بالترتيب:\n"
             + "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
             + "\n\n" + facts_block(facts)
             + "\n\nأعد النص النهائي وحده، بلا أي تعليق.")
 
 
-def audit_prompt(facts):
+def audit_prompt(facts, ending="dilemma"):
+    closing = ("معضلة بخيارين واضحين يواجهها صاحب القصة" if ending == "dilemma"
+               else "لحظة أو قرار صغير أو صورة، بلا عبرة")
     return (
         "أنت مدقّق. أمامك منشور قصصي يُفترض أنه واقعي. مهمتك أن تجد ما يجعل القارئ "
         "يقول «هذي ما تصير».\n"
@@ -690,8 +781,11 @@ def audit_prompt(facts):
         "4. المصادفة: هل تعتمد القصة على صدفة كبيرة يصعب تصديقها؟\n"
         "5. المبالغة: هل فيها حدث أقرب للأفلام منه للحياة؟\n"
         "6. الزمن: هل تسلسل الأحداث ممكن؟ (لا يعمل أحد وظيفتين قبل أن يتخرج مثلًا).\n"
+        "7. الحِكم: أي سطر عام يصلح لأي قصة (حكمة، مثل، خلاصة) يُحذف.\n"
         "ثم أصلح كل خلل وجدته بأقل تغيير ممكن، مع الحفاظ على اللهجة والبناء "
-        "وتقسيم السطور كما هي، ودون إضافة عبارات جاهزة.\n"
+        "وتقسيم السطور كما هي، ودون إضافة عبارات جاهزة. لا تُقصّر النص: ما تحذفه "
+        f"عوّضه بواقعة. والنهاية تبقى {closing}؛ إن حذفت السطر الأخير فأعد كتابة "
+        "النهاية بهذا الشكل.\n"
         + facts_block(facts) + "\n"
         'أعد JSON فقط بهذا الشكل: {"issues":["وصف مختصر لكل خلل وجدته"],'
         '"text":"النص بعد الإصلاح كاملًا"}\n'
@@ -699,13 +793,14 @@ def audit_prompt(facts):
     )
 
 
-def polish_prompt(problems, fmt, pov, ending, facts):
+def polish_prompt(problems, fmt, pov, ending, facts, dialect="saudi"):
     closing = ("النهاية معضلة بخيارين واضحين." if ending == "dilemma"
                else "النهاية لحظة أو قرار صغير، لا معضلة ولا عبرة.")
     return ("أنت محرّر. أمامك منشور شبه نهائي. لا تعد كتابته: أصلح فقط ما يلي بأقل "
-            "تغيير ممكن، وحافظ على اللهجة والحكاية وتقسيم السطور.\n"
+            "تغيير ممكن، وحافظ على الحكاية وتقسيم السطور.\n"
             + "\n".join(f"{i}. {p}" for i, p in enumerate(problems, 1))
-            + f"\n\nثوابت لا تُمَس: منظور السرد {POVS.get(pov, POVS['self'])[1]}. {closing}"
+            + f"\n\nثوابت لا تُمَس: منظور السرد {POVS.get(pov, POVS['self'])[1]}. {closing} "
+            + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
             + (" الخيط يبقى مرقّمًا ١، ٢، ٣." if fmt == "thread" else "")
             + "\n" + facts_block(facts)
             + "\n\nأعد النص وحده، بلا أي تعليق.")
@@ -845,8 +940,13 @@ def pick_idea(ideas, blocked):
     return best, novelty
 
 
-def make_hooks(text, provider, creds):
-    raw = chat([{"role": "system", "content": CRAFT},
+def dialect_hits(text, dialect):
+    """كم علامة لهجة مختلفة ظهرت في النص (للهجات المحكية فقط)."""
+    return sum(1 for m in DIALECT_MARKERS.get(dialect, []) if m in text)
+
+
+def make_hooks(text, provider, creds, dialect="saudi"):
+    raw = chat([{"role": "system", "content": system_prompt(dialect)},
                 {"role": "user", "content": HOOKS_PROMPT + text[:4000]}],
                provider, creds, temperature=1.0, timeout=90)
     data = json_obj(raw)
@@ -869,8 +969,8 @@ def best_hook(hooks, previous):
 
 
 # ------------------------------------------------------------------ الفحوصات
-def run_checks(text, fmt, pov, ending, facts, prev_openings=()):
-    """عشرة فحوصات محلية بلا نموذج. كل فحص يحمل تعليمة إصلاح إن كان الصقل يعالجه."""
+def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha"):
+    """نحو عشرة فحوصات محلية بلا نموذج. كل فحص يحمل تعليمة إصلاح إن كان الصقل يعالجه."""
     label, low, high = FORMATS.get(fmt, FORMATS["medium"])
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     wc = word_count(text)
@@ -913,6 +1013,12 @@ def run_checks(text, fmt, pov, ending, facts, prev_openings=()):
             "هذه الأرقام ليست في ورقة الحقائق: " + "، ".join(stray)
             + " — احذفها أو بدّلها بما في الورقة.")
 
+    if dialect in DIALECT_MARKERS:
+        hits = dialect_hits(text, dialect)
+        add("dialect", "اللهجة", hits >= 3, f"{hits} علامات لهجة",
+            f"النص بالفصحى والمطلوب لهجة {DIALECTS[dialect]}: "
+            + DIALECT_HINT[dialect] + " حوّل كل جملة إلى اللهجة.")
+
     add("doubt", "سطر شك أو جهل", bool(DOUBT_RE.search(text)), "",
         "لا يوجد سطر يقرّ فيه صاحب القصة بأنه لا يعرف شيئًا: أضف سطرًا واحدًا "
         "مثل «ما أدري ليش» بما يناسب اللهجة.")
@@ -948,18 +1054,23 @@ def score_of(checks):
     return round(100 * sum(1 for c in checks if c["ok"]) / len(checks))
 
 
+def polish_problems(checks):
+    """تعليمات الصقل: من الفحوصات الجوهرية الراسبة فقط، حتى لا يُهدر نداء على ملاحظة إرشادية."""
+    return [c["fix"] for c in checks if not c["ok"] and c["fix"] and c["id"] in CRITICAL]
+
+
 # ------------------------------------------------------------------ الكتابة
 def _guard(job):
     if job.get("cancel"):
         raise Cancelled()
 
 
-def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds):
+def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode="full"):
     seen_plots = recent_plots()
     prev_openings = recent_openings()
     blocked = TIRED_PLOTS + seen_plots
     ending = CORES.get(core, CORES["betrayal"])[3]
-    system = {"role": "system", "content": CRAFT}
+    system = {"role": "system", "content": system_prompt(dialect)}
 
     def token(piece, notice):
         _guard(job)
@@ -993,42 +1104,45 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds):
     job["stage"] = "edit"
     job["text"] = ""
     final = clean(chat(
-        [system, {"role": "user", "content": edit_prompt(fmt, pov, ending, facts) + "\n\nالمسودة:\n" + draft}],
+        [system, {"role": "user", "content": edit_prompt(fmt, pov, ending, facts, dialect)
+                  + "\n\nالمسودة:\n" + draft}],
         provider, creds, on_token=token, temperature=0.75, timeout=200))
     _guard(job)
 
-    # 4. التدقيق المنطقي
-    job["stage"] = "audit"
+    # 4. التدقيق المنطقي — يُتخطّى في الوضع السريع
     job["text"] = final
-    try:
-        checked = json_obj(chat(
-            [system, {"role": "user", "content": audit_prompt(facts) + "\n\nالنص:\n" + final
-                      + "\n\nالأرقام الواردة فيه: " + "، ".join(numbers_in(final))}],
-            provider, creds, temperature=0.3, timeout=150))
-        fixed = clean(str(checked.get("text") or ""))
-        issues = [str(x) for x in checked.get("issues", [])][:6]
-        if word_count(fixed) >= word_count(final) * 0.6:
-            final = fixed
-        job["issues"] = issues
-    except Cancelled:
-        raise
-    except Exception as exc:
-        log.warning("تعذّر التدقيق: %s", exc)
-        job["issues"] = []
-    _guard(job)
+    if mode != "fast":
+        job["stage"] = "audit"
+        try:
+            checked = json_obj(chat(
+                [system, {"role": "user", "content": audit_prompt(facts, ending) + "\n\nالنص:\n" + final
+                          + "\n\nالأرقام الواردة فيه: " + "، ".join(numbers_in(final))}],
+                provider, creds, temperature=0.3, timeout=150))
+            fixed = clean(str(checked.get("text") or ""))
+            issues = [str(x) for x in checked.get("issues", [])][:6]
+            if word_count(fixed) >= word_count(final) * 0.6:
+                final = fixed
+            job["issues"] = issues
+        except Cancelled:
+            raise
+        except Exception as exc:
+            log.warning("تعذّر التدقيق: %s", exc)
+            job["issues"] = []
+        _guard(job)
 
-    # 5. الفحوصات المحلية، ثم جولة صقل واحدة إن رسب شيء يعالجه الصقل
-    checks = run_checks(final, fmt, pov, ending, facts, prev_openings)
-    problems = [c["fix"] for c in checks if not c["ok"] and c["fix"]]
+    # 5. الفحوصات المحلية، ثم جولة صقل واحدة إن رسب فحص جوهري
+    checks = run_checks(final, fmt, pov, ending, facts, prev_openings, dialect)
+    problems = polish_problems(checks)
     if problems:
         job["stage"] = "polish"
         job["text"] = final
         try:
             candidate = clean(chat(
-                [system, {"role": "user", "content": polish_prompt(problems, fmt, pov, ending, facts)
+                [system, {"role": "user",
+                          "content": polish_prompt(problems, fmt, pov, ending, facts, dialect)
                           + "\n\nالنص:\n" + final}],
                 provider, creds, temperature=0.5, timeout=150))
-            new_checks = run_checks(candidate, fmt, pov, ending, facts, prev_openings)
+            new_checks = run_checks(candidate, fmt, pov, ending, facts, prev_openings, dialect)
             if (score_of(new_checks) >= score_of(checks)
                     and word_count(candidate) >= word_count(final) * 0.6):
                 final, checks = candidate, new_checks
@@ -1043,10 +1157,10 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds):
     if any(c["id"] == "opening" and not c["ok"] for c in checks):
         job["stage"] = "hook"
         try:
-            pick = best_hook(make_hooks(final, provider, creds), prev_openings)
+            pick = best_hook(make_hooks(final, provider, creds, dialect), prev_openings)
             if pick:
                 final = pick + "\n" + "\n".join(final.split("\n")[1:])
-                checks = run_checks(final, fmt, pov, ending, facts, prev_openings)
+                checks = run_checks(final, fmt, pov, ending, facts, prev_openings, dialect)
                 job["rehooked"] = True
         except Cancelled:
             raise
@@ -1063,10 +1177,10 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds):
     job["stage"] = "done"
 
 
-def _worker(job_id, dna, fmt, dialect, core, pov, drama, provider, creds):
+def _worker(job_id, dna, fmt, dialect, core, pov, drama, provider, creds, mode):
     job = JOBS[job_id]
     try:
-        write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds)
+        write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode)
     except Cancelled:
         job["stage"] = "cancelled"
     except Exception as exc:
@@ -1077,9 +1191,11 @@ def _worker(job_id, dna, fmt, dialect, core, pov, drama, provider, creds):
 
 def _creds(data):
     provider = "openai" if data.get("provider") == "openai" else "free"
+    think = (data.get("think") or "").strip()
     creds = {"base": (data.get("base") or "").strip(),
              "key": (data.get("key") or "").strip(),
-             "model": (data.get("model") or "").strip()}
+             "model": (data.get("model") or "").strip(),
+             "think": think if think in THINK_LEVELS else ""}
     return provider, creds
 
 
@@ -1105,7 +1221,7 @@ def config():
              "place": PLACE, "cost": COST_DARK + COST_LIGHT, "dilemma": DILEMMA + CLOSERS,
              "open": [{"id": k, "label": v[0]} for k, v in OPEN_STYLES.items()]}
     return jsonify(version=VERSION, openai_ready=bool(OPENAI_BASE and OPENAI_KEY),
-                   model=OPENAI_MODEL, saved=len(lib_read()), cores=cores, seeds=seeds,
+                   model=OPENAI_MODEL, think=THINK, saved=len(lib_read()), cores=cores, seeds=seeds,
                    povs=[{"id": k, "label": v[0]} for k, v in POVS.items()])
 
 
@@ -1126,6 +1242,7 @@ def write():
     if provider == "openai" and not ((creds["base"] or OPENAI_BASE) and (creds["key"] or OPENAI_KEY)):
         return jsonify(error="أدخل عنوان المزوّد ومفتاحه، أو اختر المحرّك المجاني."), 400
 
+    mode = "fast" if data.get("mode") == "fast" else "full"
     seed = data.get("seed") if isinstance(data.get("seed"), dict) else None
     dna = fresh_dna(data.get("topic", ""), core, seed, avoid=recent_dna())
 
@@ -1137,11 +1254,11 @@ def write():
         JOBS[job_id] = {"stage": "seed", "text": "", "error": "", "dna": dna,
                         "words": 0, "cliches": [], "premise": "", "issues": [],
                         "facts": [], "checks": [], "score": 0, "format": fmt,
-                        "core": core, "pov": pov, "dialect": dialect,
+                        "core": core, "pov": pov, "dialect": dialect, "mode": mode,
                         "at": time.time()}
 
     threading.Thread(target=_worker,
-                     args=(job_id, dna, fmt, dialect, core, pov, drama, provider, creds),
+                     args=(job_id, dna, fmt, dialect, core, pov, drama, provider, creds, mode),
                      daemon=True).start()
     return jsonify(job=job_id, dna=dna)
 
@@ -1213,8 +1330,9 @@ def hooks():
     if len(text) < 40:
         return jsonify(error="لا توجد قصة بعد."), 400
     provider, creds = _creds(data)
+    dialect = data.get("dialect") if data.get("dialect") in DIALECTS else "saudi"
     try:
-        return jsonify(hooks=make_hooks(text, provider, creds))
+        return jsonify(hooks=make_hooks(text, provider, creds, dialect))
     except Exception as exc:
         return jsonify(error=str(exc)), 400
 
@@ -1344,7 +1462,8 @@ PAGE = r"""<!doctype html>
   .steps li.active::after{content:""; display:block; width:6px; height:6px; border-radius:50%; background:var(--rose); margin:6px auto 0; animation:blink 1s step-end infinite}
   .steps li.hidden{display:none}
   .state{margin:10px 0 0; font-size:14px; color:var(--sage); min-height:1.4em}
-  .state.bad{color:#FF9DAF}
+  #state.bad{color:#FF9DAF}
+  .elapsed{color:var(--dim); margin-inline-start:10px; font-variant-numeric:tabular-nums}
 
   .sheet{
     background:var(--paper); color:var(--graphite); border-radius:3px;
@@ -1487,12 +1606,28 @@ PAGE = r"""<!doctype html>
         <option value="openai">مزوّد خاص</option>
       </select>
     </div>
+    <div>
+      <label for="mode">الوضع</label>
+      <select id="mode" data-keep>
+        <option value="full" selected>متأنٍ · مع تدقيق منطقي</option>
+        <option value="fast">سريع · بلا تدقيق، طلب أقل</option>
+      </select>
+    </div>
     <div class="full" id="creds" style="display:none">
       <label for="base">عنوان المزوّد ومفتاحه واسم النموذج</label>
       <input id="base" placeholder="https://api.openai.com/v1" data-keep>
       <input id="key" type="password" placeholder="sk-…" style="margin-top:8px" autocomplete="off">
       <input id="model" placeholder="gpt-4o-mini" style="margin-top:8px" data-keep>
       <label class="check"><input type="checkbox" id="rememberkey"> تذكّر المفتاح في هذا المتصفح</label>
+      <label for="think" style="margin-top:12px">قدر تفكير النموذج — للنماذج المفكّرة مثل Gemini؛ يُهمل تلقائيًا إن لم يعرفه المزوّد</label>
+      <select id="think" data-keep>
+        <option value="">افتراضي الخادم</option>
+        <option value="none">بلا تفكير · الأسرع</option>
+        <option value="minimal">أدنى</option>
+        <option value="low">قليل · موصى به</option>
+        <option value="medium">متوسط</option>
+        <option value="high">عالٍ · الأبطأ</option>
+      </select>
     </div>
   </div>
 
@@ -1521,7 +1656,7 @@ PAGE = r"""<!doctype html>
     <li data-s="audit">تدقيق</li>
     <li data-s="polish" class="hidden">صقل</li>
   </ol>
-  <p class="state" id="state" aria-live="polite"></p>
+  <p class="state" aria-live="polite"><span id="state"></span><span id="elapsed" class="elapsed"></span></p>
 
   <article class="sheet" id="sheet">
     <div class="tag" id="tag"></div>
@@ -1620,8 +1755,17 @@ $('provider').onchange = () => {
 
 const creds = () => ({
   provider: $('provider').value,
-  base: $('base').value, key: $('key').value, model: $('model').value
+  base: $('base').value, key: $('key').value, model: $('model').value, think: $('think').value
 });
+
+/* عدّاد الثواني بجانب الحالة: النماذج المفكّرة تصمت طويلًا قبل أول حرف */
+let tick = null, t0 = 0;
+function timer(on) {
+  clearInterval(tick);
+  if (!on) return;
+  t0 = Date.now(); $('elapsed').textContent = '';
+  tick = setInterval(() => { $('elapsed').textContent = Math.round((Date.now() - t0) / 1000) + ' ث'; }, 1000);
+}
 
 let current = { text: '', dna: null, plot: '', facts: [], score: 0, job: null };
 let poll = null, es = null, finished = false;
@@ -1648,6 +1792,7 @@ function seedPayload() {
 }
 
 function busy(on) {
+  timer(on);
   $('run').disabled = on;
   $('run').textContent = on ? 'يكتب…' : (current.text ? 'اكتب قصة أخرى' : 'اكتب قصة');
   $('again').disabled = on || !current.dna;
@@ -1673,7 +1818,7 @@ async function run(seed) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         topic: $('topic').value.trim(), format: $('format').value,
-        dialect: $('dialect').value, core: $('core').value,
+        dialect: $('dialect').value, core: $('core').value, mode: $('mode').value,
         pov: $('pov').value, drama: $('drama').value, seed, ...creds()
       })
     });
@@ -1841,7 +1986,7 @@ $('rehook').onclick = async () => {
   try {
     const res = await fetch('/hooks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, ...creds() })
+      body: JSON.stringify({ text, dialect: $('dialect').value, ...creds() })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);

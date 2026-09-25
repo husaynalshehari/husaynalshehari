@@ -4,10 +4,13 @@
     python -m unittest test_story_forge -v
 """
 
+import io
 import os
 import json
 import tempfile
 import unittest
+import urllib.error
+from unittest import mock
 
 os.environ["STORY_LIB"] = os.path.join(tempfile.mkdtemp(), "stories.json")
 
@@ -138,6 +141,35 @@ class Helpers(unittest.TestCase):
             self.assertTrue(ids[cid]["fix"], cid)
         self.assertNotIn("facts", ids)
 
+    def test_doubt_regex_covers_fusha_and_dialects(self):
+        for line in ("لا أعلم كيف حصل على توقيع جده", "ما أدري ليش", "مش عارف ليه", "ما بعرف شو صار"):
+            self.assertTrue(sf.DOUBT_RE.search(line), line)
+        self.assertFalse(sf.DOUBT_RE.search("رحت للبنك وسحبت المبلغ"))
+
+    def test_dialect_check_fails_on_fusha_when_dialect_requested(self):
+        fusha = "كنا نراجع ملفات الشركة.\n\nلم يفتح أحد مكتبه.\n\nإما أن أقاضي ابني أو أترك الأرض."
+        ids = {c["id"]: c for c in sf.run_checks(fusha, "medium", "self", "dilemma", [], dialect="saudi")}
+        self.assertFalse(ids["dialect"]["ok"])
+        self.assertIn("سعودية", ids["dialect"]["fix"])
+        ids = {c["id"]: c for c in sf.run_checks(STORY, "short", "self", "dilemma", [], dialect="saudi")}
+        self.assertTrue(ids["dialect"]["ok"])
+        ids = {c["id"]: c for c in sf.run_checks(fusha, "medium", "self", "dilemma", [], dialect="fusha")}
+        self.assertNotIn("dialect", ids)
+
+    def test_polish_only_for_critical_failures(self):
+        checks = [{"id": "doubt", "ok": False, "fix": "x"}, {"id": "lines", "ok": False, "fix": "y"},
+                  {"id": "facts", "ok": True, "fix": None}]
+        self.assertEqual(sf.polish_problems(checks), [])
+        checks.append({"id": "dialect", "ok": False, "fix": "z"})
+        self.assertEqual(sf.polish_problems(checks), ["z"])
+
+    def test_provider_error_reads_google_quota_message(self):
+        raw = json.dumps([{"error": {"code": 429, "message": "You exceeded your current quota.\n* Quota exceeded for metric: x, limit: 20, model: m\nPlease retry in 28s.", "details": [{"retryDelay": "28s"}]}}])
+        msg = sf.provider_error(raw)
+        self.assertIn("الحدّ 20", msg)
+        self.assertIn("28 ثانية", msg)
+        self.assertEqual(sf.provider_error("نص عادي"), "نص عادي")
+
     def test_best_hook_filters_questions_and_clashes(self):
         prev = ["دفعت حساب القهوة وطلعت من المطعم بسرعة"]
         hooks = ["ليش صار كذا؟", "دفعت حساب القهوة وطلعت من المطعم", "فتحت الظرف وأنا واقف عند الباب"]
@@ -216,6 +248,15 @@ class Pipeline(unittest.TestCase):
             sf.write_story(job, sf.fresh_dna(), "short", "saudi", "betrayal", "self", "mid", "free", {})
         self.assertEqual(fake.calls, ["premise"])
 
+    def test_fast_mode_skips_audit(self):
+        fake = FakeProvider()
+        sf.chat = fake
+        job = new_job()
+        sf.write_story(job, sf.fresh_dna(), "short", "saudi", "betrayal", "self", "mid", "free", {}, mode="fast")
+        self.assertEqual(job["stage"], "done")
+        self.assertNotIn("audit", fake.calls)
+        self.assertEqual(job["issues"], [])
+
     def test_third_person_leak_is_reported(self):
         fake = FakeProvider()
         sf.chat = fake
@@ -223,6 +264,81 @@ class Pipeline(unittest.TestCase):
         sf.write_story(job, sf.fresh_dna("", "loss"), "short", "saudi", "loss", "third", "mid", "free", {})
         pov = [c for c in job["checks"] if c["id"] == "pov"][0]
         self.assertFalse(pov["ok"])
+
+
+class _Resp:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+
+def _http_error(code, body):
+    return urllib.error.HTTPError("https://x/chat/completions", code, "err", {}, io.BytesIO(body.encode("utf-8")))
+
+
+class Transport(unittest.TestCase):
+    """سلوك chat() أمام المزوّد: التفكير المرفوض، والحصة اليومية، بلا شبكة."""
+    CREDS = {"base": "https://x", "key": "k", "model": "m", "think": "low"}
+
+    def setUp(self):
+        sf.THINK_OK[0] = True
+
+    def tearDown(self):
+        sf.THINK_OK[0] = True
+
+    def test_reasoning_effort_is_sent_then_dropped_when_provider_rejects_it(self):
+        seen = []
+
+        def fake_urlopen(req, timeout=0):
+            body = json.loads(req.data)
+            seen.append(body)
+            if "reasoning_effort" in body:
+                raise _http_error(400, '{"error":{"message":"Unrecognized request argument supplied: reasoning_effort"}}')
+            return _Resp({"choices": [{"message": {"content": "ok"}}]})
+
+        with mock.patch.object(sf.urllib.request, "urlopen", fake_urlopen):
+            out = sf.chat([{"role": "user", "content": "x"}], "openai", self.CREDS)
+            self.assertEqual(out, "ok")
+            self.assertEqual(seen[0]["reasoning_effort"], "low")
+            self.assertNotIn("reasoning_effort", seen[1])
+            self.assertFalse(sf.THINK_OK[0])
+            sf.chat([{"role": "user", "content": "y"}], "openai", self.CREDS)
+            self.assertEqual(len(seen), 3)          # لا محاولة ثانية بعد ما عرفنا أنه مرفوض
+
+    def test_daily_quota_fails_fast_with_clear_message(self):
+        body = json.dumps([{"error": {"code": 429, "message": "You exceeded your current quota.\n* Quota exceeded for metric: x, limit: 20", "details": [{"violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}}])
+
+        def fake_urlopen(req, timeout=0):
+            raise _http_error(429, body)
+
+        with mock.patch.object(sf.urllib.request, "urlopen", fake_urlopen), \
+                mock.patch.object(sf.time, "sleep", side_effect=AssertionError("لا انتظار على حصة يومية")):
+            with self.assertRaises(RuntimeError) as ctx:
+                sf.chat([{"role": "user", "content": "x"}], "openai", self.CREDS)
+        self.assertIn("انتهت حصة اليوم", str(ctx.exception))
+        self.assertIn("الحدّ 20", str(ctx.exception))
+
+    def test_temporary_429_waits_for_retry_delay_then_succeeds(self):
+        calls, slept = [], []
+
+        def fake_urlopen(req, timeout=0):
+            calls.append(1)
+            if len(calls) == 1:
+                raise _http_error(429, '{"error":{"message":"busy","details":[{"retryDelay":"7s"}]}}')
+            return _Resp({"choices": [{"message": {"content": "ok"}}]})
+
+        with mock.patch.object(sf.urllib.request, "urlopen", fake_urlopen), \
+                mock.patch.object(sf.time, "sleep", lambda s: slept.append(s)):
+            self.assertEqual(sf.chat([{"role": "user", "content": "x"}], "openai", self.CREDS), "ok")
+        self.assertEqual(slept, [8])
 
 
 class Routes(unittest.TestCase):
@@ -241,6 +357,7 @@ class Routes(unittest.TestCase):
         self.assertIn("مِسنّ", r.get_data(as_text=True))
         cfg = self.c.get("/config").get_json()
         self.assertEqual(cfg["version"], sf.VERSION)
+        self.assertEqual(cfg["think"], sf.THINK)
         self.assertEqual(sorted(cfg["seeds"]), sorted(sf.SEED_KEYS))
         self.assertEqual(sum(len(g["items"]) for g in cfg["cores"]), len(sf.CORES))
 
@@ -250,11 +367,12 @@ class Routes(unittest.TestCase):
 
     def test_write_locks_seed_and_streams_to_done(self):
         sf.chat = FakeProvider()
-        r = self.c.post("/write", json={"format": "short", "core": "betrayal",
+        r = self.c.post("/write", json={"format": "short", "core": "betrayal", "mode": "fast",
                                         "seed": {"who": "أمي", "open": "number"}})
         self.assertEqual(r.status_code, 200)
         data = r.get_json()
         self.assertEqual(data["dna"]["who"], "أمي")
+        self.assertEqual(sf.JOBS[data["job"]]["mode"], "fast")
         self.assertEqual(data["dna"]["locked"], ["who", "open"])
         job = data["job"]
         for _ in range(200):                     # العامل في خيط آخر
