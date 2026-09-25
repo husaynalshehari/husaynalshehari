@@ -564,6 +564,47 @@ class Info(unittest.TestCase):
         self.assertTrue(job["parts"][0].endswith("بعد 10 سنين.."))
         self.assertTrue(job["parts"][1].startswith("..ينهار"))
 
+    def test_critique_and_satire_kinds_share_pipeline_with_own_rules(self):
+        for kind, first_domain in (("critique", "habit"), ("satire", "types")):
+            cfg = sf.topic_cfg(kind)
+            self.assertGreaterEqual(len(cfg["domains"]), 15, kind)
+            self.assertGreaterEqual(len(cfg["angles"]), 8, kind)
+            spec = sf.fresh_info("bogus", "bogus", "", None, kind)
+            self.assertEqual((spec["kind"], spec["domain"]), (kind, first_domain))
+            self.assertIn(spec["frame"], cfg["frames"])
+            self.assertIn(cfg["noun"], sf.info_premise_prompt(spec, []))
+            self.assertIn(cfg["hook"], sf.info_write_prompt(spec, {"hook": "", "claim": "x", "why": "", "points": [],
+                                                                    "example": "", "facts": [], "bait": "", "resolve": ""}, "short", "saudi"))
+            self.assertIn("اسم شخص", sf.info_audit_prompt([], spec))
+            self.assertIn(cfg["craft"][:20], sf.info_system_prompt("saudi", kind))
+        self.assertIn("لا سخرية من دين", sf.info_system_prompt("saudi", "satire"))
+        self.assertIn("لا أشخاصًا بأسمائهم", sf.info_system_prompt("saudi", "critique"))
+        # النقاط المرقّمة إرشادية للانتقاد والسخرية، جوهرية للمعلومات فقط
+        text = INFO_STORY.replace("1. ", "").replace("2. ", "").replace("3. ", "")
+        for kind in ("critique", "satire"):
+            ids = {c["id"]: c for c in sf.run_checks(text, "short", "self", "closer", [], kind=kind)}
+            self.assertFalse(ids["points"]["ok"]); self.assertIsNone(ids["points"]["fix"])
+        ids = {c["id"]: c for c in sf.run_checks(text, "short", "self", "closer", [], kind="info")}
+        self.assertTrue(ids["points"]["fix"])
+        # خط الإنتاج والمكتبة مفصولان
+        fake = FakeProvider(story=INFO_STORY, audit_text=INFO_STORY, polish_text=INFO_STORY)
+        sf.chat = fake
+        job = {"stage": "seed", "text": "", "kind": "satire", "issues": [], "checks": []}
+        sf.write_info(job, sf.fresh_info("types", "types", "", None, "satire"), "short", "saudi", "free", {})
+        self.assertEqual(job["stage"], "done")
+        self.assertIn("سخرية", fake.calls and sf.KIND_LABELS["satire"])
+        c = sf.app.test_client(); sf.JOBS.clear()
+        r = c.post("/write", json={"kind": "critique", "domain": "wedding", "angle": "cost", "mode": "fast"})
+        self.assertEqual(r.get_json()["dna"]["kind"], "critique")
+        self.assertEqual(sf.JOBS[r.get_json()["job"]]["kind"], "critique")
+        r = c.post("/library", json={"text": INFO_STORY, "kind": "satire"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(c.get("/library").get_json()["items"][0]["kind"], "satire")
+        self.assertEqual(sf.recent_plots(kind="critique"), [])
+        cfg = c.get("/config").get_json()["topics"]
+        self.assertEqual(sorted(cfg), ["critique", "info", "satire"])
+        self.assertEqual(len(cfg["satire"]["domains"]), len(sf.SAT_DOMAINS))
+
     def test_library_keeps_kinds_apart(self):
         sf.lib_write([{"id": "s", "text": STORY, "plot": "قرض", "dna": {"who": "أمي", "secret": "س", "device": "د"}},
                       {"id": "i", "text": INFO_STORY, "plot": "الملل ضروري", "kind": "info", "dna": {"kind": "info"}}])

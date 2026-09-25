@@ -47,7 +47,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "4.2"
+VERSION = "4.3"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -1265,17 +1265,167 @@ INFO_STYLE = (
 )
 
 
-def info_system_prompt(dialect):
-    return INFO_CRAFT + "\nاللهجة: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
+CRIT_DOMAINS = {
+    "habit":    ("عادة اجتماعية", "عادة منتشرة يكررها الناس بلا تفكير: الضيافة، المجاملات، الولائم"),
+    "behavior": ("سلوك يومي", "تصرف يومي مزعج في الشارع أو المحل أو الطابور"),
+    "trend":    ("ترند وموضة", "شيء انتشر فجأة والكل يقلّده"),
+    "phrase":   ("عبارة يقولها الناس", "جملة جاهزة تُقال في كل موقف ولا تعني شيئًا"),
+    "family":   ("تصرفات الأهل", "ما يفعله الأهل بأبنائهم أو ببعضهم باسم العادة"),
+    "parents":  ("تربية اليوم", "طرق تربية شائعة وأثرها الحقيقي"),
+    "wedding":  ("الأعراس والمناسبات", "المهور، الولائم، المظاهر، الديون"),
+    "work":     ("بيئة الشغل", "الاجتماعات، المدراء، الدوام الطويل، الإنجاز الوهمي"),
+    "driving":  ("القيادة والشارع", "سلوك السائقين والمشاة والمواقف"),
+    "service":  ("الخدمات والمحلات", "التعامل مع العميل، المواعيد، الأسعار، الردود الجاهزة"),
+    "social":   ("وسائل التواصل", "المشاهير، المقارنة، التصوير في كل مكان، النصائح الجاهزة"),
+    "money":    ("المال والمظاهر", "الاستدانة للمظاهر، السيارات، القهوة الغالية"),
+    "school":   ("المدارس والتعليم", "الواجبات، الحفظ، الاختبارات، المشاريع اللي يسويها الأهل"),
+    "health":   ("الصحة والعلاج الشعبي", "الوصفات المتداولة، الأدوية بلا وصفة، النصائح الطبية في القروبات"),
+    "youth":    ("الشباب", "الطموح، السهر، الوظيفة، المقارنة مع الجيل السابق"),
+    "elders":   ("الجيل السابق", "ما يكرره الكبار على الصغار وما تغيّر فعلًا"),
+    "food":     ("الأكل والولائم", "الإسراف، الأكل بالليل، الطلبات، الحميات الموسمية"),
+    "phone":    ("الجوال في الحياة", "الجوال على السفرة، في المجلس، مع الأطفال"),
+    "religion_free": ("الوعظ في غير محله", "استعمال النصح والوعظ كسلاح في المواقف اليومية، بلا خوض في الدين نفسه"),
+    "hypocrisy": ("ازدواجية المعايير", "ما نطالب به غيرنا ولا نطبقه"),
+}
+
+CRIT_ANGLES = {
+    "why_wrong": ("ليش هالعادة غلط", "تفكيك عادة مقبولة وإظهار ثمنها الحقيقي"),
+    "unsaid":    ("اللي ما أحد يجرؤ يقوله", "الحقيقة المسكوت عنها بصيغة مباشرة"),
+    "question":  ("السؤال المحرج", "سؤال واحد يفضح التناقض ولا أحد يجاوبه"),
+    "cost":      ("وش تكلفنا فعلًا", "الثمن الخفي بالوقت أو المال أو العلاقات"),
+    "compare":   ("عندنا وعندهم", "مقارنة تكشف أن الشيء ليس قدرًا بل اختيارًا"),
+    "confession": ("اعتراف", "الكاتب نفسه كان يفعلها ويشرح ليش توقف"),
+    "letter":    ("رسالة إلى", "خطاب مباشر إلى من يفعل هذا الشيء"),
+    "list":      ("قائمة اتهام", "3 إلى 5 نقاط محددة، كل واحدة سطر"),
+    "timeline":  ("كيف بدأت وكيف صارت", "أصل العادة وكيف انحرفت عن معناها"),
+    "test":      ("اختبر نفسك", "علامات يعرف بها القارئ أنه واقع فيها"),
+}
+
+CRIT_FRAMES = ["بمشهد من مجلس", "بمثال من عرس", "بموقف في محل", "بمقارنة جيلين",
+               "بسؤال واحد يتكرر", "بحسبة أرقام بسيطة", "بقصة قصيرة توضيحية", "بيوم واحد"]
+
+CRIT_CRAFT = (
+    "أنت كاتب منشورات انتقادية عربية تنتشر: رأي جريء في عادة أو سلوك أو ظاهرة، جمل قصيرة، "
+    "كل جملة في سطر مستقل وبين السطور سطر فارغ، لا حشو ولا وعظ ولا مقدمات.\n"
+    "حدود لا تتجاوزها:\n"
+    "- انتقد الفعل والعادة والظاهرة، لا أشخاصًا بأسمائهم ولا جهات أو شركات بأسمائها.\n"
+    "- لا سبّ ولا تحقير ولا تعميم على فئة بحكم أصلها أو دينها أو جنسها أو منطقتها.\n"
+    "- لا خوض في الدين أو السياسة أو الطائفة؛ الموضوع اجتماعي يومي.\n"
+    "- لا أرقام ولا دراسات مخترعة؛ الحجة من المشهد اليومي والمنطق.\n"
+    "- لا رموز تعبيرية، لا وسوم، لا عناوين."
+)
+
+CRIT_STYLE = (
+    "أسلوب المنشور الانتقادي الذي ينتشر:\n"
+    "- السطر الأول حكم جريء محدد بصيغة جازمة يعرفه الكل ويخاف يقوله: «نص الولائم اللي "
+    "نسويها ما هي كرم، هي خوف من كلام الناس».\n"
+    "- السطر الثاني مشهد يومي محسوس يثبت الحكم، بلا شرح.\n"
+    "- السبب الحقيقي في سطرين: ليش نستمر رغم أننا نعرف.\n"
+    "- 3 إلى 5 أمثلة أو نقاط محددة، كل واحدة سطر يبدأ برقم.\n"
+    "- سطر واحد يسمّي التناقض بوضوح، بلا شتيمة: «نقول الحمد لله على النعمة ونرمي نصها».\n"
+    "- سطر يصلح للاقتباس وحده، محدد، بلا حكمة عامة.\n"
+    "- النهاية: سؤال مباشر يحرج القارئ ويجعله يجيب في التعليقات، أو تحدٍّ صغير يبدأ به اليوم.\n"
+    "- النبرة: واثقة، مباشرة، فيها خفة أحيانًا، بلا غضب مفتعل. لا سطر أطول من ١٤ كلمة."
+)
+
+SAT_DOMAINS = {
+    "types":    ("أنواع الناس", "تصنيف ساخر لأنواع البشر في موقف: في الطابور، في القروب، في العزيمة"),
+    "habit":    ("عادة يومية", "عادة يكررها الكل وتُضخَّم حتى تبدو بحجمها الحقيقي"),
+    "trend":    ("ترند", "موضة أو تطبيق أو تحدٍّ انتشر والكل يقلّده"),
+    "phrase":   ("عبارات نقولها", "ترجمة ما يقوله الناس إلى ما يقصدونه فعلًا"),
+    "group":    ("قروبات العائلة", "الرسائل الصباحية، الفتاوى، الأخبار المعاد إرسالها"),
+    "wedding":  ("الأعراس", "الدعوات، التأخير، التصوير، الطعام، الكوشة"),
+    "work":     ("الشغل", "الاجتماع اللي كان ممكن يكون إيميل، المدير، الزميل النشيط"),
+    "family":   ("العائلة", "الأم، الخالة، العم، الأخ الصغير، في مواقف يعرفها الكل"),
+    "driving":  ("الشارع والقيادة", "الدوّار، الإشارة، الوقوف المزدوج، الفلاشر"),
+    "diet":     ("الحميات", "من يبدأ الدايت الأحد وينهيه الاثنين"),
+    "gym":      ("النادي", "الاشتراك السنوي، الصور، السلفي، التمرين الأول والأخير"),
+    "phone":    ("الجوال", "البطارية، الإشعارات، «شفت الرسالة وما رديت»"),
+    "school":   ("المدرسة والجامعة", "المشاريع، الطالب اللي يسأل آخر دقيقة، الاختبار"),
+    "shopping": ("التسوق والعروض", "التخفيضات، السلة، «آخذه وأرجعه»"),
+    "travel":   ("السفر", "الشنطة، المطار، الصور، «ودي أرجع البيت»"),
+    "guests":   ("الضيوف", "الضيف اللي ما يمشي، القهوة، «تعشيتوا؟»"),
+    "cooking":  ("الطبخ", "الوصفات، «شوي ملح»، الأكل اللي ما طلع مثل الصورة"),
+    "kids":     ("الأطفال", "الأسئلة، النوم، الأكل، «ما أبي»"),
+    "adulting": ("الحياة بعد الثلاثين", "الظهر، النوم بدري، الفواتير، «كنا نسهر»"),
+    "internet": ("خبراء الإنترنت", "من يعرف كل شيء عن كل شيء في التعليقات"),
+}
+
+SAT_ANGLES = {
+    "types":     ("قائمة أنواع", "3 إلى 5 أنواع من الناس في الموقف، كل نوع سطر"),
+    "guide":     ("دليل ساخر", "«كيف تصير…» خطوات مبالغ فيها"),
+    "day":       ("يوم في حياة", "تسلسل ساعات يوم بمبالغة"),
+    "translate": ("ترجمة", "«يقول… يقصد…» جملة جملة"),
+    "ad":        ("إعلان ساخر", "منتج أو خدمة وهمية تحل مشكلة يومية"),
+    "dictionary": ("قاموس", "كلمات وتعريفاتها الحقيقية"),
+    "stages":    ("مراحل", "المراحل الخمس لشيء يومي: الإنكار، الغضب…"),
+    "review":    ("تقييم", "تقييم ساخر من خمس نجوم لشيء لا يُقيَّم عادة"),
+    "news":      ("خبر عاجل", "موقف يومي بصياغة نشرة أخبار"),
+    "confession": ("اعتراف", "الكاتب يعترف بشيء يفعله الكل ولا يعترف به"),
+}
+
+SAT_FRAMES = ["بمبالغة تصاعدية", "بجدية زائدة", "بصوت راوي وثائقي", "بأرقام مضحكة",
+              "بحوار قصير", "بمقارنة قبل وبعد", "بنبرة شكوى", "بنبرة خبير"]
+
+SAT_CRAFT = (
+    "أنت كاتب منشورات ساخرة عربية تنتشر: مبالغة ذكية في شيء يومي يعرفه الكل، جمل قصيرة، "
+    "كل جملة في سطر مستقل وبين السطور سطر فارغ، الضحكة من الدقة لا من الشتيمة.\n"
+    "حدود لا تتجاوزها:\n"
+    "- اسخر من المواقف والعادات، لا من أشخاص بأسمائهم ولا من جهات بأسمائها.\n"
+    "- لا سخرية من دين أو مذهب أو عرق أو منطقة أو إعاقة أو مرض أو شكل جسد.\n"
+    "- لا ألفاظ سوقية ولا إيحاءات.\n"
+    "- المبالغة مسموحة والكذب على أنه معلومة ممنوع: الأرقام هنا للضحك ويُفهم أنها مزاح.\n"
+    "- لا رموز تعبيرية، لا وسوم، لا عناوين، لا «ههههه»."
+)
+
+SAT_STYLE = (
+    "أسلوب المنشور الساخر الذي ينتشر:\n"
+    "- السطر الأول جملة جادة الشكل عن شيء تافه، بصيغة خبرية أو تصنيف: «فيه 4 أنواع من الناس "
+    "في قروب العائلة». بلا «هههه» وبلا تنبيه أن هذا مزاح.\n"
+    "- الضحكة من التفصيل الدقيق اللي يعرفه الكل ولا أحد قاله: الوقت، الجملة الحرفية، الحركة.\n"
+    "- التصعيد: كل سطر أشد مبالغة من اللي قبله، والقفزة الأخيرة هي الأكبر.\n"
+    "- 3 إلى 5 عناصر (أنواع، خطوات، مراحل، ترجمات)، كل عنصر سطر يبدأ برقم.\n"
+    "- عنصر واحد على الأقل يضرب القارئ نفسه: «وأنت تعرف إنك النوع الثالث».\n"
+    "- سطر يصلح للاقتباس وحده: قصير، محدد، مضحك بلا شرح.\n"
+    "- النهاية: القفلة الأقوى، أو سؤال يخلي القارئ يعلّق بنوعه أو يمنشن صاحبه.\n"
+    "- النبرة: جادة ظاهريًا، بلا شرح النكتة. لا سطر أطول من ١٤ كلمة."
+)
+
+# كل نوع موضوعي وإعداداته — المعلومات والانتقاد والسخرية تشترك في خط الإنتاج وتختلف في القواعد
+TOPIC_KINDS = {
+    "info": {"label": "معلومات", "noun": "منشور معلوماتي", "domains": INFO_DOMAINS, "angles": INFO_ANGLES,
+             "frames": INFO_FRAMES, "craft": INFO_CRAFT, "style": INFO_STYLE,
+             "hook": "ادعاء جريء محدد أو سؤال «ليش»", "closing": "فعل واحد يبدأ به القارئ اليوم، أو سؤال قصير يجيب عنه في التعليقات",
+             "facts": "حقائق رقمية مؤكدة ومعروفة فقط؛ إن لم يوجد رقم مؤكد فاترك القائمة فارغة"},
+    "critique": {"label": "انتقاد", "noun": "منشور انتقادي", "domains": CRIT_DOMAINS, "angles": CRIT_ANGLES,
+                 "frames": CRIT_FRAMES, "craft": CRIT_CRAFT, "style": CRIT_STYLE,
+                 "hook": "حكم جريء محدد يعرفه الكل ويخاف يقوله", "closing": "سؤال مباشر يحرج القارئ أو تحدٍّ صغير يبدأ به اليوم",
+                 "facts": "لا أرقام إلا المعروفة للجميع (مثل: العرس يكلّف عشرات الآلاف)؛ الأفضل تركها فارغة"},
+    "satire": {"label": "سخرية", "noun": "منشور ساخر", "domains": SAT_DOMAINS, "angles": SAT_ANGLES,
+               "frames": SAT_FRAMES, "craft": SAT_CRAFT, "style": SAT_STYLE,
+               "hook": "جملة جادة الشكل عن شيء تافه، تصنيف أو خبر", "closing": "القفلة الأقوى، أو سؤال يخلي القارئ يعلّق بنوعه",
+               "facts": "أرقام مضحكة مبالغ فيها مسموحة إن كان واضحًا أنها مزاح؛ اتركها فارغة إن لم تلزم"},
+}
+KIND_LABELS = {k: v["label"] for k, v in TOPIC_KINDS.items()}
 
 
-def fresh_info(domain, angle, topic="", seed=None):
+def topic_cfg(kind):
+    return TOPIC_KINDS.get(kind, TOPIC_KINDS["info"])
+
+
+def info_system_prompt(dialect, kind="info"):
+    return topic_cfg(kind)["craft"] + "\nاللهجة: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
+
+
+def fresh_info(domain, angle, topic="", seed=None, kind="info"):
+    kind = kind if kind in TOPIC_KINDS else "info"
+    cfg = topic_cfg(kind)
     seed = {k: str(v).strip()[:120] for k, v in (seed or {}).items() if k in INFO_KEYS and str(v).strip()}
     spec = {
-        "kind": "info",
-        "domain": domain if domain in INFO_DOMAINS else "kids",
-        "angle": angle if angle in INFO_ANGLES else "why",
-        "frame": seed.get("frame") if seed.get("frame") in INFO_FRAMES else random.choice(INFO_FRAMES),
+        "kind": kind,
+        "domain": domain if domain in cfg["domains"] else next(iter(cfg["domains"])),
+        "angle": angle if angle in cfg["angles"] else next(iter(cfg["angles"])),
+        "frame": seed.get("frame") if seed.get("frame") in cfg["frames"] else random.choice(cfg["frames"]),
     }
     if seed:
         spec["locked"] = [k for k in INFO_KEYS if k in seed]
@@ -1285,8 +1435,9 @@ def fresh_info(domain, angle, topic="", seed=None):
 
 
 def info_text(spec):
-    d = INFO_DOMAINS[spec["domain"]]
-    a = INFO_ANGLES[spec["angle"]]
+    cfg = topic_cfg(spec.get("kind"))
+    d = cfg["domains"][spec["domain"]]
+    a = cfg["angles"][spec["angle"]]
     lines = [
         f"- المجال: {d[0]} — {d[1]}",
         f"- زاوية المنشور: {a[0]} — {a[1]}",
@@ -1298,22 +1449,22 @@ def info_text(spec):
 
 
 def info_premise_prompt(spec, avoid_claims):
-    d = INFO_DOMAINS[spec["domain"]][0]
-    a = INFO_ANGLES[spec["angle"]][0]
+    cfg = topic_cfg(spec.get("kind"))
+    d = cfg["domains"][spec["domain"]][0]
+    a = cfg["angles"][spec["angle"]][0]
     return "\n".join([
-        f"اقترح خمس أفكار مختلفة لمنشور معلوماتي قصير في مجال «{d}» بزاوية «{a}».",
+        f"اقترح خمس أفكار مختلفة لـ{cfg['noun']} قصير في مجال «{d}» بزاوية «{a}».",
         "كل فكرة يجب أن تكون من هذا المجال وهذه الزاوية تحديدًا.",
         "",
         info_text(spec),
         "",
         "لكل فكرة أعطِ:",
-        "- hook: السطر الأول، ادعاء جريء محدد أو سؤال «ليش»، من ٦ إلى ١٤ كلمة.",
+        f"- hook: السطر الأول، {cfg['hook']}، من ٦ إلى ١٤ كلمة.",
         "- claim: الفكرة المركزية في جملتين: ماذا يحدث ولماذا.",
         "- why: الآلية بلغة بسيطة في جملة أو جملتين.",
         "- points: 3 إلى 5 نقاط محددة قابلة للملاحظة أو التطبيق، كل نقطة جملة قصيرة.",
         "- example: مثال واحد من الحياة اليومية.",
-        "- facts: حقائق رقمية مؤكدة ومعروفة فقط (مثل: البالغ يحتاج 7 إلى 9 ساعات نوم). "
-        "إن لم يوجد رقم مؤكد فاترك القائمة فارغة؛ الرقم المخترع أسوأ من غيابه.",
+        f"- facts: {cfg['facts']}.",
         "- bait: جملة «طُعم» صادمة جازمة تناقض الشائع لكنها صحيحة بمعنى محدد، مكتوبة "
         "كاملة، من ٨ إلى ١٥ كلمة، فيها رقم أو كلمة قوية، بلا تحفظ. ستُقطع قبل كلمتها "
         "المفتاحية في الثريد.",
@@ -1379,12 +1530,12 @@ def info_premise_text(idea):
     return "\n".join(parts)
 
 
-def info_beats(fmt):
-    closing = ("النهاية: فعل واحد يبدأ به القارئ اليوم، أو سؤال قصير يجيب عنه في التعليقات.")
+def info_beats(fmt, kind="info"):
+    closing = "النهاية: " + topic_cfg(kind)["closing"] + "."
     thread = (" " + INFO_THREAD_RULES) if fmt == "thread" else ""
     return (
         "البناء الإلزامي، بهذا الترتيب:\n"
-        "1. سطر أول: الادعاء الجريء أو سؤال «ليش»، بصيغة محددة، بلا تشويق جاهز.\n"
+        f"1. سطر أول: {topic_cfg(kind)['hook']}، بصيغة محددة، بلا تشويق جاهز.\n"
         "2. سطر يقلب التوقع بكلمات جديدة (لا تكرر «السبب مو اللي تتوقعه» حرفيًا في كل مرة).\n"
         "3. الآلية في سطرين أو ثلاثة بلغة بسيطة.\n"
         "4. النقاط: 3 إلى 5 أسطر، كل سطر يبدأ برقم ثم نقطة محددة.\n"
@@ -1395,9 +1546,10 @@ def info_beats(fmt):
 
 
 def info_write_prompt(spec, idea, fmt, dialect):
+    cfg = topic_cfg(spec.get("kind"))
     label, low, high = FORMATS.get(fmt, FORMATS["short"])
     return "\n".join([
-        f"اكتب {label} معلوماتيًا بلهجة {DIALECTS.get(dialect, DIALECTS['saudi'])}، "
+        f"اكتب {label} ({cfg['noun']}) بلهجة {DIALECTS.get(dialect, DIALECTS['saudi'])}، "
         f"من {low} إلى {high} كلمة.",
         "",
         info_text(spec),
@@ -1409,9 +1561,9 @@ def info_write_prompt(spec, idea, fmt, dialect):
         facts_block(idea["facts"]).replace("لا أرقام مثبّتة، فاختر أرقامًا واقعية والتزم بها من أول سطر لآخره.",
                                           "لا أرقام مؤكدة، فاكتب بلا أرقام إطلاقًا."),
         "",
-        INFO_STYLE,
+        cfg["style"],
         "",
-        info_beats(fmt),
+        info_beats(fmt, spec.get("kind", "info")),
         "",
         "ممنوع استعمال هذه العبارات أو ما يشبهها:",
         "، ".join(BANNED),
@@ -1420,32 +1572,38 @@ def info_write_prompt(spec, idea, fmt, dialect):
     ])
 
 
-def info_edit_prompt(fmt, facts, dialect):
+def info_edit_prompt(fmt, facts, dialect, kind="info"):
+    cfg = topic_cfg(kind)
     label, low, high = FORMATS.get(fmt, FORMATS["short"])
     steps = [
-        "السطر الأول: ادعاء محدد جريء أو سؤال «ليش». إن كان عامًا أو مقدمة، بدّله.",
+        f"السطر الأول: {cfg['hook']}. إن كان عامًا أو مقدمة، بدّله.",
         "احذف كل سطر لا يضيف معلومة أو مثالًا أو خطوة. لا كلمة زائدة.",
         f"الطول النهائي بين {low} و{high} كلمة؛ إن قصر فأضف نقطة أو مثالًا، لا حشوًا.",
         "الأمانة: احذف أي رقم أو دراسة أو اسم ليس في ورقة الحقائق. حوّل أي ادعاء طبي "
         "جازم إلى صياغة حذرة أو احذفه. لا وعود علاج.",
         "النقاط 3 إلى 5 أسطر، كل سطر يبدأ برقم، محددة وقابلة للتطبيق.",
         "أبقِ مثالًا يوميًا واحدًا وسطرًا يصلح للاقتباس.",
-        "النهاية فعل واحد يبدأ به القارئ اليوم أو سؤال قصير للتعليقات.",
+        "النهاية: " + cfg["closing"] + ".",
         "كل جملة في سطر مستقل وبينها سطر فارغ. لا سطر أطول من ١٤ كلمة."
         + (" " + INFO_THREAD_RULES if fmt == "thread" else ""),
         f"اللهجة: {DIALECT_HINT.get(dialect, DIALECT_HINT['saudi'])}",
         "احذف أي عبارة جاهزة وأي حكمة عامة.",
     ]
-    return ("أنت محرّر منشورات معلوماتية. أمامك مسودة. أعد كتابتها أقوى وأدق بنفس الفكرة.\n"
+    return (f"أنت محرّر {cfg['noun']}. أمامك مسودة. أعد كتابتها أقوى وأدق بنفس الفكرة.\n"
             "افعل هذا بالترتيب:\n" + "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
             + "\n\n" + facts_block(facts) + "\n\nأعد النص النهائي وحده، بلا أي تعليق.")
 
 
 def info_audit_prompt(facts, spec):
-    d = INFO_DOMAINS[spec["domain"]][0]
-    a = INFO_ANGLES[spec["angle"]][0]
+    cfg = topic_cfg(spec.get("kind"))
+    d = cfg["domains"][spec["domain"]][0]
+    a = cfg["angles"][spec["angle"]][0]
     return (
-        "أنت مدقّق منشورات معلوماتية. مهمتك أن تمنع نشر معلومة خاطئة أو مضللة.\n"
+        f"أنت مدقّق {cfg['noun']}. مهمتك أن تمنع نشر ما يضر: معلومة خاطئة، أو إساءة لشخص "
+        "أو فئة، أو خوض في دين أو سياسة.\n"
+        "0. الحدود: أي اسم شخص أو جهة حقيقية يُحذف ويُستبدل بوصف عام؛ أي تعميم على فئة "
+        "بأصلها أو دينها أو جنسها يُعاد صياغته عن العادة لا عن الناس؛ أي إشارة لدين أو "
+        "سياسة أو طائفة تُحذف.\n"
         "افحص بالترتيب:\n"
         "1. الأرقام والدراسات: أي رقم أو نسبة أو دراسة أو اسم ليس في ورقة الحقائق ولا "
         "يُعد معرفة عامة مؤكدة → احذفه أو حوّله إلى صياغة بلا رقم.\n"
@@ -1464,8 +1622,8 @@ def info_audit_prompt(facts, spec):
     )
 
 
-def info_polish_prompt(problems, fmt, facts, dialect):
-    return ("أنت محرّر. أمامك منشور معلوماتي شبه نهائي. لا تعد كتابته: أصلح فقط ما يلي بأقل "
+def info_polish_prompt(problems, fmt, facts, dialect, kind="info"):
+    return (f"أنت محرّر. أمامك {topic_cfg(kind)['noun']} شبه نهائي. لا تعد كتابته: أصلح فقط ما يلي بأقل "
             "تغيير ممكن، وحافظ على الفكرة وتقسيم السطور.\n"
             + "\n".join(f"{i}. {p}" for i, p in enumerate(problems, 1))
             + "\n\nثوابت: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
@@ -1683,7 +1841,7 @@ def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha",
     """نحو عشرة فحوصات محلية بلا نموذج. كل فحص يحمل تعليمة إصلاح إن كان الصقل يعالجه.
     المعلومات (kind=info) تتخطى فحوصات السرد: المنظور، الشك، الدليل، سطر الحاضر، شكل النهاية."""
     label, low, high = FORMATS.get(fmt, FORMATS["medium"])
-    info = kind == "info"
+    info = kind in TOPIC_KINDS
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     wc = word_count(text)
     out = []
@@ -1739,7 +1897,7 @@ def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha",
             f"{word_count(first_line)} كلمة", "السطر الأول ليس ادعاءً محددًا جريئًا: اجعله من ٦ إلى ١٤ كلمة بلا مقدمة.")
         numbered = sum(1 for ln in lines if re.match(r"^\s*[\d\u0660-\u0669]+\s*[).\-–:/]", ln))
         add("points", "نقاط مرقّمة", 3 <= numbered <= 5, f"{numbered} نقاط",
-            "النقاط يجب أن تكون بين 3 و5 أسطر يبدأ كل منها برقم.")
+            "النقاط يجب أن تكون بين 3 و5 أسطر يبدأ كل منها برقم." if kind == "info" else None)
         add("hedge", "بلا وعود علاج", not re.search(r"يشفي|تشفي|يمنع تمامًا|علاج نهائي|مضمون|100%|١٠٠٪", text), "",
             "احذف أي وعد علاج أو ضمان: «يشفي»، «يمنع تمامًا»، «مضمون».")
     if not info:
@@ -1946,9 +2104,10 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
 
 def write_info(job, spec, fmt, dialect, provider, creds, mode="full"):
     """خط إنتاج منشورات المعلومات — منفصل عن القصص ومكتبتها."""
-    seen = recent_plots(kind="info")
-    prev_openings = recent_openings(kind="info")
-    system = {"role": "system", "content": info_system_prompt(dialect)}
+    kind = spec.get("kind") if spec.get("kind") in TOPIC_KINDS else "info"
+    seen = recent_plots(kind=kind)
+    prev_openings = recent_openings(kind=kind)
+    system = {"role": "system", "content": info_system_prompt(dialect, kind)}
 
     def token(piece, notice):
         _guard(job)
@@ -1979,7 +2138,7 @@ def write_info(job, spec, fmt, dialect, provider, creds, mode="full"):
     job["stage"] = "edit"
     job["text"] = ""
     final = clean(chat(
-        [system, {"role": "user", "content": info_edit_prompt(fmt, facts, dialect) + "\n\nالمسودة:\n" + draft}],
+        [system, {"role": "user", "content": info_edit_prompt(fmt, facts, dialect, kind) + "\n\nالمسودة:\n" + draft}],
         provider, creds, on_token=token, temperature=0.6, timeout=200))
     _guard(job)
 
@@ -2002,17 +2161,17 @@ def write_info(job, spec, fmt, dialect, provider, creds, mode="full"):
             job["issues"] = []
         _guard(job)
 
-    checks = run_checks(final, fmt, "self", "closer", facts, prev_openings, dialect, kind="info")
+    checks = run_checks(final, fmt, "self", "closer", facts, prev_openings, dialect, kind=kind)
     problems = polish_problems(checks)
     if problems:
         job["stage"] = "polish"
         job["text"] = final
         try:
             candidate = clean(chat(
-                [system, {"role": "user", "content": info_polish_prompt(problems, fmt, facts, dialect)
+                [system, {"role": "user", "content": info_polish_prompt(problems, fmt, facts, dialect, kind)
                           + "\n\nالنص:\n" + final}],
                 provider, creds, temperature=0.4, timeout=150))
-            new_checks = run_checks(candidate, fmt, "self", "closer", facts, prev_openings, dialect, kind="info")
+            new_checks = run_checks(candidate, fmt, "self", "closer", facts, prev_openings, dialect, kind=kind)
             if score_of(new_checks) >= score_of(checks) and word_count(candidate) >= word_count(final) * 0.6:
                 final, checks = candidate, new_checks
                 job["polished"] = True
@@ -2038,7 +2197,7 @@ def write_info(job, spec, fmt, dialect, provider, creds, mode="full"):
 def _worker(job_id, dna, fmt, dialect, core, pov, drama, provider, creds, mode):
     job = JOBS[job_id]
     try:
-        if job.get("kind") == "info":
+        if job.get("kind") in TOPIC_KINDS:
             write_info(job, dna, fmt, dialect, provider, creds, mode)
         else:
             write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode)
@@ -2087,6 +2246,10 @@ def config():
                    saved=len(lib_read()), cores=cores, seeds=seeds,
                    domains=[{"id": k, "label": v[0], "desc": v[1]} for k, v in INFO_DOMAINS.items()],
                    angles=[{"id": k, "label": v[0], "desc": v[1]} for k, v in INFO_ANGLES.items()],
+                   topics={k: {"label": c["label"],
+                               "domains": [{"id": i, "label": v[0], "desc": v[1]} for i, v in c["domains"].items()],
+                               "angles": [{"id": i, "label": v[0], "desc": v[1]} for i, v in c["angles"].items()]}
+                           for k, c in TOPIC_KINDS.items()},
                    povs=[{"id": k, "label": v[0]} for k, v in POVS.items()])
 
 
@@ -2109,9 +2272,9 @@ def write():
 
     mode = "fast" if data.get("mode") == "fast" else "full"
     seed = data.get("seed") if isinstance(data.get("seed"), dict) else None
-    kind = "info" if data.get("kind") == "info" else "story"
-    if kind == "info":
-        dna = fresh_info(data.get("domain", ""), data.get("angle", ""), data.get("topic", ""), seed)
+    kind = data.get("kind") if data.get("kind") in TOPIC_KINDS else "story"
+    if kind != "story":
+        dna = fresh_info(data.get("domain", ""), data.get("angle", ""), data.get("topic", ""), seed, kind)
     else:
         dna = fresh_dna(data.get("topic", ""), core, seed, avoid=recent_dna())
 
@@ -2222,7 +2385,7 @@ def library():
                   "dna": data.get("dna") or {}, "plot": (data.get("plot") or "")[:300],
                   "facts": [str(f)[:160] for f in (data.get("facts") or [])][:6],
                   "parts": [str(p)[:400] for p in (data.get("parts") or [])][:8],
-                  "kind": "info" if data.get("kind") == "info" else "story",
+                  "kind": data.get("kind") if data.get("kind") in TOPIC_KINDS else "story",
                   "score": int(data.get("score") or 0),
                   "meta": {k: str(data.get(k) or "")[:20] for k in ("format", "core", "pov", "dialect")},
                   "at": time.strftime("%Y-%m-%d %H:%M")})
@@ -2473,6 +2636,8 @@ PAGE = r"""<!doctype html>
         <select id="kind" data-keep>
           <option value="story" selected>قصة · موقف شخصي</option>
           <option value="info">معلومات · موضوع</option>
+          <option value="critique">انتقاد · عادة أو سلوك</option>
+          <option value="satire">سخرية · موقف يومي</option>
         </select></div>
       <div class="f story-only"><label for="core">نوع الموقف</label><select id="core" data-keep></select></div>
       <div class="f info-only"><label for="domain">المجال</label><select id="domain" data-keep></select></div>
@@ -2624,14 +2789,27 @@ const SEED_LABEL = { who:'الطرف الآخر', secret:'السر', device:'أ�
                      open:'نمط السطر الأول', topic:'موضوعك', locked:'مثبّت',
                      kind:'النوع', domain:'المجال', angle:'الزاوية', frame:'الإطار' };
 const TOPIC_HINT = { story: 'مثال: شي صار في مكتب محامي، أو سر طلع من كشف حساب — اتركه فارغًا ليختار المحرّك',
-                     info: 'مثال: ليش الأطفال يضعف تفكيرهم، أو وش يصير للجسم لو تركت السكر شهر — اتركه فارغًا ليختار المحرّك' };
+                     info: 'مثال: ليش الأطفال يضعف تفكيرهم، أو وش يصير للجسم لو تركت السكر شهر — اتركه فارغًا ليختار المحرّك',
+                     critique: 'مثال: عادة رمي الأكل في الولائم، أو «إن شاء الله» اللي تعني لا — اتركه فارغًا ليختار المحرّك',
+                     satire: 'مثال: أنواع الناس في قروب العائلة، أو دليل الدايت اللي يبدأ الأحد — اتركه فارغًا ليختار المحرّك' };
+const KIND_LABEL = { story: 'قصة', info: 'معلومات', critique: 'انتقاد', satire: 'سخرية' };
+let TOPICS = {};
+function fillTopic(kind) {
+  const t = TOPICS[kind]; if (!t) return;
+  [['domain', t.domains], ['angle', t.angles]].forEach(([id, items]) => {
+    const s = $(id), keepv = s.value; s.innerHTML = '';
+    items.forEach(it => { const o = document.createElement('option'); o.value = it.id; o.textContent = it.label; o.title = it.desc; s.appendChild(o); });
+    if ([...s.options].some(o => o.value === keepv)) s.value = keepv;
+  });
+}
 
 /* قصة أو معلومات: كل نوع يظهر حقوله فقط */
 function applyKind() {
-  const info = $('kind').value === 'info';
+  const kind = $('kind').value, info = kind !== 'story';
+  if (info) fillTopic(kind);
   document.querySelectorAll('.story-only').forEach(el => el.style.display = info ? 'none' : '');
   document.querySelectorAll('.info-only').forEach(el => el.style.display = info ? '' : 'none');
-  $('topic').placeholder = TOPIC_HINT[info ? 'info' : 'story'];
+  $('topic').placeholder = TOPIC_HINT[kind] || TOPIC_HINT.story;
 }
 const STAGE = { seed:'يركّب البذرة',
                 premise:'يولّد خمس حبكات بورقة حقائق ويختار الأبعد عن المستهلك',
@@ -2917,7 +3095,7 @@ function showSeed(dna, facts, issues) {
     let v = dna[k];
     const sel = { open: 'seed_open', domain: 'domain', angle: 'angle' }[k];
     if (sel) { const o = $(sel).querySelector('option[value="' + v + '"]'); v = o ? o.textContent : v; }
-    if (k === 'kind') v = v === 'info' ? 'معلومات' : 'قصة';
+    if (k === 'kind') v = KIND_LABEL[v] || v;
     return (SEED_LABEL[k] || k) + ': ' + v + ((dna.locked || []).includes(k) ? ' (ثابت)' : '');
   }), '');
   list($('factlist'), facts || [], 'لم تُثبَّت حقائق بعد.');
@@ -2929,7 +3107,7 @@ $('run').onclick = () => run(seedPayload());
 $('again').onclick = () => {
   if (!current.dna) return;
   const seed = {};
-  if (current.dna.kind === 'info') { if (current.dna.frame) seed.frame = current.dna.frame; }
+  if (current.dna.kind && current.dna.kind !== 'story') { if (current.dna.frame) seed.frame = current.dna.frame; }
   else SEED_KEYS.forEach(k => { if (current.dna[k]) seed[k] = current.dna[k]; });
   if (current.dna.topic) $('topic').value = current.dna.topic;
   run(seed);
@@ -3009,7 +3187,7 @@ function drawShelf() {
     const side = document.createElement('div'); side.className = 'side';
     const when = document.createElement('time'); when.textContent = it.at || '';
     const badge = document.createElement('span'); badge.className = 'badge';
-    badge.textContent = (it.kind === 'info' ? 'معلومات' : 'قصة') + (it.score ? ' · جودة ' + it.score + '٪' : '');
+    badge.textContent = (KIND_LABEL[it.kind || 'story'] || 'قصة') + (it.score ? ' · جودة ' + it.score + '٪' : '');
     const cp = document.createElement('button'); cp.type = 'button'; cp.textContent = 'انسخ';
     const del = document.createElement('button'); del.type = 'button'; del.textContent = 'حذف';
     side.append(when, badge, cp, del);
@@ -3062,10 +3240,7 @@ fetch('/config').then(r => r.json()).then(c => {
   });
   sel.value = 'betrayal';
   fillSeeds(c.seeds || {});
-  [['domain', c.domains], ['angle', c.angles]].forEach(([id, items]) => {
-    const s = $(id); s.innerHTML = '';
-    (items || []).forEach(it => { const o = document.createElement('option'); o.value = it.id; o.textContent = it.label; o.title = it.desc; s.appendChild(o); });
-  });
+  TOPICS = c.topics || {};
   restore();
   applyKind();
   if (c.openai_ready && !kept('provider')) { $('provider').value = 'openai'; $('model').value = c.model; if (c.plan_model) $('plan_model').value = c.plan_model; }
