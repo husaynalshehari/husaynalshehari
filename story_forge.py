@@ -47,7 +47,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "3.5"
+VERSION = "3.6"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -441,8 +441,19 @@ FORMATS = {
     "short": ("منشور قصير", 70, 100),
     "medium": ("منشور متوسط", 120, 165),
     "long": ("منشور طويل", 220, 340),
-    "thread": ("خيط مرقّم", 150, 200),
+    "thread": ("ثريد من أجزاء", 120, 200),
 }
+
+THREAD_MAX = 280          # أقصى أحرف للجزء الواحد
+THREAD_PARTS = (2, 5)     # أقل وأكثر عدد أجزاء
+THREAD_RULES = (
+    "شكل الثريد: اكتب القصة سطورًا كالعادة بلا ترقيم وبلا عناوين. ضع سطرًا وحيدًا "
+    "فيه «---» في موضع القطع بين الجزء الأول والثاني، وهذا الموضع هو الأهم: بعد أول "
+    "كلمة أو كلمتين من الجملة المفصلية، بحيث ينتهي الجزء الأول بكلمة معلّقة تفتح فجوة "
+    "(مثل: «يحتاج..») ويبدأ الجزء الثاني ببقية الجملة (مثل: «48 ساعة ويفيق»). "
+    f"الجزء الأول قبل «---» لا يتجاوز {THREAD_MAX - 30} حرفًا. باقي القصة يُقسَّم "
+    f"تلقائيًا إلى أجزاء لا يتجاوز الواحد {THREAD_MAX} حرفًا."
+)
 
 # نواة الموقف: كل نوع له وصفه، ونوع نهايته، ومجموعة البذرة التي تناسبه
 CORES = {
@@ -568,7 +579,7 @@ NOW_RE = re.compile(r"الحين|الآن|دلوقتي|هلق|توه|توّه|ل
                     r"ينتظر|تنتظر|يضحك|تضحك|عندنا الحين|في الصالة|برا الباب|نايم|نايمة")
 
 # الفحوصات التي يستحق رسوبها نداءً إضافيًا للصقل؛ الباقي إرشادي يظهر في البطاقة فقط
-CRITICAL = {"words", "numbers", "cliches", "pov", "facts", "ending", "thread", "clean", "dialect"}
+CRITICAL = {"words", "numbers", "cliches", "pov", "facts", "ending", "thread", "cliff", "clean", "dialect"}
 
 AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 TASHKEEL = re.compile(r"[ً-ْٰـ]")
@@ -974,8 +985,7 @@ def write_prompt(dna, idea, fmt, dialect, core, pov, drama):
     label, low, high = FORMATS.get(fmt, FORMATS["medium"])
     core_label, core_desc, _, ending = CORES.get(core, CORES["betrayal"])
     dlabel, ddesc = DRAMA.get(drama, DRAMA["mid"])
-    shape = ("رقّم المقاطع ١، ٢، ٣ كخيط منشورات، وكل مقطع مقطع قائم بذاته."
-             if fmt == "thread" else "اكتبه منشورًا واحدًا متصلًا.")
+    shape = THREAD_RULES if fmt == "thread" else "اكتبه منشورًا واحدًا متصلًا."
     hook = idea.get("hook") or ""
     return "\n".join([
         f"اكتب {label} بلهجة {DIALECTS.get(dialect, DIALECTS['saudi'])}، "
@@ -1041,7 +1051,7 @@ def edit_prompt(fmt, pov, ending, facts, dialect="saudi"):
         "جملة عامة. واحذف أي حكمة أو مثل أو خلاصة موجودة.",
         closing,
         "كل جملة في سطر مستقل وبينها سطر فارغ. لا سطر أطول من ١٤ كلمة."
-        + (" حافظ على ترقيم مقاطع الخيط ١، ٢، ٣ في بداية كل مقطع." if fmt == "thread" else ""),
+        + (" " + THREAD_RULES if fmt == "thread" else ""),
         f"منظور السرد يبقى كما هو: {POVS.get(pov, POVS['self'])[1]}.",
         f"اللهجة: {DIALECT_HINT.get(dialect, DIALECT_HINT['saudi'])} إن كانت المسودة "
         "بالفصحى فحوّلها إلى اللهجة المطلوبة جملةً جملة.",
@@ -1090,7 +1100,7 @@ def polish_prompt(problems, fmt, pov, ending, facts, dialect="saudi"):
             + "\n".join(f"{i}. {p}" for i, p in enumerate(problems, 1))
             + f"\n\nثوابت لا تُمَس: منظور السرد {POVS.get(pov, POVS['self'])[1]}. {closing} "
             + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
-            + (" الخيط يبقى مرقّمًا ١، ٢، ٣." if fmt == "thread" else "")
+            + (" " + THREAD_RULES if fmt == "thread" else "")
             + "\n" + facts_block(facts)
             + "\n\nأعد النص وحده، بلا أي تعليق.")
 
@@ -1153,6 +1163,55 @@ def count_leaks(text):
 def strip_thread_numbers(text):
     return "\n".join(re.sub(r"^\s*[\d٠-٩]+\s*[).\-–:/]\s*", "", ln)
                      for ln in text.split("\n"))
+
+
+def _pack(lines, limit):
+    """يجمّع الأسطر في أجزاء لا يتجاوز الواحد الحدّ؛ السطر الأطول من الحدّ يُقصّ عند مسافة."""
+    parts, cur = [], ""
+    for ln in lines:
+        while len(ln) > limit:                      # سطر وحده أطول من الحدّ
+            cut = ln.rfind(" ", 0, limit) or limit
+            piece, ln = ln[:cut].rstrip(), ln[cut:].lstrip()
+            if cur:
+                parts.append(cur)
+                cur = ""
+            parts.append(piece)
+        cand = (cur + "\n\n" + ln) if cur else ln
+        if cur and len(cand) > limit:
+            parts.append(cur)
+            cur = ln
+        else:
+            cur = cand
+    if cur:
+        parts.append(cur)
+    return parts
+
+
+def split_thread(text, limit=THREAD_MAX):
+    """يقسّم القصة إلى أجزاء ثريد: الجزء الأول ينتهي عند علامة «---» (الفجوة)، والباقي يُجمَّع آليًا."""
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    if not lines:
+        return []
+    if "---" in lines:
+        i = lines.index("---")
+        head, tail = lines[:i], [ln for ln in lines[i + 1:] if ln != "---"]
+    else:                                           # بلا علامة: أول سطر ينتهي بنقطتين بعد الثلث الأول
+        n, cut = len(lines), None
+        for j in range(max(1, n // 3), n - 1):
+            if lines[j].endswith(("..", "…")):
+                cut = j + 1
+                break
+        if cut is None:
+            cut = max(1, round(n * 0.45))
+        head, tail = lines[:cut], lines[cut:]
+    if not head or not tail:
+        mid = max(1, len(lines) // 2)
+        head, tail = lines[:mid], lines[mid:]
+    return _pack(head, limit) + _pack(tail, limit)
+
+
+def thread_text(parts):
+    return "\n\n---\n\n".join(parts)
 
 
 def stray_numbers(text, facts, fmt="medium"):
@@ -1337,9 +1396,17 @@ def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha")
     add("clean", "بلا رموز ووسوم", not sym, "", "احذف الرموز التعبيرية والوسوم وأي عنوان.")
 
     if fmt == "thread":
-        numbered = sum(1 for ln in lines if re.match(r"^\s*[\d٠-٩]+\s*[).\-–:/]", ln))
-        add("thread", "ترقيم الخيط", numbered >= 3, f"{numbered} مقاطع",
-            "الخيط غير مرقّم: رقّم المقاطع ١، ٢، ٣ في بداية كل مقطع.")
+        parts = split_thread(text)
+        longest = max((len(p) for p in parts), default=0)
+        lo_p, hi_p = THREAD_PARTS
+        add("thread", "أجزاء الثريد", lo_p <= len(parts) <= hi_p and longest <= THREAD_MAX,
+            f"{len(parts)} أجزاء، أطول جزء {longest} حرفًا",
+            f"الثريد يجب أن يكون بين {lo_p} و{hi_p} أجزاء لا يتجاوز الواحد {THREAD_MAX} حرفًا: "
+            + ("قصّر النص." if len(parts) > hi_p else "اضبط الطول والقطع."))
+        cliff = "---" in lines and parts and not re.search(r"[؟?]\s*$", parts[0])
+        add("cliff", "فجوة الجزء الأول", bool(cliff), "",
+            "الجزء الأول لا ينتهي بفجوة: اقطع الجملة المفصلية بعد أول كلمة أو كلمتين، "
+            "وضع سطرًا فيه «---» بعدها مباشرة، بحيث يحتاج القارئ الجزء الثاني ليفهم.")
 
     if prev_openings:
         add("opening", "افتتاحية جديدة", not opening_clash(text, prev_openings),
@@ -1472,6 +1539,10 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
         except Exception as exc:
             log.warning("تعذّر تبديل الافتتاحية: %s", exc)
 
+    if fmt == "thread":
+        parts = split_thread(final)
+        job["parts"] = parts
+        final = thread_text(parts)
     job["text"] = final
     job["words"] = word_count(final)
     job["numbers"] = count_numbers(final)
@@ -1657,6 +1728,7 @@ def library():
     items.append({"id": uuid.uuid4().hex[:12], "text": text,
                   "dna": data.get("dna") or {}, "plot": (data.get("plot") or "")[:300],
                   "facts": [str(f)[:160] for f in (data.get("facts") or [])][:6],
+                  "parts": [str(p)[:400] for p in (data.get("parts") or [])][:8],
                   "score": int(data.get("score") or 0),
                   "meta": {k: str(data.get(k) or "")[:20] for k in ("format", "core", "pov", "dialect")},
                   "at": time.strftime("%Y-%m-%d %H:%M")})
@@ -1826,6 +1898,11 @@ PAGE = r"""<!doctype html>
   @media (min-width:700px){ .sheet .body{font-size:20px} }
   .sheet .body::first-line{font-weight:700}
   .sheet.busy .body{color:var(--muted)}
+  .part{border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-top:10px; background:#FCFCFD}
+  .parthead{display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:11.5px; color:var(--muted)}
+  .parthead .over{color:var(--bad); font-weight:600}
+  .partbody{font-family:"Amiri",serif; font-size:19px; line-height:1.9; white-space:pre-wrap; margin-top:6px; color:var(--ink)}
+  .part:first-child .partbody::first-line{font-weight:700}
   .foot{display:flex; flex-wrap:wrap; gap:8px; align-items:center; border-top:1px solid var(--line); margin-top:14px; padding-top:10px; font-size:12px; color:var(--muted)}
   .foot .grow{flex:1; min-width:120px}
   .act{background:#fff; border:1px solid var(--line-2); color:var(--ink-2); border-radius:7px; padding:6px 11px; font-family:inherit; font-size:12.5px; font-weight:500; cursor:pointer}
@@ -1904,7 +1981,7 @@ PAGE = r"""<!doctype html>
           <option value="short" selected>قصير · 85 كلمة</option>
           <option value="medium">متوسط · 140 كلمة</option>
           <option value="long">طويل · 280 كلمة</option>
-          <option value="thread">خيط مرقّم</option>
+          <option value="thread">ثريد · 2–5 أجزاء ≤280 حرفًا</option>
         </select></div>
       <div class="f"><label for="dialect">اللهجة</label>
         <select id="dialect" data-keep>
@@ -1994,6 +2071,7 @@ PAGE = r"""<!doctype html>
       <div class="tag" id="tag"></div>
       <p class="placeholder" id="hero"><span class="caret"></span></p>
       <div class="body" id="story"></div>
+      <div id="parts" style="display:none"></div>
       <div class="hooks" id="hooks">
         <p>اختر افتتاحية بديلة لتحلّ محل السطر الأول</p>
         <div id="hooklist"></div>
@@ -2109,7 +2187,7 @@ function timer(on) {
   tick = setInterval(() => { $('elapsed').textContent = Math.round((Date.now() - t0) / 1000) + ' ث'; }, 1000);
 }
 
-let current = { text: '', dna: null, plot: '', facts: [], score: 0, job: null };
+let current = { text: '', dna: null, plot: '', facts: [], score: 0, job: null, parts: [] };
 let poll = null, es = null, finished = false;
 
 function state(msg, bad) {
@@ -2120,6 +2198,26 @@ function state(msg, bad) {
 function setStory(text) {
   $('story').textContent = text;
   $('sheet').classList.toggle('has', !!text);
+}
+
+/* الثريد: كل جزء ببطاقة مع عدّاد أحرف وزر نسخ */
+function renderParts(parts) {
+  const box = $('parts');
+  box.innerHTML = '';
+  if (!parts || !parts.length) { box.style.display = 'none'; $('story').style.display = ''; return; }
+  $('story').style.display = 'none'; box.style.display = '';
+  parts.forEach((p, i) => {
+    const d = document.createElement('div'); d.className = 'part';
+    const h = document.createElement('div'); h.className = 'parthead';
+    const t = document.createElement('span');
+    t.textContent = 'الجزء ' + (i + 1) + ' من ' + parts.length + ' · ' + p.length + ' حرف';
+    if (p.length > 280) { t.className = 'over'; t.textContent += ' — يتجاوز 280'; }
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'act'; b.textContent = 'انسخ الجزء';
+    b.onclick = async () => { try { await navigator.clipboard.writeText(p); b.textContent = 'نُسخ'; setTimeout(() => b.textContent = 'انسخ الجزء', 1400); } catch (e) {} };
+    h.append(t, b);
+    const body = document.createElement('div'); body.className = 'partbody'; body.textContent = p;
+    d.append(h, body); box.appendChild(d);
+  });
 }
 
 function steps(stage) {
@@ -2155,6 +2253,7 @@ async function run(seed) {
   $('hooks').classList.remove('on');
   $('card').classList.remove('on');
   $('tag').textContent = '';
+  renderParts([]);
   document.querySelectorAll('#steps li').forEach(li => { li.classList.remove('done','active'); if (li.dataset.s === 'polish') li.classList.add('hidden'); });
   steps('seed');
   state(STAGE.seed);
@@ -2173,7 +2272,7 @@ async function run(seed) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'تعذّر البدء.');
     job = data.job;
-    current = { text: '', dna: data.dna, plot: '', facts: [], score: 0, job };
+    current = { text: '', dna: data.dna, plot: '', facts: [], score: 0, job, parts: [] };
     showSeed(data.dna, [], null);
   } catch (e) { finish(e.message, true); return; }
 
@@ -2225,6 +2324,8 @@ function apply(m) {
     current.plot = j.plot || j.premise || '';
     current.facts = j.facts || [];
     current.score = j.score || 0;
+    current.parts = j.parts || [];
+    renderParts(current.parts);
     $('tag').textContent = 'النص النهائي'; $('tag').classList.remove('live');
     $('meta').textContent = j.words + ' كلمة · ' + (j.numbers || 0) + ' رقم محدد · جودة ' + (j.score || 0) + '٪';
     renderCard(j);
@@ -2312,7 +2413,7 @@ $('save').onclick = async () => {
   const res = await fetch('/library', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: current.text || $('story').textContent, dna: current.dna, plot: current.plot,
-                           facts: current.facts, score: current.score,
+                           facts: current.facts, score: current.score, parts: current.parts,
                            format: $('format').value, core: $('core').value, pov: $('pov').value, dialect: $('dialect').value })
   });
   if (res.ok) { $('save').textContent = 'حُفظ'; setTimeout(() => $('save').textContent = 'احفظ', 1600); shelf(); }
@@ -2371,8 +2472,9 @@ function drawShelf() {
     row.append(txt, side);
     txt.onclick = () => {
       stop(); finished = true; busy(false);
-      current = { text: it.text, dna: it.dna, plot: it.plot || '', facts: it.facts || [], score: it.score || 0, job: null };
+      current = { text: it.text, dna: it.dna, plot: it.plot || '', facts: it.facts || [], score: it.score || 0, job: null, parts: it.parts || [] };
       setStory(it.text);
+      renderParts(current.parts);
       $('tag').textContent = 'من المحفوظات'; $('tag').classList.remove('live');
       $('meta').textContent = (it.score ? 'جودة ' + it.score + '٪' : '');
       $('card').classList.remove('on');

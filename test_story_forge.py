@@ -188,6 +188,36 @@ class Helpers(unittest.TestCase):
         self.assertTrue(sf.QUOTE_RE.search("قالت لي أمي بالحرف:"))
         self.assertFalse(sf.QUOTE_RE.search("كان مكتوب اسمي على الورقة"))
 
+    def test_split_thread_honours_marker_and_limits(self):
+        text = "وقعت ورقة فصل الأجهزة عن أبوي.\n\nأخوي حلف إن الدكتور قال ميئوس منه.\n\nبعد 6 شهور لقيت التقرير بخط يده: المريض يتجاوب.\n\nيحتاج..\n\n---\n\n48 ساعة ويفيق.\n\nكذب علي عشان الورث.\n\nهو الحين جالس يضحك..\n\nأوديه للشرطة ولا آخذ حقي بيدي؟"
+        parts = sf.split_thread(text)
+        self.assertEqual(len(parts), 2)
+        self.assertTrue(parts[0].endswith("يحتاج.."))
+        self.assertTrue(parts[1].startswith("48 ساعة"))
+        self.assertNotIn("---", "".join(parts))
+        self.assertTrue(all(len(p) <= sf.THREAD_MAX for p in parts))
+        # بلا علامة: يقطع عند أول سطر ينتهي بنقطتين بعد الثلث الأول
+        parts = sf.split_thread(text.replace("\n\n---\n\n", "\n\n"))
+        self.assertTrue(parts[0].endswith("يحتاج.."))
+        # نص طويل يُجمَّع في أجزاء لا تتجاوز الحدّ
+        long_text = "\n\n".join(f"سطر رقم {i} فيه كلام كافي عشان يطول شوي ويملأ المكان." for i in range(30))
+        parts = sf.split_thread(long_text)
+        self.assertGreaterEqual(len(parts), 5)
+        self.assertTrue(all(len(p) <= sf.THREAD_MAX for p in parts))
+        # سطر واحد أطول من الحدّ يُقصّ عند مسافة
+        parts = sf.split_thread("كلمة " * 120)
+        self.assertTrue(all(len(p) <= sf.THREAD_MAX for p in parts))
+        self.assertEqual(sf.split_thread(""), [])
+
+    def test_thread_checks_parts_and_cliff(self):
+        good = "وقعت ورقة فصل الأجهزة عن أبوي.\n\nلقيت التقرير بخط يده: المريض يتجاوب.\n\nيحتاج..\n\n---\n\n48 ساعة ويفيق.\n\nكذب علي عشان الورث قبل 6 شهور.\n\nهو الحين جالس يضحك..\n\nأوديه للشرطة ولا آخذ حقي بيدي؟"
+        ids = {c["id"]: c for c in sf.run_checks(good, "thread", "self", "dilemma", [])}
+        self.assertTrue(ids["thread"]["ok"], ids["thread"])
+        self.assertTrue(ids["cliff"]["ok"])
+        ids = {c["id"]: c for c in sf.run_checks(good.replace("\n\n---", ""), "thread", "self", "dilemma", [])}
+        self.assertFalse(ids["cliff"]["ok"])
+        self.assertIn("cliff", sf.CRITICAL)
+
     def test_polish_only_for_critical_failures(self):
         checks = [{"id": "doubt", "ok": False, "fix": "x"}, {"id": "lines", "ok": False, "fix": "y"},
                   {"id": "facts", "ok": True, "fix": None}]
@@ -305,6 +335,18 @@ class Pipeline(unittest.TestCase):
         self.assertEqual(fake.models[0], "pro")
         self.assertTrue(all(m == "flash" for m in fake.models[1:]), fake.models)
         self.assertEqual(sf.plan_creds({"model": "flash", "plan_model": ""})["model"], "flash")
+
+    def test_thread_format_yields_parts(self):
+        thread = STORY.replace("وبعدين عرفت...", "وبعدين عرفت..\n\n---")
+        fake = FakeProvider(story=thread, polish_text=thread)
+        sf.chat = fake
+        job = new_job()
+        sf.write_story(job, sf.fresh_dna(), "thread", "saudi", "betrayal", "self", "big", "free", {})
+        self.assertEqual(job["stage"], "done")
+        self.assertEqual(len(job["parts"]), 2)
+        self.assertTrue(job["parts"][0].endswith("عرفت.."))
+        self.assertEqual(job["text"], sf.thread_text(job["parts"]))
+        self.assertNotIn("---", "".join(job["parts"]))
 
     def test_fast_mode_skips_audit(self):
         fake = FakeProvider()
