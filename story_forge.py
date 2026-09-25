@@ -47,7 +47,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "4.1"
+VERSION = "4.2"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -2691,6 +2691,31 @@ const creds = () => ({
   plan_model: $('plan_model').value, think: $('think').value
 });
 
+/* نسخ يعمل على HTTP أيضًا: clipboard API يتطلب HTTPS، فنرجع لطريقة التحديد + execCommand */
+async function copyText(text, el) {
+  if (!text) return false;
+  try {
+    if (window.isSecureContext && navigator.clipboard) { await navigator.clipboard.writeText(text); return true; }
+  } catch (e) {}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.dir = 'rtl';
+    ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) return true;
+  } catch (e) {}
+  if (el) {                                   // آخر حل: نحدّد النص ليضغط المستخدم نسخ
+    try { const r = document.createRange(); r.selectNodeContents(el); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); } catch (e) {}
+  }
+  return false;
+}
+function flash(btn, label, done) {
+  btn.textContent = done; setTimeout(() => btn.textContent = label, 1600);
+}
+
 /* عدّاد الثواني بجانب الحالة: النماذج المفكّرة تصمت طويلًا قبل أول حرف */
 let tick = null, t0 = 0;
 function timer(on) {
@@ -2726,10 +2751,10 @@ function renderParts(parts) {
     t.textContent = 'الجزء ' + (i + 1) + ' من ' + parts.length + ' · ' + p.length + ' حرف';
     if (p.length > 280) { t.className = 'over'; t.textContent += ' — يتجاوز 280'; }
     else if (i === 0 && p.length < 250) { t.className = 'over'; t.textContent += ' — أقل من 250'; }
-    const b = document.createElement('button'); b.type = 'button'; b.className = 'act'; b.textContent = 'انسخ الجزء';
-    b.onclick = async () => { try { await navigator.clipboard.writeText(p); b.textContent = 'نُسخ'; setTimeout(() => b.textContent = 'انسخ الجزء', 1400); } catch (e) {} };
-    h.append(t, b);
     const body = document.createElement('div'); body.className = 'partbody'; body.textContent = p;
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'act'; b.textContent = 'انسخ الجزء';
+    b.onclick = async () => { (await copyText(p, body)) ? flash(b, 'انسخ الجزء', 'نُسخ') : state('حدّد النص المظلل واضغط نسخ.', true); };
+    h.append(t, b);
     d.append(h, body); box.appendChild(d);
   });
 }
@@ -2921,11 +2946,9 @@ document.addEventListener('keydown', e => {
 });
 
 $('copy').onclick = async () => {
-  try {
-    await navigator.clipboard.writeText(current.text || $('story').textContent);
-    $('copy').textContent = 'نُسخ';
-    setTimeout(() => $('copy').textContent = 'انسخ النص', 1600);
-  } catch (e) { state('المتصفح منع النسخ. حدّد النص وانسخه يدويًا.', true); }
+  const ok = await copyText(current.text || $('story').textContent, $('story'));
+  if (ok) flash($('copy'), 'انسخ النص', 'نُسخ');
+  else state('المتصفح منع النسخ التلقائي. النص محدد الآن: اضغط نسخ من قائمة المتصفح.', true);
 };
 
 $('save').onclick = async () => {
@@ -3002,9 +3025,7 @@ function drawShelf() {
       if (it.dna) showSeed(it.dna, it.facts || [], []);
       window.scrollTo({ top: $('sheet').offsetTop - 12, behavior: 'smooth' });
     };
-    cp.onclick = async () => {
-      try { await navigator.clipboard.writeText(it.text); cp.textContent = 'نُسخ'; setTimeout(() => cp.textContent = 'انسخ', 1400); } catch (e) {}
-    };
+    cp.onclick = async () => { (await copyText(it.text, txt)) ? flash(cp, 'انسخ', 'نُسخ') : state('حدّد النص المظلل واضغط نسخ.', true); };
     del.onclick = async () => {
       await fetch('/library/' + it.id, { method: 'DELETE' });
       shelf();
