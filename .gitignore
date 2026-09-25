@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+stories.json
+stories.json.tmp
+.venv/

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-مِسنّ القصص — محرّك كتابة قصص قصيرة عربية أصيلة، سكربت من ملف واحد.
+مِسنّ القصص — محرّك كتابة منشورات قصصية عربية، سكربت من ملف واحد.
 
 التشغيل:
     pip install flask
@@ -10,10 +10,20 @@
 اختياري:
     pip install waitress                 # خادم أمتن
     STORY_PORT=7100                      # منفذ آخر
+    STORY_HOST=127.0.0.1                 # للجهاز نفسه فقط (الافتراضي: كل الشبكة)
     STORY_LIB=/path/stories.json         # مكان المكتبة
+    STORY_NO_BROWSER=1                   # لا تفتح المتصفح
 لاستخدام مزوّد خاص بدل المجاني، من داخل الصفحة أو عبر البيئة:
     OPENAI_BASE=https://generativelanguage.googleapis.com/v1beta/openai
     OPENAI_KEY=...   OPENAI_MODEL=gemini-2.5-flash
+
+الاختبار بلا مزوّد ولا شبكة:
+    python -m unittest test_story_forge
+
+خط الإنتاج:
+    بذرة → خمس حبكات مع ورقة حقائق → اختيار الأبعد عن المستهلك → مسودة (بثّ حي)
+    → تحرير يشدّ كل سطر (بثّ حي) → تدقيق بالأرقام والمنطق → عشرة فحوصات محلية
+    → جولة صقل واحدة لما رسب → استبدال الافتتاحية إن شابهت محفوظًا سابقًا.
 """
 
 import os
@@ -29,9 +39,9 @@ import webbrowser
 import urllib.error
 import urllib.request
 
-from flask import Flask, request, jsonify, Response, abort
+from flask import Flask, request, jsonify, Response
 
-VERSION = "2.2"
+VERSION = "3.0"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -48,6 +58,10 @@ log = logging.getLogger("story_forge")
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 LIB_LOCK = threading.Lock()
+
+
+class Cancelled(Exception):
+    """أوقف المستخدم المهمة."""
 
 
 # ------------------------------------------------------------------ بذرة القصة
@@ -99,13 +113,13 @@ DEVICE = [
     "ملف طبي في عيادة",
     "صك ملكية عند كاتب العدل",
     "صورة معلّقة في مكتب",
-    "اعتراف على فراش الموت",
     "طرد وصل لعنواني بالغلط",
     "سجل زيارات في سجن أو مستشفى",
     "شيك قديم بين أوراق",
     "دفتر مواعيد فيه اسم متكرر",
     "كلام طلع من طفل بدون قصد",
     "فاتورة باسم شخص ثاني",
+    "إيصال تحويل قديم في تطبيق البنك",
 ]
 
 PLACE = [
@@ -148,6 +162,22 @@ CLOSERS = [
     "يقرر يرد المعروف بطريقته بدون ما يذكر السبب",
     "يسكت ويحتفظ بالشي عنده ويخلي الثاني على راحته",
 ]
+
+# أنماط السطر الأول — تتبدّل حتى لا تتشابه القصص في هيكلها
+OPEN_STYLES = {
+    "scene":  ("مشهد عادي",
+               "موقف عادي جدًا من يوم عادي، من ٦ إلى ١٢ كلمة، بلا أي تشويق مصنوع وبلا سؤال"),
+    "object": ("شيء في اليد",
+               "شيء مادي بعينه في اليد أو أمام العين (ورقة، فاتورة، مفتاح، كيس)، "
+               "يُذكر كما هو بلا شرح، من ٥ إلى ١٠ كلمات"),
+    "quote":  ("جملة قالها أحد",
+               "جملة قصيرة قالها شخص آخر بحرفها، عادية جدًا، بين علامتي تنصيص، "
+               "ثم من قالها بكلمتين"),
+    "number": ("رقم جاف",
+               "رقم أو تاريخ أو مبلغ يُذكر كواقعة جافة في جملة من ٥ إلى ١٠ كلمات، بلا تعليق"),
+}
+
+SEED_KEYS = ("who", "secret", "device", "place", "cost", "dilemma", "open")
 
 # حبكات صارت مستهلكة على الإنترنت — ممنوعة نصًا
 TIRED_PLOTS = [
@@ -207,6 +237,12 @@ CORES = {
     "neighbors": ("بين الجيران", "حياة كاملة خلف باب مقابل", "light", "closer"),
 }
 
+CORE_GROUPS = [
+    ("مواقف ثقيلة", ["betrayal", "injustice", "guilt", "money", "pride", "secretill", "loss"]),
+    ("وفاء وامتنان", ["sacrifice", "gratitude", "loyalty", "return", "misread", "reversal"]),
+    ("مواقف يومية", ["surprise", "chance", "funny", "nostalgia", "parenting", "work", "neighbors"]),
+]
+
 DRAMA = {
     "small": ("عادي جدًا",
               "حدث صغير من الحياة اليومية. مبالغ بالمئات أو الآلاف القليلة، "
@@ -232,37 +268,104 @@ BANNED = [
     "الدرس المستفاد", "الحياة علّمتني", "ومن يومها تعلّمت", "أيها القارئ",
     "سبحان مغيّر الأحوال", "دمعت عيناي", "شعرت بقشعريرة", "تخيّل معي",
     "في تلك اللحظة أدركت", "غيّرت حياتي", "يتبع", "انتظروا الجزء",
+    "وهنا المفاجأة", "الصدمة الكبرى", "ما حدث بعدها", "اقرأ للنهاية",
 ]
 
+# كلمات عامة لا تدل على تشابه الحبكات — تُستبعد قبل قياس الجِدّة
+STOP = set("""
+الذي التي الذين أنه أنها إنه إنها هذا هذه ذلك تلك كان كانت اللي بعد قبل على إلى عن من في مع لكن ثم حتى
+لما عشان لأن لأنه لأنها وهو وهي هناك هنا كل أي ولا ما لا ليش ليه الآن الحين وقت يوم سنة سنين سنوات شهر
+واحد شخص شي شيء كيف وش إيش بس بعدين كذا مثل غير بين عند عنده عندها فيه فيها منه منها له لها لهم معه معها
+عليه عليها أن إن إذا لو أو أم حين حينها يمكن ربما ظهر بقي مخفي مخفيا مخفيًا ينكشف انكشف اكتشف عرف عرفت
+قال قالت صار صارت الأمر أمر كانوا الذي بسبب لأنّ حتى لكي كي ثم عندما بينما هذا
+""".split())
 
-def fresh_dna(topic="", core="betrayal"):
+# ما يجعل القصة تبدو مؤلّفة — يُعاقب عند اختيار الحبكة
+COINCIDENCE = ("فراش الموت", "مشهور", "بالصدفة", "صدفة", "مصادفة", "معجزة")
+
+DOUBT_RE = re.compile(
+    r"ما أدري|ما ادري|ما أعرف|ما اعرف|لا أعرف|لا أدري|مش عارف|ما بعرف|يمكن|ربما|"
+    r"مو متأكد|مش متأكد|لعل|ما فهمت|ما أفهم|ما عرفت ليش|لليوم ما")
+
+AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+TASHKEEL = re.compile(r"[ً-ْٰـ]")
+
+
+# ------------------------------------------------------------------ البذرة
+def recent_dna(limit=30):
+    """التركيبات (الطرف، السر، الأداة) المستعملة في المحفوظات الأخيرة."""
+    out = set()
+    for item in reversed(lib_read()[-limit:]):
+        d = item.get("dna") or {}
+        if d.get("who") and d.get("secret") and d.get("device"):
+            out.add((d["who"], d["secret"], d["device"]))
+    return out
+
+
+def fresh_dna(topic="", core="betrayal", seed=None, avoid=()):
+    """يركّب بذرة جديدة. ما يثبّته المستخدم في seed يبقى كما هو ويُعلَّم كثابت."""
     label, desc, pool, ending = CORES.get(core, CORES["betrayal"])
     if pool == "any":
         pool = random.choice(("dark", "light"))
+    seed = {k: str(v).strip()[:120] for k, v in (seed or {}).items()
+            if k in SEED_KEYS and str(v).strip()}
+    if seed.get("open") not in OPEN_STYLES:
+        seed.pop("open", None)
+    secrets = SECRET_DARK if pool == "dark" else SECRET_LIGHT
+    costs = COST_DARK if pool == "dark" else COST_LIGHT
+    endings = DILEMMA if ending == "dilemma" else CLOSERS
+    avoid = set(avoid)
     dna = {
-        "who": random.choice(WHO),
-        "secret": random.choice(SECRET_DARK if pool == "dark" else SECRET_LIGHT),
-        "device": random.choice(DEVICE),
-        "place": random.choice(PLACE),
-        "cost": random.choice(COST_DARK if pool == "dark" else COST_LIGHT),
-        "dilemma": random.choice(DILEMMA if ending == "dilemma" else CLOSERS),
+        "who": seed.get("who") or random.choice(WHO),
+        "secret": seed.get("secret") or random.choice(secrets),
+        "device": seed.get("device") or random.choice(DEVICE),
+        "place": seed.get("place") or random.choice(PLACE),
+        "cost": seed.get("cost") or random.choice(costs),
+        "dilemma": seed.get("dilemma") or random.choice(endings),
+        "open": seed.get("open") or random.choice(list(OPEN_STYLES)),
     }
+
+    def used(d):
+        return (d["who"], d["secret"], d["device"]) in avoid
+
+    # تركيبة مستعملة في المحفوظات؟ بدّل محورًا واحدًا غير مثبّت حتى تصير جديدة
+    for key, pool in (("device", DEVICE), ("secret", secrets), ("who", WHO)):
+        if not used(dna):
+            break
+        if key in seed:
+            continue
+        for value in random.sample(pool, len(pool)):
+            trial = dict(dna, **{key: value})
+            if not used(trial):
+                dna = trial
+                break
+    if seed:
+        dna["locked"] = [k for k in SEED_KEYS if k in seed]
     if topic:
         dna["topic"] = topic.strip()[:300]
     return dna
 
 
 def dna_text(dna):
+    locked = set(dna.get("locked") or [])
+    topic = dna.get("topic")
+
+    def mark(k):
+        return " (ثابت)" if k in locked else ""
+
     lines = [
-        f"- الطرف الآخر: {dna['who']}",
-        f"- نوع السر: {dna['secret']}",
-        f"- أداة الكشف: {dna['device']}",
-        f"- مكان لحظة الكشف: {dna['place']}",
-        f"- الأثر الذي تركه ذلك: {dna['cost']}",
-        f"- ما تقف عنده النهاية: {dna['dilemma']}",
+        f"- الطرف الآخر{mark('who')}: {dna['who']}",
+        f"- نوع السر{mark('secret')}: {dna['secret']}",
+        f"- أداة الكشف{mark('device')}: {dna['device']}",
+        f"- مكان لحظة الكشف{mark('place')}: {dna['place']}",
+        f"- الأثر الذي تركه ذلك{mark('cost')}: {dna['cost']}",
+        f"- ما تقف عنده النهاية{mark('dilemma')}: {dna['dilemma']}",
     ]
-    if dna.get("topic"):
-        lines.insert(0, f"- الموضوع اللي طلبه الكاتب: {dna['topic']}")
+    if topic:
+        lines.insert(0, f"- الموضوع الذي طلبه الكاتب، وله الأولوية عند أي تعارض: {topic}")
+        if len(locked) < len(SEED_KEYS) - 1:
+            lines.append("العناصر غير المعلّمة بـ(ثابت) اقتراحات: إن تعارض أحدها مع "
+                         "الموضوع فبدّله بما يناسب الموضوع، وإلا فالتزم به.")
     return "\n".join(lines)
 
 
@@ -391,13 +494,14 @@ def _read_stream(res, on_token):
     return text
 
 
-# ----------------------------------------------------------------- الكتابة
+# ----------------------------------------------------------------- الطلبات
 CRAFT = (
     "أنت كاتب منشورات قصصية عربية تُقرأ إلى آخر سطر. القصة مؤلّفة بالكامل "
     "لكنها تبدو كأن صاحبها عاشها وكتبها على جواله.\n"
     "طريقتك في الكتابة، التزم بها حرفيًا:\n"
     "- كل جملة في سطر مستقل، وبين السطور سطر فارغ. لا فقرات طويلة.\n"
     "- جُمل قصيرة ومباشرة. لا وصف أدبي ولا استعارات ولا سجع.\n"
+    "- كل سطر يشدّ القارئ للسطر الذي بعده: يضيف واقعة أو يفتح سؤالًا ضمنيًا.\n"
     "- أرقام محددة: كم سنة، كم مبلغ، كم نسبة. الأرقام هي ما يصدّق القارئ.\n"
     "- لا تسمِّ المشاعر. بدل «حزنت» اكتب الفعل أو التفصيل اللي يدل عليها.\n"
     "- لا رموز تعبيرية، لا عناوين، لا وسوم، لا أقواس شارحة، لا تمهيد قبل القصة."
@@ -410,7 +514,7 @@ REALISM = (
     "بالصدفة في اللحظة المناسبة، وممنوع أن يكون الشخص الغامض شخصية معروفة.\n"
     "- لازم يكون واضحًا من النص لماذا بقي الأمر مخفيًا كل هذي المدة، "
     "ولماذا ظهر الآن بالذات. بلا هذين السببين القصة تبدو ملفّقة.\n"
-    "- الأرقام متسقة: إذا قلت ست سنين فلا تقل بعدها عشر. راجع كل رقم مع ما قبله.\n"
+    "- الأرقام من ورقة الحقائق فقط، بحرفها. لا رقم جديد ولا رقم متغيّر.\n"
     "- المبالغ من الواقع، لا أرقام خيالية.\n"
     "- صاحب القصة لا يعرف كل شيء: لازم سطر واحد على الأقل فيه شك أو جهل، "
     "مثل «ما أدري ليش» أو «يمكن».\n"
@@ -420,21 +524,41 @@ REALISM = (
     "- لا تُغلق كل الأسئلة في النهاية. اترك شيئًا معلّقًا كما في الواقع."
 )
 
+VIRAL = (
+    "شروط الانتشار — القارئ يكمل لأنه لا يستطيع التوقف، لا لأنك طلبت منه:\n"
+    "- كل سطر إما يضيف واقعة جديدة أو يفتح سؤالًا ضمنيًا يحتاج السطر التالي. "
+    "السطر الذي لا يفعل أحدهما يُحذف.\n"
+    "- لا كلمة زائدة: احذف الصفات والظروف والتكرار التي لا تحمل معلومة.\n"
+    "- الموقف يعرفه ثمانون بالمئة من القرّاء: عائلة، شغل، دين، جيران، فقد. "
+    "لا مهن نادرة ولا مراجع محلية ضيقة ولا أسماء أماكن.\n"
+    "- سطر واحد على الأقل يصلح للاقتباس وحده: قصير، محدد، بلا حكمة.\n"
+    "- الكشف يقلب الصورة التي بناها القارئ في النصف الأول، لا يضيف إليها فقط.\n"
+    "- النهاية تجعل القارئ يريد أن يقول رأيه من دون أن يُطلب منه ذلك.\n"
+    "- لا سطر أطول من ١٤ كلمة. المتوسط بين ٧ و٩ كلمات."
+)
 
-def beats(pov, ending):
+
+def facts_block(facts):
+    if not facts:
+        return "ورقة الحقائق: لا أرقام مثبّتة، فاختر أرقامًا واقعية والتزم بها من أول سطر لآخره."
+    return ("ورقة الحقائق — هذه أرقام القصة الثابتة، استعملها بحرفها ولا تُدخل أرقامًا غيرها:\n"
+            + "\n".join("- " + f for f in facts))
+
+
+def beats(pov, ending, style="scene"):
     closing = ("آخر سطر أو سطرين: معضلة بخيارين واضحين يواجهها صاحب القصة الآن، "
                "كحيرة شخصية لا كسؤال للقارئ ولا كدعوة للتعليق."
                if ending == "dilemma" else
                "آخر سطر أو سطرين: لحظة تقف عندها القصة، قرار صغير أو صورة تغيّر "
                "معنى كل ما سبق. بلا خلاصة ولا عبرة مكتوبة ولا سؤال للقارئ.")
+    opener = OPEN_STYLES.get(style, OPEN_STYLES["scene"])[1]
     return (
         f"منظور السرد: {POVS.get(pov, POVS['self'])[1]}.\n"
         "البناء الإلزامي، بهذا الترتيب:\n"
-        "1. سطر أول: موقف عادي جدًا من يوم عادي، من ٦ إلى ١٢ كلمة، بلا أي تشويق "
-        "مصنوع وبلا سؤال. لا يُفهم منه أن شيئًا سيحدث.\n"
+        f"1. سطر أول: {opener}. لا يُفهم منه أن شيئًا سيحدث.\n"
         "2. سطر قصير جدًا لردّة فعل جسدية توقف المشهد (٣ إلى ٧ كلمات).\n"
         "3. ما الذي رآه أو سمعه: تفصيل واحد محسوس، بلا تفسير.\n"
-        "4. سطران خلفية: من هذا الشخص، وما الذي جرى قبل سنوات، بأرقام محددة، "
+        "4. سطران خلفية: من هذا الشخص، وما الذي جرى قبل سنوات، بأرقام ورقة الحقائق، "
         "وما الأثر الذي تركه.\n"
         "5. الكشف على دفعتين: سطر تمهيد ينتهي بنقاط حذف، ثم الجملة المفصلية في "
         "سطر مستقل. الكشف يقلب الصورة التي بناها القارئ.\n"
@@ -454,10 +578,15 @@ def premise_prompt(dna, core, drama, avoid_plots):
         "ابنِ كل فكرة على هذه العناصر:",
         dna_text(dna),
         "",
-        "كل فكرة في جملتين: الأولى ما المخفي وكيف انكشف، والثانية تجيب على "
-        "سؤالين بالتحديد: لماذا بقي مخفيًا كل هذه المدة، ولماذا ظهر الآن.",
-        "أي فكرة لا تجيب على السؤالين تُرفض. وأي فكرة تعتمد على مصادفة كبيرة "
-        "أو اعتراف على فراش الموت أو شخصية مشهورة تُرفض أيضًا.",
+        "لكل فكرة أعطِ:",
+        "- hook: سطر أول مقترح، موقف عادي من ٦ إلى ١٢ كلمة، بلا سؤال وبلا تشويق.",
+        "- hidden: ما المخفي وكيف انكشف، في جملتين محددتين.",
+        "- why_hidden: لماذا بقي مخفيًا كل هذه المدة، سبب واقعي.",
+        "- why_now: لماذا ظهر الآن بالذات، سبب واقعي.",
+        "- facts: ثلاث إلى خمس حقائق رقمية ثابتة للقصة (كم سنة، كم مبلغ، كم عمر، "
+        "كم مرة)، كل حقيقة جملة قصيرة فيها رقم واحد. هذه الأرقام ستُلزم الكاتب.",
+        "أي فكرة بلا why_hidden أو why_now مقنعين تُرفض. وأي فكرة تعتمد على مصادفة "
+        "كبيرة أو اعتراف على فراش الموت أو شخصية مشهورة تُرفض أيضًا.",
         "",
         "ممنوع منعًا تامًا أي فكرة تشبه هذه الحبكات المستهلكة أو تكون نسخة منها "
         "بتغيير الأسماء:",
@@ -465,23 +594,37 @@ def premise_prompt(dna, core, drama, avoid_plots):
         *(["", "وممنوع كذلك أي فكرة تشبه ما كُتب سابقًا:",
            "\n".join("• " + p for p in avoid_plots)] if avoid_plots else []),
         "",
-        'أعد JSON فقط: {"ideas":["...","...","...","...","..."]}',
+        'أعد JSON فقط بهذا الشكل: {"ideas":[{"hook":"...","hidden":"...",'
+        '"why_hidden":"...","why_now":"...","facts":["...","..."]}, ...]}',
     ])
 
 
-def write_prompt(dna, premise, fmt, dialect, core, pov, drama):
+def premise_text(idea):
+    parts = [idea["hidden"]]
+    if idea.get("why_hidden"):
+        parts.append("لماذا بقي مخفيًا: " + idea["why_hidden"])
+    if idea.get("why_now"):
+        parts.append("لماذا ظهر الآن: " + idea["why_now"])
+    return "\n".join(parts)
+
+
+def write_prompt(dna, idea, fmt, dialect, core, pov, drama):
     label, low, high = FORMATS.get(fmt, FORMATS["medium"])
     core_label, core_desc, _, ending = CORES.get(core, CORES["betrayal"])
     dlabel, ddesc = DRAMA.get(drama, DRAMA["mid"])
     shape = ("رقّم المقاطع ١، ٢، ٣ كخيط منشورات، وكل مقطع مقطع قائم بذاته."
              if fmt == "thread" else "اكتبه منشورًا واحدًا متصلًا.")
+    hook = idea.get("hook") or ""
     return "\n".join([
         f"اكتب {label} بلهجة {DIALECTS.get(dialect, DIALECTS['saudi'])}، "
         f"من {low} إلى {high} كلمة.",
         shape,
         "",
         "الحبكة التي ستكتبها:",
-        premise,
+        premise_text(idea),
+        *(["افتتاحية مقترحة يمكنك تحسينها بشرط أن تبقى عادية: " + hook] if hook else []),
+        "",
+        facts_block(idea.get("facts") or []),
         "",
         "العناصر التي يجب أن تظهر داخل القصة بلا ذكرها كقائمة:",
         dna_text(dna),
@@ -490,7 +633,9 @@ def write_prompt(dna, premise, fmt, dialect, core, pov, drama):
         "",
         REALISM,
         "",
-        beats(pov, ending),
+        VIRAL,
+        "",
+        beats(pov, ending, dna.get("open", "scene")),
         "",
         "ممنوع استعمال هذه العبارات أو ما يشبهها:",
         "، ".join(BANNED),
@@ -499,45 +644,101 @@ def write_prompt(dna, premise, fmt, dialect, core, pov, drama):
     ])
 
 
-EDIT_PROMPT = (
-    "أنت محرّر منشورات. أمامك مسودة. أعد كتابتها أقوى بنفس الحكاية ونفس اللهجة.\n"
-    "افعل هذا بالترتيب:\n"
-    "1. السطر الأول: اجعله موقفًا عاديًا قصيرًا، بلا تشويق مصنوع وبلا سؤال. "
-    "إن كان فيه أي تلميح لما سيحدث، اكسره.\n"
-    "2. احذف كل سطر لا يضيف واقعة أو رقمًا أو تفصيلًا محسوسًا.\n"
-    "3. استبدل كل جملة تسمّي شعورًا بفعل أو تفصيل مادي.\n"
-    "4. تأكد أن الكشف جاء في النصف الثاني لا في البداية، وأنه على دفعتين: "
-    "تمهيد ثم جملة قاصمة في سطر مستقل.\n"
-    "5. تأكد من وجود رقمين محددين على الأقل في النص.\n"
-    "6. آخر سطرين: معضلة بخيارين واضحين، بلا سؤال موجّه للقارئ وبلا دعوة تعليق.\n"
-    "7. كل جملة في سطر مستقل وبينها سطر فارغ.\n"
-    "8. احذف أي عبارة جاهزة أو مألوفة واستبدلها بتفصيل محدد.\n"
-    "9. تأكد أن النص يوضّح لماذا بقي الأمر مخفيًا ولماذا ظهر الآن.\n"
-    "10. أبقِ سطرًا فيه شك أو جهل من صاحب القصة، وتفصيلًا واحدًا زائدًا "
-    "لا علاقة له بالحبكة.\n"
-    "أعد النص النهائي وحده، بلا أي تعليق."
+def edit_prompt(fmt, pov, ending, facts):
+    closing = ("آخر سطرين: معضلة بخيارين واضحين محددين، حيرة شخصية، بلا سؤال موجّه "
+               "للقارئ وبلا دعوة تعليق."
+               if ending == "dilemma" else
+               "آخر سطرين: لحظة أو قرار صغير أو صورة تغيّر معنى ما سبق. لا معضلة "
+               "ولا عبرة ولا سؤال للقارئ.")
+    steps = [
+        "السطر الأول: موقف أو شيء عادي قصير، بلا تشويق مصنوع وبلا سؤال. إن كان فيه "
+        "أي تلميح لما سيحدث، اكسره.",
+        "امشِ على النص سطرًا سطرًا: كل سطر لازم إما يضيف واقعة جديدة أو يفتح سؤالًا "
+        "ضمنيًا يحتاج السطر التالي. السطر الذي لا يفعل أحدهما يُحذف، لا يُجمَّل.",
+        "احذف كل كلمة لا تحمل معلومة: الصفات والظروف والتكرار. الجملة القصيرة أقوى.",
+        "استبدل كل جملة تسمّي شعورًا بفعل أو تفصيل مادي.",
+        "الكشف في النصف الثاني لا في البداية، وعلى دفعتين: سطر تمهيد ينتهي بنقاط "
+        "حذف، ثم الجملة القاصمة وحدها في سطر.",
+        "الأرقام: طابقها بحرفها مع ورقة الحقائق أدناه. لا تضف رقمًا ليس فيها ولا "
+        "تغيّر رقمًا موجودًا. رقمان محددان على الأقل في النص.",
+        "تأكد أن النص يوضّح ضمنيًا لماذا بقي الأمر مخفيًا ولماذا ظهر الآن.",
+        "أبقِ سطرًا فيه شك أو جهل من صاحب القصة، وتفصيلًا واحدًا زائدًا لا علاقة "
+        "له بالحبكة.",
+        "سطر واحد على الأقل يصلح للاقتباس وحده: قصير ومحدد وبلا حكمة.",
+        closing,
+        "كل جملة في سطر مستقل وبينها سطر فارغ. لا سطر أطول من ١٤ كلمة."
+        + (" حافظ على ترقيم مقاطع الخيط ١، ٢، ٣ في بداية كل مقطع." if fmt == "thread" else ""),
+        f"منظور السرد يبقى كما هو: {POVS.get(pov, POVS['self'])[1]}.",
+        "احذف أي عبارة جاهزة أو مألوفة واستبدلها بتفصيل محدد.",
+    ]
+    return ("أنت محرّر منشورات. أمامك مسودة. أعد كتابتها أقوى بنفس الحكاية ونفس اللهجة.\n"
+            "افعل هذا بالترتيب:\n"
+            + "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
+            + "\n\n" + facts_block(facts)
+            + "\n\nأعد النص النهائي وحده، بلا أي تعليق.")
+
+
+def audit_prompt(facts):
+    return (
+        "أنت مدقّق. أمامك منشور قصصي يُفترض أنه واقعي. مهمتك أن تجد ما يجعل القارئ "
+        "يقول «هذي ما تصير».\n"
+        "افحص بالترتيب:\n"
+        "1. الأرقام والمُدد: هل تتناقض مع بعضها أو مع ورقة الحقائق؟ (سنوات، مبالغ، "
+        "أعمار، تواريخ). أي رقم ليس في الورقة يُحذف أو يُبدَّل بما فيها.\n"
+        "2. المنطق: هل يوجد تصرّف لا يفعله عاقل في هذا الموقف؟\n"
+        "3. الإخفاء: هل يُفهم لماذا بقي الأمر مخفيًا، ولماذا انكشف الآن؟\n"
+        "4. المصادفة: هل تعتمد القصة على صدفة كبيرة يصعب تصديقها؟\n"
+        "5. المبالغة: هل فيها حدث أقرب للأفلام منه للحياة؟\n"
+        "6. الزمن: هل تسلسل الأحداث ممكن؟ (لا يعمل أحد وظيفتين قبل أن يتخرج مثلًا).\n"
+        "ثم أصلح كل خلل وجدته بأقل تغيير ممكن، مع الحفاظ على اللهجة والبناء "
+        "وتقسيم السطور كما هي، ودون إضافة عبارات جاهزة.\n"
+        + facts_block(facts) + "\n"
+        'أعد JSON فقط بهذا الشكل: {"issues":["وصف مختصر لكل خلل وجدته"],'
+        '"text":"النص بعد الإصلاح كاملًا"}\n'
+        "إن لم تجد أي خلل، أعد القائمة فارغة والنص كما هو."
+    )
+
+
+def polish_prompt(problems, fmt, pov, ending, facts):
+    closing = ("النهاية معضلة بخيارين واضحين." if ending == "dilemma"
+               else "النهاية لحظة أو قرار صغير، لا معضلة ولا عبرة.")
+    return ("أنت محرّر. أمامك منشور شبه نهائي. لا تعد كتابته: أصلح فقط ما يلي بأقل "
+            "تغيير ممكن، وحافظ على اللهجة والحكاية وتقسيم السطور.\n"
+            + "\n".join(f"{i}. {p}" for i, p in enumerate(problems, 1))
+            + f"\n\nثوابت لا تُمَس: منظور السرد {POVS.get(pov, POVS['self'])[1]}. {closing}"
+            + (" الخيط يبقى مرقّمًا ١، ٢، ٣." if fmt == "thread" else "")
+            + "\n" + facts_block(facts)
+            + "\n\nأعد النص وحده، بلا أي تعليق.")
+
+
+HOOKS_PROMPT = (
+    "أمامك قصة. اكتب أربع بدائل للسطر الأول فقط، كل بديل واقعة محسوسة "
+    "لا تتجاوز اثنتي عشرة كلمة، متسقة مع بقية القصة، ومختلفة عن بعضها "
+    "في زاوية الدخول: مشهد، شيء في اليد، جملة قالها أحد، رقم جاف. "
+    "ممنوع الأسئلة والتمهيد والتشويق المصنوع. "
+    'أعد JSON فقط بالشكل: {"hooks":["...","...","...","..."]}\n\n'
 )
 
 
-AUDIT_PROMPT = (
-    "أنت مدقّق. أمامك منشور قصصي يُفترض أنه واقعي. مهمتك أن تجد ما يجعل القارئ "
-    "يقول «هذي ما تصير».\n"
-    "افحص بالترتيب:\n"
-    "1. الأرقام والمُدد: هل تتناقض؟ (سنوات، مبالغ، أعمار، تواريخ).\n"
-    "2. المنطق: هل يوجد تصرّف لا يفعله عاقل في هذا الموقف؟\n"
-    "3. الإخفاء: هل يُفهم لماذا بقي الأمر مخفيًا، ولماذا انكشف الآن؟\n"
-    "4. المصادفة: هل تعتمد القصة على صدفة كبيرة يصعب تصديقها؟\n"
-    "5. المبالغة: هل فيها حدث أقرب للأفلام منه للحياة؟\n"
-    "ثم أصلح كل خلل وجدته بأقل تغيير ممكن، مع الحفاظ على اللهجة والبناء "
-    "وتقسيم السطور كما هي، ودون إضافة عبارات جاهزة.\n"
-    'أعد JSON فقط بهذا الشكل: {"issues":["وصف مختصر لكل خلل وجدته"],'
-    '"text":"النص بعد الإصلاح كاملًا"}\n'
-    "إن لم تجد أي خلل، أعد القائمة فارغة والنص كما هو."
-)
+# ---------------------------------------------------------------- أدوات نصية
+def norm_digits(text):
+    return text.translate(AR_DIGITS)
+
+
+def numerals(text):
+    """الأرقام في النص كسلاسل ASCII، مع دمج فواصل الآلاف."""
+    text = re.sub(r"(\d)[,،٬](\d{3})", r"\1\2", norm_digits(text))
+    return re.findall(r"\d+", text)
 
 
 def numbers_in(text):
     return re.findall(r"[0-9٠-٩]+", text)
+
+
+def count_numbers(text):
+    return len(re.findall(
+        r"[0-9٠-٩]+|(?:^|\s)(?:سنة|سنين|سنوات|شهر|شهور|أسبوع|ألف|آلاف|مليون|نص|ربع|ثلث)(?=\s|$|[،.])",
+        text))
 
 
 def word_count(text):
@@ -551,106 +752,314 @@ def clean(text):
 
 
 def words_of(text):
-    return set(re.findall(r"[\w؀-ۿ]{3,}", text.lower()))
+    text = TASHKEEL.sub("", text.lower())
+    return {w for w in re.findall(r"[\w؀-ۿ]{3,}", text) if w not in STOP}
 
 
 def overlap(a, b):
+    """نسبة الكلمات المشتركة: تكشف الفكرة القصيرة الفارغة والفكرة التي تبتلع حبكة مستهلكة."""
     wa, wb = words_of(a), words_of(b)
-    return len(wa & wb) / max(1, min(len(wa), len(wb)))
+    common = len(wa & wb)
+    return max(common / max(1, len(wa)), common / max(1, len(wb)))
 
 
-def pick_premise(ideas, blocked):
-    """يختار الفكرة الأبعد عن الحبكات المستهلكة وعن قصصك السابقة."""
-    best, best_score = None, 2.0
-    for idea in ideas:
-        score = max([overlap(idea, b) for b in blocked] or [0])
-        if score < best_score:
-            best, best_score = idea, score
-    return best, best_score
+def count_leaks(text):
+    return len(re.findall(r"(?:^|\s)(?:أنا|كنت|لي|عندي|أنّي|إني)(?=\s|$|[،.])", text))
 
 
-def json_list(raw, field):
-    raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M).strip()
+def strip_thread_numbers(text):
+    return "\n".join(re.sub(r"^\s*[\d٠-٩]+\s*[).\-–:/]\s*", "", ln)
+                     for ln in text.split("\n"))
+
+
+def stray_numbers(text, facts, fmt="medium"):
+    """أرقام في النص لا تطابق ورقة الحقائق. الأعداد ١ و٢ لا تُحسب."""
+    if not facts:
+        return []
+    body = strip_thread_numbers(text) if fmt == "thread" else text
+    known = set(numerals(" ".join(facts)))
+    for n in list(known):
+        known.add(n + "000")                      # «40 ألف» تغطي 40000
+        if n.endswith("000") and len(n) > 3:
+            known.add(n[:-3])
+    return sorted({n for n in numerals(body) if n not in known and int(n) > 2}, key=int)
+
+
+def json_obj(raw):
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.M).strip()
     try:
-        data = json.loads(raw)
+        return json.loads(raw, strict=False)
     except ValueError:
         m = re.search(r"\{.*\}", raw, re.S)
-        if not m:
-            raise RuntimeError("ردّ غير مفهوم من المزوّد.")
-        data = json.loads(m.group())
-    items = [str(x).strip() for x in data.get(field, []) if str(x).strip()]
-    if not items:
+        if m:
+            try:
+                return json.loads(m.group(), strict=False)
+            except ValueError:
+                pass
+    raise RuntimeError("ردّ غير مفهوم من المزوّد.")
+
+
+def parse_ideas(raw):
+    data = json_obj(raw)
+    out = []
+    for it in data.get("ideas", []) if isinstance(data, dict) else []:
+        if isinstance(it, str):
+            it = {"hidden": it}
+        if not isinstance(it, dict):
+            continue
+        idea = {k: str(it.get(k) or "").strip() for k in ("hook", "hidden", "why_hidden", "why_now")}
+        facts = it.get("facts") or []
+        if isinstance(facts, dict):
+            facts = [f"{k}: {v}" for k, v in facts.items()]
+        if isinstance(facts, str):
+            facts = [facts]
+        idea["facts"] = [str(f).strip() for f in facts if str(f).strip()][:6]
+        if idea["hidden"]:
+            out.append(idea)
+    if not out:
         raise RuntimeError("ردّ فارغ من المزوّد.")
+    return out
+
+
+def idea_score(idea, blocked):
+    """جِدّة عن المستهلك والسابق، واكتمال (سببا الإخفاء والظهور + حقائق رقمية)، وعمق."""
+    text = " ".join([idea["hidden"], idea.get("why_hidden", ""), idea.get("why_now", "")])
+    novelty = 1 - max([overlap(text, b) for b in blocked] or [0])
+    complete = sum([
+        len(words_of(idea.get("why_hidden", ""))) >= 3,
+        len(words_of(idea.get("why_now", ""))) >= 3,
+        len(idea["facts"]) >= 2,
+        any(numerals(f) for f in idea["facts"]),
+    ]) / 4
+    depth = min(1.0, len(words_of(idea["hidden"])) / 12)
+    penalty = 0.25 if any(c in text for c in COINCIDENCE) else 0.0
+    hook = idea.get("hook", "")
+    if hook and ("؟" in hook or "?" in hook or word_count(hook) > 14):
+        penalty += 0.1
+    return round(0.5 * novelty + 0.3 * complete + 0.2 * depth - penalty, 3), round(novelty, 2)
+
+
+def pick_idea(ideas, blocked):
+    scored = [(idea_score(i, blocked), i) for i in ideas]
+    (score, novelty), best = max(scored, key=lambda s: s[0][0])
+    return best, novelty
+
+
+def make_hooks(text, provider, creds):
+    raw = chat([{"role": "system", "content": CRAFT},
+                {"role": "user", "content": HOOKS_PROMPT + text[:4000]}],
+               provider, creds, temperature=1.0, timeout=90)
+    data = json_obj(raw)
+    items = data.get("hooks", []) if isinstance(data, dict) else []
+    items = [str(x).strip() for x in items if str(x).strip()][:4]
+    if not items:
+        raise RuntimeError("لم تصل بدائل صالحة.")
     return items
+
+
+def best_hook(hooks, previous):
+    for h in hooks:
+        wc = word_count(h)
+        if not 4 <= wc <= 14 or "?" in h or "؟" in h:
+            continue
+        if any(b in h for b in BANNED) or opening_clash(h, previous):
+            continue
+        return h
+    return None
+
+
+# ------------------------------------------------------------------ الفحوصات
+def run_checks(text, fmt, pov, ending, facts, prev_openings=()):
+    """عشرة فحوصات محلية بلا نموذج. كل فحص يحمل تعليمة إصلاح إن كان الصقل يعالجه."""
+    label, low, high = FORMATS.get(fmt, FORMATS["medium"])
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    wc = word_count(text)
+    out = []
+
+    def add(cid, lab, ok, note="", fix=None):
+        out.append({"id": cid, "label": lab, "ok": bool(ok), "note": note,
+                    "fix": None if ok else fix})
+
+    lo, hi = int(low * 0.85), int(high * 1.15)
+    add("words", "عدد الكلمات", lo <= wc <= hi, f"{wc} كلمة، المدى {low}–{high}",
+        f"عدد الكلمات {wc} والمطلوب بين {low} و{high}: "
+        + ("احذف السطور الأقل أثرًا حتى تدخل المدى." if wc > hi
+           else "أضف وقائع محسوسة من ورقة الحقائق، لا حشوًا."))
+
+    nums = count_numbers(text)
+    add("numbers", "أرقام محددة", nums >= 2, f"{nums} رقم",
+        "لا يوجد رقمان محددان على الأقل: أضف مدة أو مبلغًا من ورقة الحقائق.")
+
+    found = [b for b in BANNED if b in text]
+    add("cliches", "بلا عبارات جاهزة", not found, "، ".join(found),
+        "هذه العبارات ممنوعة وما زالت موجودة: " + "، ".join(found)
+        + " — احذفها أو استبدلها بتفصيل محدد.")
+
+    if pov != "self":
+        leaks = count_leaks(text)
+        limit = 1 if pov == "third" else 3
+        add("pov", "المنظور ثابت", leaks <= limit, f"{leaks} تسرّب" if leaks else "",
+            "تسرّب ضمير المتكلم (أنا/كنت/لي/عندي) في منشور بضمير الغائب: حوّل هذه "
+            "المواضع إلى الغائب.")
+
+    longest = max((word_count(ln) for ln in lines), default=0)
+    add("lines", "سطور قصيرة", longest <= 16, f"أطول سطر {longest} كلمة",
+        f"أطول سطر فيه {longest} كلمة: قسّمه إلى سطرين لا يتجاوز أحدهما ١٤ كلمة.")
+
+    if facts:
+        stray = stray_numbers(text, facts, fmt)
+        add("facts", "مطابقة ورقة الحقائق", not stray,
+            "، ".join(stray) if stray else "كل الأرقام مطابقة",
+            "هذه الأرقام ليست في ورقة الحقائق: " + "، ".join(stray)
+            + " — احذفها أو بدّلها بما في الورقة.")
+
+    add("doubt", "سطر شك أو جهل", bool(DOUBT_RE.search(text)), "",
+        "لا يوجد سطر يقرّ فيه صاحب القصة بأنه لا يعرف شيئًا: أضف سطرًا واحدًا "
+        "مثل «ما أدري ليش» بما يناسب اللهجة.")
+
+    tail = " ".join(lines[-2:])
+    if ending == "dilemma":
+        ok = bool(re.search(r"(?:^|\s)(?:ولا|أو|أم|وإلا|ولّا|وإلّا)(?:\s|$)|[?؟]", tail))
+        fix = ("آخر سطرين ليسا معضلة بخيارين واضحين: اجعلهما حيرة بين خيارين "
+               "محددين، بلا سؤال للقارئ.")
+    else:
+        ok = not re.search(r"[?؟]\s*$", tail) and not any(
+            w in tail for w in ("شاركني", "رأيك", "علّقوا", "تعليق", "الدرس"))
+        fix = "النهاية يجب أن تكون لحظة أو قرارًا صغيرًا، لا سؤالًا ولا دعوة للتعليق ولا عبرة."
+    add("ending", "شكل النهاية", ok, "", fix)
+
+    sym = bool(re.search(r"[#＃]|[\U0001F300-\U0001FAFF☀-➿]", text))
+    add("clean", "بلا رموز ووسوم", not sym, "", "احذف الرموز التعبيرية والوسوم وأي عنوان.")
+
+    if fmt == "thread":
+        numbered = sum(1 for ln in lines if re.match(r"^\s*[\d٠-٩]+\s*[).\-–:/]", ln))
+        add("thread", "ترقيم الخيط", numbered >= 3, f"{numbered} مقاطع",
+            "الخيط غير مرقّم: رقّم المقاطع ١، ٢، ٣ في بداية كل مقطع.")
+
+    if prev_openings:
+        add("opening", "افتتاحية جديدة", not opening_clash(text, prev_openings),
+            "", None)                           # تُعالج ببدائل الافتتاحية لا بالصقل
+    return out
+
+
+def score_of(checks):
+    if not checks:
+        return 0
+    return round(100 * sum(1 for c in checks if c["ok"]) / len(checks))
+
+
+# ------------------------------------------------------------------ الكتابة
+def _guard(job):
+    if job.get("cancel"):
+        raise Cancelled()
 
 
 def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds):
     seen_plots = recent_plots()
+    prev_openings = recent_openings()
     blocked = TIRED_PLOTS + seen_plots
     ending = CORES.get(core, CORES["betrayal"])[3]
-
-    job["stage"] = "premise"
-    ideas = json_list(chat(
-        [{"role": "system", "content": CRAFT},
-         {"role": "user", "content": premise_prompt(dna, core, drama, seen_plots)}],
-        provider, creds, temperature=1.05), "ideas")
-    premise, score = pick_premise(ideas, blocked)
-    job["premise"] = premise
-    job["novelty"] = round(1 - score, 2)
-
-    job["stage"] = "draft"
-    draft = clean(chat(
-        [{"role": "system", "content": CRAFT},
-         {"role": "user", "content": write_prompt(dna, premise, fmt, dialect,
-                                                   core, pov, drama)}],
-        provider, creds))
-
-    job["stage"] = "edit"
-    job["text"] = ""
+    system = {"role": "system", "content": CRAFT}
 
     def token(piece, notice):
+        _guard(job)
         if notice:
             job["notice"] = notice
         elif piece:
             job.pop("notice", None)
             job["text"] += piece
 
-    guard = (f"\nمنظور السرد يجب أن يبقى: {POVS.get(pov, POVS['self'])[1]}.\n"
-             + ("النهاية معضلة بخيارين." if ending == "dilemma"
-                else "النهاية لحظة أو قرار صغير، لا معضلة ولا عبرة."))
-    final = clean(chat(
-        [{"role": "system", "content": CRAFT},
-         {"role": "user", "content": EDIT_PROMPT + guard + "\n\nالمسودة:\n" + draft}],
-        provider, creds, on_token=token, temperature=0.75))
+    # 1. الحبكة وورقة الحقائق
+    job["stage"] = "premise"
+    ideas = parse_ideas(chat(
+        [system, {"role": "user", "content": premise_prompt(dna, core, drama, seen_plots)}],
+        provider, creds, temperature=1.05, timeout=150))
+    idea, novelty = pick_idea(ideas, blocked)
+    facts = idea["facts"]
+    job["premise"] = premise_text(idea)
+    job["facts"] = facts
+    job["novelty"] = novelty
+    _guard(job)
 
+    # 2. المسودة — تُبثّ حرفًا حرفًا
+    job["stage"] = "draft"
+    job["text"] = ""
+    draft = clean(chat(
+        [system, {"role": "user", "content": write_prompt(dna, idea, fmt, dialect, core, pov, drama)}],
+        provider, creds, on_token=token, timeout=200))
+    _guard(job)
+
+    # 3. التحرير — يشدّ كل سطر، ويُبثّ كذلك
+    job["stage"] = "edit"
+    job["text"] = ""
+    final = clean(chat(
+        [system, {"role": "user", "content": edit_prompt(fmt, pov, ending, facts) + "\n\nالمسودة:\n" + draft}],
+        provider, creds, on_token=token, temperature=0.75, timeout=200))
+    _guard(job)
+
+    # 4. التدقيق المنطقي
     job["stage"] = "audit"
+    job["text"] = final
     try:
-        checked = json.loads(re.sub(r"^```(?:json)?|```$", "",
-                                    chat([{"role": "system", "content": CRAFT},
-                                          {"role": "user",
-                                           "content": AUDIT_PROMPT + "\n\nالنص:\n"
-                                           + final + "\n\nالأرقام الواردة فيه: "
-                                           + "، ".join(numbers_in(final))}],
-                                         provider, creds, temperature=0.3).strip(),
-                                    flags=re.M).strip())
+        checked = json_obj(chat(
+            [system, {"role": "user", "content": audit_prompt(facts) + "\n\nالنص:\n" + final
+                      + "\n\nالأرقام الواردة فيه: " + "، ".join(numbers_in(final))}],
+            provider, creds, temperature=0.3, timeout=150))
         fixed = clean(str(checked.get("text") or ""))
         issues = [str(x) for x in checked.get("issues", [])][:6]
         if word_count(fixed) >= word_count(final) * 0.6:
-            final, job["issues"] = fixed, issues
-        else:                                   # ردّ مبتور: نُبقي النص الأصلي
-            job["issues"] = issues
+            final = fixed
+        job["issues"] = issues
+    except Cancelled:
+        raise
     except Exception as exc:
         log.warning("تعذّر التدقيق: %s", exc)
         job["issues"] = []
+    _guard(job)
+
+    # 5. الفحوصات المحلية، ثم جولة صقل واحدة إن رسب شيء يعالجه الصقل
+    checks = run_checks(final, fmt, pov, ending, facts, prev_openings)
+    problems = [c["fix"] for c in checks if not c["ok"] and c["fix"]]
+    if problems:
+        job["stage"] = "polish"
+        job["text"] = final
+        try:
+            candidate = clean(chat(
+                [system, {"role": "user", "content": polish_prompt(problems, fmt, pov, ending, facts)
+                          + "\n\nالنص:\n" + final}],
+                provider, creds, temperature=0.5, timeout=150))
+            new_checks = run_checks(candidate, fmt, pov, ending, facts, prev_openings)
+            if (score_of(new_checks) >= score_of(checks)
+                    and word_count(candidate) >= word_count(final) * 0.6):
+                final, checks = candidate, new_checks
+                job["polished"] = True
+        except Cancelled:
+            raise
+        except Exception as exc:
+            log.warning("تعذّر الصقل: %s", exc)
+    _guard(job)
+
+    # 6. افتتاحية تشبه محفوظًا سابقًا → بدائل واختيار الأبعد
+    if any(c["id"] == "opening" and not c["ok"] for c in checks):
+        job["stage"] = "hook"
+        try:
+            pick = best_hook(make_hooks(final, provider, creds), prev_openings)
+            if pick:
+                final = pick + "\n" + "\n".join(final.split("\n")[1:])
+                checks = run_checks(final, fmt, pov, ending, facts, prev_openings)
+                job["rehooked"] = True
+        except Cancelled:
+            raise
+        except Exception as exc:
+            log.warning("تعذّر تبديل الافتتاحية: %s", exc)
 
     job["text"] = final
     job["words"] = word_count(final)
+    job["numbers"] = count_numbers(final)
     job["cliches"] = [b for b in BANNED if b in final]
-    job["numbers"] = len(re.findall(r"[0-9٠-٩]+|\b(?:سنة|سنين|سنوات|شهر|ألف|مليون|نص|ربع)\b", final))
-    if pov != "self":
-        leaks = len(re.findall(r"(?:^|\s)(?:أنا|كنت|لي|عندي|أنّي|إني)(?=\s|$|[،.])", final))
-        job["leak"] = leaks if leaks > 1 else 0
-    job["plot"] = premise
+    job["checks"] = checks
+    job["score"] = score_of(checks)
+    job["plot"] = idea["hidden"]
     job["stage"] = "done"
 
 
@@ -658,10 +1067,24 @@ def _worker(job_id, dna, fmt, dialect, core, pov, drama, provider, creds):
     job = JOBS[job_id]
     try:
         write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds)
+    except Cancelled:
+        job["stage"] = "cancelled"
     except Exception as exc:
         log.exception("write failed")
         job["stage"] = "error"
         job["error"] = str(exc)
+
+
+def _creds(data):
+    provider = "openai" if data.get("provider") == "openai" else "free"
+    creds = {"base": (data.get("base") or "").strip(),
+             "key": (data.get("key") or "").strip(),
+             "model": (data.get("model") or "").strip()}
+    return provider, creds
+
+
+def _snapshot(job):
+    return {k: v for k, v in dict(job).items() if k not in ("at", "cancel")}
 
 
 # ------------------------------------------------------------------ المسارات
@@ -675,19 +1098,14 @@ def index():
 
 @app.route("/config")
 def config():
-    groups = [
-        ("مواقف ثقيلة", ["betrayal", "injustice", "guilt", "money", "pride",
-                          "secretill", "loss"]),
-        ("وفاء وامتنان", ["sacrifice", "gratitude", "loyalty", "return", "misread",
-                           "reversal"]),
-        ("مواقف يومية", ["surprise", "chance", "funny", "nostalgia", "parenting",
-                          "work", "neighbors"]),
-    ]
-    cores = [{"group": g, "items": [{"id": k, "label": CORES[k][0],
-                                     "desc": CORES[k][1]} for k in keys]}
-             for g, keys in groups]
+    cores = [{"group": g, "items": [{"id": k, "label": CORES[k][0], "desc": CORES[k][1]}
+                                    for k in keys]}
+             for g, keys in CORE_GROUPS]
+    seeds = {"who": WHO, "secret": SECRET_DARK + SECRET_LIGHT, "device": DEVICE,
+             "place": PLACE, "cost": COST_DARK + COST_LIGHT, "dilemma": DILEMMA + CLOSERS,
+             "open": [{"id": k, "label": v[0]} for k, v in OPEN_STYLES.items()]}
     return jsonify(version=VERSION, openai_ready=bool(OPENAI_BASE and OPENAI_KEY),
-                   model=OPENAI_MODEL, saved=len(lib_read()), cores=cores,
+                   model=OPENAI_MODEL, saved=len(lib_read()), cores=cores, seeds=seeds,
                    povs=[{"id": k, "label": v[0]} for k, v in POVS.items()])
 
 
@@ -695,21 +1113,21 @@ def config():
 def write():
     data = request.get_json(silent=True) or {}
     fmt = data.get("format", "medium")
+    fmt = fmt if fmt in FORMATS else "medium"
     dialect = data.get("dialect", "saudi")
+    dialect = dialect if dialect in DIALECTS else "saudi"
     core = data.get("core", "betrayal")
     core = core if core in CORES else "betrayal"
     pov = data.get("pov", "self")
     pov = pov if pov in POVS else "self"
     drama = data.get("drama", "mid")
     drama = drama if drama in DRAMA else "mid"
-    provider = "openai" if data.get("provider") == "openai" else "free"
-    creds = {"base": (data.get("base") or "").strip(),
-             "key": (data.get("key") or "").strip(),
-             "model": (data.get("model") or "").strip()}
+    provider, creds = _creds(data)
     if provider == "openai" and not ((creds["base"] or OPENAI_BASE) and (creds["key"] or OPENAI_KEY)):
         return jsonify(error="أدخل عنوان المزوّد ومفتاحه، أو اختر المحرّك المجاني."), 400
 
-    dna = fresh_dna(data.get("topic", ""), core)
+    seed = data.get("seed") if isinstance(data.get("seed"), dict) else None
+    dna = fresh_dna(data.get("topic", ""), core, seed, avoid=recent_dna())
 
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
@@ -718,11 +1136,12 @@ def write():
                 JOBS.pop(old, None)
         JOBS[job_id] = {"stage": "seed", "text": "", "error": "", "dna": dna,
                         "words": 0, "cliches": [], "premise": "", "issues": [],
+                        "facts": [], "checks": [], "score": 0, "format": fmt,
+                        "core": core, "pov": pov, "dialect": dialect,
                         "at": time.time()}
 
     threading.Thread(target=_worker,
-                     args=(job_id, dna, fmt, dialect, core, pov, drama,
-                           provider, creds),
+                     args=(job_id, dna, fmt, dialect, core, pov, drama, provider, creds),
                      daemon=True).start()
     return jsonify(job=job_id, dna=dna)
 
@@ -732,7 +1151,59 @@ def write_status(job_id):
     job = JOBS.get(job_id)
     if not job:
         return jsonify(error="المهمة غير موجودة."), 404
-    return jsonify({k: v for k, v in job.items() if k != "at"})
+    return jsonify(_snapshot(job))
+
+
+@app.route("/write/<job_id>/cancel", methods=["POST"])
+def write_cancel(job_id):
+    job = JOBS.get(job_id)
+    if not job:
+        return jsonify(error="المهمة غير موجودة."), 404
+    job["cancel"] = True
+    return jsonify(ok=True)
+
+
+def _sse(obj):
+    return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+
+@app.route("/write/<job_id>/stream")
+def write_stream(job_id):
+    """بثّ حي بدل الاستطلاع: يرسل ما زاد من النص فقط، والحالة عند تغيّرها."""
+    if job_id not in JOBS:
+        return jsonify(error="المهمة غير موجودة."), 404
+
+    def gen():
+        sent, last_state, beat = "", None, time.time()
+        while True:
+            job = JOBS.get(job_id)
+            if job is None:
+                yield _sse({"state": {"stage": "error", "error": "المهمة غير موجودة."}})
+                return
+            snap = _snapshot(job)
+            text = snap.pop("text", "")
+            if text != sent:
+                if text.startswith(sent):
+                    yield _sse({"append": text[len(sent):]})
+                else:
+                    yield _sse({"text": text})
+                sent = text
+            packed = json.dumps(snap, ensure_ascii=False, sort_keys=True)
+            if packed != last_state:
+                last_state = packed
+                yield _sse({"state": snap})
+            if snap.get("stage") in ("done", "error", "cancelled"):
+                yield _sse({"state": snap, "text": text, "final": True})
+                return
+            if time.time() - beat > 15:
+                yield ": ping\n\n"
+                beat = time.time()
+            time.sleep(0.12)
+
+    resp = Response(gen(), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
 
 
 @app.route("/hooks", methods=["POST"])
@@ -741,28 +1212,9 @@ def hooks():
     text = (data.get("text") or "").strip()
     if len(text) < 40:
         return jsonify(error="لا توجد قصة بعد."), 400
-    provider = "openai" if data.get("provider") == "openai" else "free"
-    creds = {"base": (data.get("base") or "").strip(),
-             "key": (data.get("key") or "").strip(),
-             "model": (data.get("model") or "").strip()}
-
-    ask = ("أمامك قصة. اكتب أربع بدائل للسطر الأول فقط، كل بديل واقعة محسوسة "
-           "لا تتجاوز اثنتي عشرة كلمة، متسقة مع بقية القصة، ومختلفة عن بعضها "
-           "في زاوية الدخول. ممنوع الأسئلة والتمهيد. "
-           'أعد JSON فقط بالشكل: {"hooks":["...","...","...","..."]}\n\n' + text[:4000])
+    provider, creds = _creds(data)
     try:
-        raw = chat([{"role": "system", "content": CRAFT},
-                    {"role": "user", "content": ask}], provider, creds, temperature=1.0)
-        raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M).strip()
-        try:
-            items = json.loads(raw)["hooks"]
-        except Exception:
-            m = re.search(r"\{.*\}", raw, re.S)
-            items = json.loads(m.group())["hooks"] if m else []
-        items = [str(x).strip() for x in items if str(x).strip()][:4]
-        if not items:
-            raise RuntimeError("لم تصل بدائل صالحة.")
-        return jsonify(hooks=items)
+        return jsonify(hooks=make_hooks(text, provider, creds))
     except Exception as exc:
         return jsonify(error=str(exc)), 400
 
@@ -778,7 +1230,10 @@ def library():
         return jsonify(error="لا يوجد نص لحفظه."), 400
     items = lib_read()
     items.append({"id": uuid.uuid4().hex[:12], "text": text,
-                  "dna": data.get("dna") or {}, "plot": data.get("plot") or "",
+                  "dna": data.get("dna") or {}, "plot": (data.get("plot") or "")[:300],
+                  "facts": [str(f)[:160] for f in (data.get("facts") or [])][:6],
+                  "score": int(data.get("score") or 0),
+                  "meta": {k: str(data.get(k) or "")[:20] for k in ("format", "core", "pov", "dialect")},
                   "at": time.strftime("%Y-%m-%d %H:%M")})
     lib_write(items)
     return jsonify(ok=True, count=len(items))
@@ -791,6 +1246,28 @@ def library_delete(item_id):
     return jsonify(ok=True, count=len(items))
 
 
+@app.route("/library/export")
+def library_export():
+    fmt = "md" if request.args.get("fmt") == "md" else "txt"
+    items = list(reversed(lib_read()))
+    if fmt == "md":
+        parts = ["# المحفوظات — مِسنّ القصص", ""]
+        for it in items:
+            head = it.get("at", "")
+            core = CORES.get((it.get("meta") or {}).get("core", ""), ("",))[0]
+            parts += [f"## {head}" + (f" · {core}" if core else ""), "", it.get("text", ""), ""]
+            if it.get("facts"):
+                parts += ["> " + " · ".join(it["facts"]), ""]
+            parts += ["---", ""]
+        body, mime = "\n".join(parts), "text/markdown"
+    else:
+        sep = "\n\n" + "=" * 40 + "\n\n"
+        body, mime = sep.join(it.get("text", "") for it in items), "text/plain"
+    resp = Response(body, mimetype=mime + "; charset=utf-8")
+    resp.headers["Content-Disposition"] = f'attachment; filename="stories.{fmt}"'
+    return resp
+
+
 # --------------------------------------------------------------- الواجهة
 PAGE = r"""<!doctype html>
 <html lang="ar" dir="rtl">
@@ -798,13 +1275,14 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>مِسنّ — منشورات قصصية</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141C31'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%23D4577C'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Sans+Arabic:wght@300;400;600&display=swap" rel="stylesheet">
 <style>
   :root{
     --ink:#141C31; --panel:#1C2745; --rule:#2C3A61; --dim:#8C9BC4;
-    --paper:#F6F5F3; --graphite:#1A1F2B; --rose:#D4577C; --sage:#7FC7C2;
+    --paper:#F6F5F3; --graphite:#1A1F2B; --rose:#D4577C; --sage:#7FC7C2; --amber:#E2B15A;
   }
   *{box-sizing:border-box}
   html,body{margin:0}
@@ -837,27 +1315,51 @@ PAGE = r"""<!doctype html>
   textarea{resize:vertical; line-height:1.8}
   select:focus,input:focus,textarea:focus{outline:2px solid var(--rose); outline-offset:1px; border-color:transparent}
   .full{grid-column:1/-1}
+  .check{display:flex; align-items:center; gap:8px; font-size:13px; color:var(--dim); margin-top:8px}
+  .check input{width:auto}
 
+  .seedpanel{border-bottom:1px solid var(--rule); padding:14px 0 18px; font-size:13px; color:var(--dim)}
+  .seedpanel summary{cursor:pointer; color:var(--sage); font-size:14px}
+  .seedpanel .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px 16px; margin-top:14px}
+  .seedpanel select{font-size:13px; padding:8px 10px}
+  .seedpanel select.locked{border-color:var(--sage)}
+
+  .actions{display:flex; gap:10px; margin-top:24px; flex-wrap:wrap}
   .run{
-    width:100%; margin-top:24px; background:var(--rose); color:#fff; border:0;
+    flex:1; min-width:180px; background:var(--rose); color:#fff; border:0;
     border-radius:8px; padding:16px; font-family:inherit; font-size:17px; font-weight:600;
     cursor:pointer;
   }
   .run:disabled{background:#43304A; color:#9A8FA4; cursor:not-allowed}
-  .state{margin:14px 0 0; font-size:14px; color:var(--sage); min-height:1.4em}
+  .ghost{background:none; color:#E6EAF5; border:1px solid var(--rule); border-radius:8px;
+         padding:14px 18px; font-family:inherit; font-size:15px; cursor:pointer}
+  .ghost:hover{border-color:var(--sage); color:var(--sage)}
+  .ghost:disabled{opacity:.4; cursor:not-allowed}
+  .ghost.danger:hover{border-color:var(--rose); color:var(--rose)}
+
+  .steps{list-style:none; margin:20px 0 0; padding:0; display:flex; gap:6px; font-size:12px; color:var(--dim)}
+  .steps li{flex:1; text-align:center; padding:8px 4px 10px; border-top:2px solid var(--rule); transition:border-color .3s, color .3s}
+  .steps li.done{border-top-color:var(--sage); color:var(--sage)}
+  .steps li.active{border-top-color:var(--rose); color:#fff}
+  .steps li.active::after{content:""; display:block; width:6px; height:6px; border-radius:50%; background:var(--rose); margin:6px auto 0; animation:blink 1s step-end infinite}
+  .steps li.hidden{display:none}
+  .state{margin:10px 0 0; font-size:14px; color:var(--sage); min-height:1.4em}
   .state.bad{color:#FF9DAF}
 
   .sheet{
     background:var(--paper); color:var(--graphite); border-radius:3px;
-    padding:46px 40px 34px; margin:30px 0 0; display:none;
+    padding:40px 40px 34px; margin:30px 0 0; display:none; position:relative;
     box-shadow:0 26px 60px rgba(0,0,0,.42);
   }
   .sheet.on{display:block}
+  .tag{position:absolute; top:14px; inset-inline-start:40px; font-size:12px; color:#8A8E98; letter-spacing:.03em}
+  .tag.live{color:var(--rose)}
   .sheet .body{
     font-family:"Amiri",serif; font-size:21px; line-height:2.05; white-space:pre-wrap;
-    border-inline-start:2px solid transparent;
+    min-height:3em; margin-top:8px;
   }
   .sheet .body::first-line{font-weight:700}
+  .sheet.busy .body{color:#5A5E68}
   .foot{display:flex; flex-wrap:wrap; gap:14px; align-items:center;
         border-top:1px solid #DDD9D2; margin-top:28px; padding-top:16px;
         font-size:13px; color:#6B6F7A}
@@ -865,6 +1367,7 @@ PAGE = r"""<!doctype html>
   .act{background:none; border:1px solid #CFCAC2; color:var(--graphite); border-radius:6px;
        padding:8px 14px; font-family:inherit; font-size:14px; cursor:pointer}
   .act:hover{border-color:var(--rose); color:var(--rose)}
+  .act:disabled{opacity:.4; cursor:not-allowed}
   .act.solid{background:var(--graphite); color:var(--paper); border-color:var(--graphite)}
   .act.solid:hover{background:var(--rose); border-color:var(--rose); color:#fff}
 
@@ -876,21 +1379,47 @@ PAGE = r"""<!doctype html>
         font-family:"Amiri",serif; font-size:18px; color:var(--graphite); cursor:pointer}
   .hook:hover{border-inline-start-color:var(--rose); background:#E7E3DC}
 
-  .seedbox{margin-top:26px; font-size:13px; color:var(--dim)}
+  .card{display:none; margin-top:18px; background:var(--panel); border:1px solid var(--rule);
+        border-radius:10px; padding:18px 20px; gap:20px; align-items:flex-start}
+  .card.on{display:flex}
+  .ring{--p:0; width:76px; height:76px; border-radius:50%; flex:none; display:grid; place-items:center;
+        font-size:22px; font-weight:600; color:#fff;
+        background:conic-gradient(var(--c) calc(var(--p)*1%), var(--rule) 0)}
+  .ring::before{content:""; position:absolute; width:60px; height:60px; border-radius:50%; background:var(--panel)}
+  .ring span{position:relative}
+  .ring{position:relative}
+  .ring.good{--c:var(--sage)} .ring.mid{--c:var(--amber)} .ring.low{--c:var(--rose)}
+  .card .info{flex:1; min-width:0}
+  .card h3{margin:0 0 8px; font-size:14px; font-weight:400; color:var(--dim)}
+  .chips{list-style:none; margin:0; padding:0; display:flex; flex-wrap:wrap; gap:6px}
+  .chip{font-size:12px; padding:4px 10px; border-radius:999px; border:1px solid var(--rule); color:#D8DEEE}
+  .chip.ok{border-color:rgba(127,199,194,.5)} .chip.ok::before{content:"✓ "; color:var(--sage)}
+  .chip.bad{border-color:rgba(212,87,124,.6)} .chip.bad::before{content:"✗ "; color:var(--rose)}
+  .chip small{color:var(--dim); margin-inline-start:4px}
+  .cardnote{font-size:12px; color:var(--dim); margin:10px 0 0}
+
+  .seedbox{margin-top:18px; font-size:13px; color:var(--dim)}
   .seedbox summary{cursor:pointer; color:var(--sage)}
   .seedbox ul{margin:10px 0 0; padding-inline-start:18px; line-height:1.9}
+  .seedbox h4{margin:12px 0 0; font-size:12px; font-weight:400; color:var(--dim)}
 
   .shelf{margin-top:56px; border-top:1px solid var(--rule); padding-top:26px}
-  .shelf h2{font-family:"Amiri",serif; font-weight:400; font-size:22px; margin:0 0 16px}
+  .shelf .head{display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:16px}
+  .shelf h2{font-family:"Amiri",serif; font-weight:400; font-size:22px; margin:0; flex:1}
+  .shelf input{width:auto; min-width:180px; font-size:13px; padding:8px 10px}
+  .shelf a{color:var(--dim); font-size:13px; text-decoration:none; border:1px solid var(--rule); border-radius:6px; padding:7px 10px}
+  .shelf a:hover{color:var(--sage); border-color:var(--sage)}
   .saved{border-bottom:1px solid var(--rule); padding:14px 0; display:flex; gap:14px; align-items:flex-start}
   .saved .txt{flex:1; font-family:"Amiri",serif; font-size:17px; line-height:1.8; color:#D8DEEE;
-              max-height:3.6em; overflow:hidden}
-  .saved time{font-size:12px; color:var(--dim); white-space:nowrap}
-  .saved button{background:none; border:0; color:var(--dim); cursor:pointer; font-family:inherit; font-size:13px}
+              max-height:3.6em; overflow:hidden; cursor:pointer}
+  .saved .side{display:flex; flex-direction:column; align-items:flex-end; gap:4px; font-size:12px; color:var(--dim); white-space:nowrap}
+  .saved .badge{color:var(--sage)}
+  .saved button{background:none; border:0; color:var(--dim); cursor:pointer; font-family:inherit; font-size:13px; padding:0}
   .saved button:hover{color:#FF9DAF}
   .empty{color:var(--dim); font-size:14px}
+  kbd{font-family:inherit; font-size:11px; border:1px solid var(--rule); border-radius:4px; padding:1px 5px; color:var(--dim)}
 
-  @media (max-width:560px){ .sheet{padding:30px 22px 26px} .sheet .body{font-size:19px} }
+  @media (max-width:560px){ .sheet{padding:36px 22px 26px} .sheet .body{font-size:19px} .tag{inset-inline-start:22px} .steps{font-size:11px} }
   @media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
   :focus-visible{outline:2px solid var(--rose); outline-offset:2px}
 </style>
@@ -902,10 +1431,9 @@ PAGE = r"""<!doctype html>
     <div class="mark">مِسنّ القصص · الإصدار __VER__</div>
     <p class="hero" id="hero"><span class="caret"></span></p>
     <p class="sub">منشورات قصصية مؤلَّفة، بأسلوب من عاشها وكتبها على جواله: سطر أول عادي،
-       كشف في النصف الثاني، ومعضلة في الآخر. المحرّك يولّد خمس حبكات ويستبعد المتداول
-       منها قبل أن يكتب، حتى لا تخرج قصة قرأها الناس ألف مرة. عشرون نوع موقف،
-       من الخيانة إلى الطرفة اليومية، وثلاثة منظورات للسرد. وبعد الكتابة يمرّ النص
-       على مدقّق يفحص الأرقام والمنطق وسبب بقاء السر مخفيًا، ويصلح ما لا يُصدَّق.</p>
+       كشف في النصف الثاني، ومعضلة في الآخر. المحرّك يولّد خمس حبكات بورقة حقائق ثابتة،
+       يستبعد المتداول، يكتب، يشدّ كل سطر، يدقّق الأرقام والمنطق، ثم يمرّر النص على نحو
+       عشرة فحوصات محلية ويصقل ما رسب منها. عشرون نوع موقف، أربعة أنماط افتتاحية، وثلاثة منظورات للسرد.</p>
   </header>
 
   <div class="desk">
@@ -915,7 +1443,7 @@ PAGE = r"""<!doctype html>
     </div>
     <div>
       <label for="format">الشكل</label>
-      <select id="format">
+      <select id="format" data-keep>
         <option value="short">قصير · نحو 85 كلمة</option>
         <option value="medium" selected>متوسط · نحو 140 كلمة</option>
         <option value="long">طويل · نحو 230 كلمة</option>
@@ -924,7 +1452,7 @@ PAGE = r"""<!doctype html>
     </div>
     <div>
       <label for="dialect">اللهجة</label>
-      <select id="dialect">
+      <select id="dialect" data-keep>
         <option value="saudi" selected>سعودية بيضاء</option>
         <option value="gulf">خليجية</option>
         <option value="egy">مصرية</option>
@@ -934,11 +1462,11 @@ PAGE = r"""<!doctype html>
     </div>
     <div>
       <label for="core">نوع الموقف</label>
-      <select id="core"></select>
+      <select id="core" data-keep></select>
     </div>
     <div>
       <label for="drama">حجم الحدث</label>
-      <select id="drama">
+      <select id="drama" data-keep>
         <option value="small">عادي جدًا · أقرب للتصديق</option>
         <option value="mid" selected>متوسط</option>
         <option value="big">قوي · مع بقائه معقولًا</option>
@@ -946,7 +1474,7 @@ PAGE = r"""<!doctype html>
     </div>
     <div>
       <label for="pov">المنشور</label>
-      <select id="pov">
+      <select id="pov" data-keep>
         <option value="self" selected>شخصي · بضمير المتكلم</option>
         <option value="third">عام · عن شخص آخر</option>
         <option value="heard">منقول · سمعتها من أحدهم</option>
@@ -954,23 +1482,49 @@ PAGE = r"""<!doctype html>
     </div>
     <div>
       <label for="provider">المحرّك</label>
-      <select id="provider">
+      <select id="provider" data-keep>
         <option value="free" selected>مجاني بلا مفتاح</option>
         <option value="openai">مزوّد خاص</option>
       </select>
     </div>
     <div class="full" id="creds" style="display:none">
       <label for="base">عنوان المزوّد ومفتاحه واسم النموذج</label>
-      <input id="base" placeholder="https://api.openai.com/v1">
-      <input id="key" type="password" placeholder="sk-…" style="margin-top:8px">
-      <input id="model" placeholder="gpt-4o-mini" style="margin-top:8px">
+      <input id="base" placeholder="https://api.openai.com/v1" data-keep>
+      <input id="key" type="password" placeholder="sk-…" style="margin-top:8px" autocomplete="off">
+      <input id="model" placeholder="gpt-4o-mini" style="margin-top:8px" data-keep>
+      <label class="check"><input type="checkbox" id="rememberkey"> تذكّر المفتاح في هذا المتصفح</label>
     </div>
   </div>
 
-  <button class="run" id="run">اكتب قصة</button>
-  <p class="state" id="state"></p>
+  <details class="seedpanel" id="seedpanel">
+    <summary>البذرة — اتركها عشوائية أو ثبّت ما تريد</summary>
+    <div class="grid">
+      <div><label for="seed_who">الطرف الآخر</label><select id="seed_who"></select></div>
+      <div><label for="seed_secret">السر</label><select id="seed_secret"></select></div>
+      <div><label for="seed_device">أداة الكشف</label><select id="seed_device"></select></div>
+      <div><label for="seed_place">مكان الكشف</label><select id="seed_place"></select></div>
+      <div><label for="seed_cost">الثمن</label><select id="seed_cost"></select></div>
+      <div><label for="seed_dilemma">النهاية</label><select id="seed_dilemma"></select></div>
+      <div><label for="seed_open">نمط السطر الأول</label><select id="seed_open"></select></div>
+    </div>
+  </details>
+
+  <div class="actions">
+    <button class="run" id="run">اكتب قصة</button>
+    <button class="ghost" id="again" disabled title="نفس البذرة، حبكة ونص جديدان">أعد بنفس البذرة</button>
+    <button class="ghost danger" id="cancel" style="display:none">إلغاء</button>
+  </div>
+  <ol class="steps" id="steps" aria-hidden="true">
+    <li data-s="premise">حبكة</li>
+    <li data-s="draft">مسودة</li>
+    <li data-s="edit">تحرير</li>
+    <li data-s="audit">تدقيق</li>
+    <li data-s="polish" class="hidden">صقل</li>
+  </ol>
+  <p class="state" id="state" aria-live="polite"></p>
 
   <article class="sheet" id="sheet">
+    <div class="tag" id="tag"></div>
     <div class="body" id="story"></div>
     <div class="hooks" id="hooks">
       <p>اختر افتتاحية بديلة لتحلّ محل السطر الأول</p>
@@ -984,14 +1538,29 @@ PAGE = r"""<!doctype html>
     </div>
   </article>
 
+  <section class="card" id="card">
+    <div class="ring" id="ring"><span id="ringval">0</span></div>
+    <div class="info">
+      <h3>بطاقة الجودة — فحوصات محلية لا تعتمد على النموذج</h3>
+      <ul class="chips" id="chips"></ul>
+      <p class="cardnote" id="cardnote"></p>
+    </div>
+  </section>
+
   <details class="seedbox" id="seedbox" style="display:none">
-    <summary>بذرة هذه القصة وما أصلحه المدقّق</summary>
-    <ul id="seedlist"></ul>
-    <ul id="auditbox"></ul>
+    <summary>بذرة هذه القصة، وورقة الحقائق، وما أصلحه المدقّق</summary>
+    <h4>البذرة</h4><ul id="seedlist"></ul>
+    <h4>ورقة الحقائق</h4><ul id="factlist"></ul>
+    <h4>المدقّق</h4><ul id="auditbox"></ul>
   </details>
 
   <section class="shelf">
-    <h2>المحفوظات</h2>
+    <div class="head">
+      <h2>المحفوظات</h2>
+      <input id="search" placeholder="ابحث في المحفوظات">
+      <a href="/library/export?fmt=md" download>تصدير Markdown</a>
+      <a href="/library/export?fmt=txt" download>تصدير نصي</a>
+    </div>
     <div id="shelf"><p class="empty">لا شيء محفوظ بعد.</p></div>
   </section>
 
@@ -1000,6 +1569,20 @@ PAGE = r"""<!doctype html>
 <script>
 const $ = id => document.getElementById(id);
 const OPENING = 'دفعت حساب القهوة وطلعت. عند الباب شفت اسمي مكتوب على ورقة مو لي.';
+const SEED_KEYS = ['who','secret','device','place','cost','dilemma','open'];
+const SEED_LABEL = { who:'الطرف الآخر', secret:'السر', device:'أداة الكشف',
+                     place:'مكان الكشف', cost:'الثمن', dilemma:'النهاية',
+                     open:'نمط السطر الأول', topic:'موضوعك', locked:'مثبّت' };
+const STAGE = { seed:'يركّب البذرة',
+                premise:'يولّد خمس حبكات بورقة حقائق ويختار الأبعد عن المستهلك',
+                draft:'يكتب المسودة الأولى',
+                edit:'يشدّ كل سطر ويضبط الكشف والنهاية',
+                audit:'يدقّق الأرقام والمنطق ويصلح ما لا يُصدَّق',
+                polish:'يصقل ما رسب في الفحوصات',
+                hook:'الافتتاحية تشبه محفوظًا سابقًا، يبدّلها',
+                cancelled:'أُلغيت.' };
+const TAG = { draft:'مسودة أولى', edit:'التحرير', audit:'التدقيق', polish:'الصقل', hook:'الافتتاحية' };
+const ORDER = ['premise','draft','edit','audit','polish'];
 
 /* لحظة واحدة متحركة: السطر الأول يُكتب أمام القارئ */
 (function type(i = 0) {
@@ -1012,6 +1595,25 @@ const OPENING = 'دفعت حساب القهوة وطلعت. عند الباب ش
   if (i <= OPENING.length) setTimeout(() => type(i + 1), i < 2 ? 500 : 38);
 })();
 
+/* إعدادات تبقى في المتصفح؛ المفتاح فقط إن طُلب */
+const keep = (k, v) => { try { localStorage.setItem('sf.' + k, v); } catch (e) {} };
+const kept = k => { try { return localStorage.getItem('sf.' + k); } catch (e) { return null; } };
+function restore() {
+  document.querySelectorAll('[data-keep]').forEach(el => {
+    const v = kept(el.id); if (v !== null && v !== '') el.value = v;
+  });
+  if (kept('rememberkey') === '1') { $('rememberkey').checked = true; $('key').value = kept('key') || ''; }
+}
+document.addEventListener('change', e => {
+  const el = e.target;
+  if (el.hasAttribute('data-keep')) keep(el.id, el.value);
+  if (el.id === 'rememberkey' || el.id === 'key') {
+    keep('rememberkey', $('rememberkey').checked ? '1' : '0');
+    keep('key', $('rememberkey').checked ? $('key').value : '');
+  }
+  if (el.id.startsWith('seed_')) el.classList.toggle('locked', !!el.value);
+});
+
 $('provider').onchange = () => {
   $('creds').style.display = $('provider').value === 'openai' ? '' : 'none';
 };
@@ -1021,24 +1623,49 @@ const creds = () => ({
   base: $('base').value, key: $('key').value, model: $('model').value
 });
 
-const SEED_LABEL = { who:'الطرف الآخر', secret:'السر', device:'أداة الكشف',
-                     place:'مكان الكشف', cost:'الثمن', dilemma:'المعضلة',
-                     topic:'موضوعك' };
-
-let current = { text: '', dna: null, plot: '' };
-let poll = null;
+let current = { text: '', dna: null, plot: '', facts: [], score: 0, job: null };
+let poll = null, es = null, finished = false;
 
 function state(msg, bad) {
   $('state').textContent = msg || '';
   $('state').classList.toggle('bad', !!bad);
 }
 
-$('run').onclick = async () => {
-  clearInterval(poll);
-  $('run').disabled = true;
-  $('run').textContent = 'يكتب…';
+function steps(stage) {
+  const idx = ORDER.indexOf(stage === 'hook' ? 'polish' : stage);
+  document.querySelectorAll('#steps li').forEach(li => {
+    const i = ORDER.indexOf(li.dataset.s);
+    li.classList.toggle('done', stage === 'done' || (idx >= 0 && i < idx));
+    li.classList.toggle('active', i === idx && stage !== 'done');
+    if (li.dataset.s === 'polish' && (stage === 'polish' || stage === 'hook')) li.classList.remove('hidden');
+  });
+}
+
+function seedPayload() {
+  const s = {};
+  SEED_KEYS.forEach(k => { const v = $('seed_' + k).value; if (v) s[k] = v; });
+  return s;
+}
+
+function busy(on) {
+  $('run').disabled = on;
+  $('run').textContent = on ? 'يكتب…' : (current.text ? 'اكتب قصة أخرى' : 'اكتب قصة');
+  $('again').disabled = on || !current.dna;
+  $('cancel').style.display = on ? '' : 'none';
+  $('sheet').classList.toggle('busy', on);
+  ['rehook','save','copy'].forEach(id => $(id).disabled = on);
+}
+
+async function run(seed) {
+  stop();
+  finished = false;
+  busy(true);
   $('hooks').classList.remove('on');
-  state('يختار بذرة لم تُستعمل من قبل');
+  $('card').classList.remove('on');
+  $('tag').textContent = '';
+  document.querySelectorAll('#steps li').forEach(li => { li.classList.remove('done','active'); if (li.dataset.s === 'polish') li.classList.add('hidden'); });
+  steps('seed');
+  state(STAGE.seed);
 
   let job;
   try {
@@ -1047,69 +1674,146 @@ $('run').onclick = async () => {
       body: JSON.stringify({
         topic: $('topic').value.trim(), format: $('format').value,
         dialect: $('dialect').value, core: $('core').value,
-        pov: $('pov').value, drama: $('drama').value, ...creds()
+        pov: $('pov').value, drama: $('drama').value, seed, ...creds()
       })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'تعذّر البدء.');
     job = data.job;
-    current.dna = data.dna;
-    showSeed(data.dna);
-  } catch (e) { finish(e.message); return; }
+    current = { text: '', dna: data.dna, plot: '', facts: [], score: 0, job };
+    showSeed(data.dna, [], null);
+  } catch (e) { finish(e.message, true); return; }
 
-  const STAGE = { seed: 'يركّب بذرة جديدة',
-                  premise: 'يولّد خمس حبكات ويستبعد المستهلك منها',
-                  draft: 'يكتب المسودة',
-                  edit: 'يشدّ السطر الأول ويضبط الكشف والنهاية',
-                  audit: 'يدقّق الأرقام والمنطق ويصلح ما لا يُصدَّق' };
+  follow(job);
+}
 
+/* بثّ حي عبر EventSource، وإن تعذّر نرجع للاستطلاع */
+function follow(job) {
+  if (!window.EventSource) return pollJob(job);
+  let got = false;
+  es = new EventSource('/write/' + job + '/stream');
+  es.onmessage = e => {
+    got = true;
+    let m; try { m = JSON.parse(e.data); } catch (err) { return; }
+    apply(m);
+    if (m.final) { es.close(); es = null; }
+  };
+  es.onerror = () => {
+    if (es) { es.close(); es = null; }
+    if (!finished) pollJob(job);
+  };
+}
+
+function pollJob(job) {
+  clearInterval(poll);
   poll = setInterval(async () => {
     let j;
     try { j = await (await fetch('/write/' + job)).json(); } catch (e) { return; }
+    apply({ state: j, text: j.text });
+    if (['done','error','cancelled'].includes(j.stage)) clearInterval(poll);
+  }, 400);
+}
 
-    if (j.text) {
-      $('sheet').classList.add('on');
-      $('story').textContent = j.text;
-    }
-    state(j.notice || STAGE[j.stage] || '');
+function stop() {
+  clearInterval(poll);
+  if (es) { es.close(); es = null; }
+}
 
-    if (j.stage === 'done') {
-      clearInterval(poll);
-      current.text = j.text;
-      $('story').textContent = j.text;
-      $('sheet').classList.add('on');
-      $('meta').textContent = j.words + ' كلمة · ' + (j.numbers || 0) + ' رقم محدد'
-        + (j.novelty ? ' · جِدّة الحبكة ' + Math.round(j.novelty * 100) + '٪' : '')
-        + (j.cliches && j.cliches.length ? ' · عبارة مألوفة نجت: ' + j.cliches[0] : '')
-        + (j.leak ? ' · تسرّب ضمير متكلم في منشور عام' : '');
-      showAudit(j.issues || []);
-      current.plot = j.premise || '';
-      finish('');
-    }
-    if (j.stage === 'error') { clearInterval(poll); finish(j.error, true); }
-  }, 350);
-};
+function apply(m) {
+  if (m.text !== undefined) {
+    $('story').textContent = m.text;
+    if (m.text) $('sheet').classList.add('on');
+  } else if (m.append) {
+    $('story').textContent += m.append;
+    $('sheet').classList.add('on');
+  }
+  if (!m.state) return;
+  const j = m.state;
+  steps(j.stage);
+  if (TAG[j.stage]) { $('tag').textContent = TAG[j.stage] + '…'; $('tag').classList.add('live'); }
+  state(j.notice || STAGE[j.stage] || '');
+
+  if (j.stage === 'done' && !finished) {
+    finished = true;
+    current.text = $('story').textContent;
+    current.plot = j.plot || j.premise || '';
+    current.facts = j.facts || [];
+    current.score = j.score || 0;
+    $('tag').textContent = 'النص النهائي'; $('tag').classList.remove('live');
+    $('sheet').classList.add('on');
+    $('meta').textContent = j.words + ' كلمة · ' + (j.numbers || 0) + ' رقم محدد · جودة ' + (j.score || 0) + '٪';
+    renderCard(j);
+    showSeed(j.dna || current.dna, j.facts || [], j.issues || []);
+    finish('');
+  }
+  if (j.stage === 'error' && !finished) { finished = true; finish(j.error, true); }
+  if (j.stage === 'cancelled' && !finished) { finished = true; $('tag').textContent = 'أُلغي'; $('tag').classList.remove('live'); finish(STAGE.cancelled); }
+}
 
 function finish(msg, bad) {
-  $('run').disabled = false;
-  $('run').textContent = 'اكتب قصة أخرى';
+  stop();
+  busy(false);
   state(msg, bad);
 }
 
-function showAudit(issues) {
-  const box = $('auditbox');
-  if (!issues.length) {
-    box.innerHTML = '<li>لم يجد المدقّق أي تناقض.</li>';
-    return;
-  }
-  box.innerHTML = issues.map(i => '<li>' + i + '</li>').join('');
+function renderCard(j) {
+  const checks = j.checks || [];
+  if (!checks.length) { $('card').classList.remove('on'); return; }
+  $('card').classList.add('on');
+  const s = j.score || 0, ring = $('ring');
+  ring.style.setProperty('--p', s);
+  $('ringval').textContent = s;
+  ring.className = 'ring ' + (s >= 85 ? 'good' : s >= 60 ? 'mid' : 'low');
+  const ul = $('chips'); ul.innerHTML = '';
+  checks.forEach(c => {
+    const li = document.createElement('li');
+    li.className = 'chip ' + (c.ok ? 'ok' : 'bad');
+    li.appendChild(document.createTextNode(c.label));
+    if (c.note) { const sm = document.createElement('small'); sm.textContent = c.note; li.appendChild(sm); }
+    ul.appendChild(li);
+  });
+  const notes = [];
+  if (j.novelty != null) notes.push('جِدّة الحبكة ' + Math.round(j.novelty * 100) + '٪');
+  if (j.polished) notes.push('صُقل مرة بعد الفحص');
+  if (j.rehooked) notes.push('بُدّلت الافتتاحية لأنها تشبه محفوظًا سابقًا');
+  $('cardnote').textContent = notes.join(' · ');
 }
 
-function showSeed(dna) {
-  $('seedbox').style.display = '';
-  $('seedlist').innerHTML = Object.keys(dna)
-    .map(k => '<li>' + (SEED_LABEL[k] || k) + ': ' + dna[k] + '</li>').join('');
+function list(el, items, empty) {
+  el.innerHTML = '';
+  if (!items.length) { const li = document.createElement('li'); li.textContent = empty; el.appendChild(li); return; }
+  items.forEach(t => { const li = document.createElement('li'); li.textContent = t; el.appendChild(li); });
 }
+
+function showSeed(dna, facts, issues) {
+  $('seedbox').style.display = '';
+  list($('seedlist'), Object.keys(dna || {}).filter(k => k !== 'locked').map(k => {
+    let v = dna[k];
+    if (k === 'open') { const o = $('seed_open').querySelector('option[value="' + v + '"]'); v = o ? o.textContent : v; }
+    return (SEED_LABEL[k] || k) + ': ' + v + ((dna.locked || []).includes(k) ? ' (ثابت)' : '');
+  }), '');
+  list($('factlist'), facts || [], 'لم تُثبَّت حقائق بعد.');
+  if (issues === null) list($('auditbox'), [], 'لم يُدقَّق بعد.');
+  else list($('auditbox'), issues, 'لم يجد المدقّق أي تناقض.');
+}
+
+$('run').onclick = () => run(seedPayload());
+$('again').onclick = () => {
+  if (!current.dna) return;
+  const seed = {}; SEED_KEYS.forEach(k => { if (current.dna[k]) seed[k] = current.dna[k]; });
+  if (current.dna.topic) $('topic').value = current.dna.topic;
+  run(seed);
+};
+$('cancel').onclick = async () => {
+  if (!current.job) return;
+  $('cancel').disabled = true;
+  try { await fetch('/write/' + current.job + '/cancel', { method: 'POST' }); } catch (e) {}
+  $('cancel').disabled = false;
+};
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !$('run').disabled) { e.preventDefault(); run(seedPayload()); }
+  if (e.key === 'Escape' && $('cancel').style.display !== 'none') $('cancel').click();
+});
 
 $('copy').onclick = async () => {
   try {
@@ -1122,9 +1826,12 @@ $('copy').onclick = async () => {
 $('save').onclick = async () => {
   const res = await fetch('/library', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: current.text || $('story').textContent, dna: current.dna, plot: current.plot })
+    body: JSON.stringify({ text: current.text || $('story').textContent, dna: current.dna, plot: current.plot,
+                           facts: current.facts, score: current.score,
+                           format: $('format').value, core: $('core').value, pov: $('pov').value, dialect: $('dialect').value })
   });
   if (res.ok) { $('save').textContent = 'حُفظ'; setTimeout(() => $('save').textContent = 'احفظ', 1600); shelf(); }
+  else { const d = await res.json().catch(() => ({})); state(d.error || 'تعذّر الحفظ.', true); }
 };
 
 $('rehook').onclick = async () => {
@@ -1155,35 +1862,65 @@ $('rehook').onclick = async () => {
   $('rehook').textContent = 'بدائل للافتتاحية';
 };
 
+let SHELF = [];
 async function shelf() {
-  const data = await (await fetch('/library')).json();
+  try { SHELF = (await (await fetch('/library')).json()).items || []; } catch (e) { SHELF = []; }
+  drawShelf();
+}
+function drawShelf() {
+  const q = $('search').value.trim();
+  const items = q ? SHELF.filter(it => (it.text || '').includes(q)) : SHELF;
   const box = $('shelf');
-  if (!data.items.length) { box.innerHTML = '<p class="empty">لا شيء محفوظ بعد.</p>'; return; }
   box.innerHTML = '';
-  data.items.forEach(it => {
+  if (!items.length) { const p = document.createElement('p'); p.className = 'empty'; p.textContent = SHELF.length ? 'لا نتائج.' : 'لا شيء محفوظ بعد.'; box.appendChild(p); return; }
+  items.forEach(it => {
     const row = document.createElement('div');
     row.className = 'saved';
-    row.innerHTML = '<div class="txt"></div><time></time><button type="button">حذف</button>';
-    row.querySelector('.txt').textContent = it.text;
-    row.querySelector('time').textContent = it.at || '';
-    row.querySelector('.txt').onclick = () => {
-      current = { text: it.text, dna: it.dna, plot: it.plot || '' };
+    const txt = document.createElement('div'); txt.className = 'txt'; txt.textContent = it.text;
+    const side = document.createElement('div'); side.className = 'side';
+    const when = document.createElement('time'); when.textContent = it.at || '';
+    const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = it.score ? 'جودة ' + it.score + '٪' : '';
+    const cp = document.createElement('button'); cp.type = 'button'; cp.textContent = 'انسخ';
+    const del = document.createElement('button'); del.type = 'button'; del.textContent = 'حذف';
+    side.append(when, badge, cp, del);
+    row.append(txt, side);
+    txt.onclick = () => {
+      stop(); finished = true; busy(false);
+      current = { text: it.text, dna: it.dna, plot: it.plot || '', facts: it.facts || [], score: it.score || 0, job: null };
       $('story').textContent = it.text;
+      $('tag').textContent = 'من المحفوظات'; $('tag').classList.remove('live');
+      $('meta').textContent = (it.score ? 'جودة ' + it.score + '٪' : '');
+      $('card').classList.remove('on');
       $('sheet').classList.add('on');
-      if (it.dna) showSeed(it.dna);
+      if (it.dna) showSeed(it.dna, it.facts || [], []);
       window.scrollTo({ top: $('sheet').offsetTop - 40, behavior: 'smooth' });
     };
-    row.querySelector('button').onclick = async () => {
+    cp.onclick = async () => {
+      try { await navigator.clipboard.writeText(it.text); cp.textContent = 'نُسخ'; setTimeout(() => cp.textContent = 'انسخ', 1400); } catch (e) {}
+    };
+    del.onclick = async () => {
       await fetch('/library/' + it.id, { method: 'DELETE' });
       shelf();
     };
     box.appendChild(row);
   });
 }
+$('search').oninput = drawShelf;
+
+function fillSeeds(seeds) {
+  SEED_KEYS.forEach(k => {
+    const sel = $('seed_' + k); if (!sel || !seeds[k]) return;
+    sel.innerHTML = '';
+    const o = document.createElement('option'); o.value = ''; o.textContent = 'عشوائي'; sel.appendChild(o);
+    seeds[k].forEach(v => {
+      const op = document.createElement('option');
+      if (typeof v === 'object') { op.value = v.id; op.textContent = v.label; } else { op.value = v; op.textContent = v; }
+      sel.appendChild(op);
+    });
+  });
+}
 
 fetch('/config').then(r => r.json()).then(c => {
-  if (c.openai_ready) { $('provider').value = 'openai'; $('model').value = c.model; }
-  $('provider').onchange();
   const sel = $('core');
   (c.cores || []).forEach(g => {
     const grp = document.createElement('optgroup');
@@ -1196,7 +1933,11 @@ fetch('/config').then(r => r.json()).then(c => {
     sel.appendChild(grp);
   });
   sel.value = 'betrayal';
-}).catch(() => {});
+  fillSeeds(c.seeds || {});
+  restore();
+  if (c.openai_ready && !kept('provider')) { $('provider').value = 'openai'; $('model').value = c.model; }
+  $('provider').onchange();
+}).catch(() => { restore(); $('provider').onchange(); });
 shelf();
 </script>
 </body>
@@ -1232,7 +1973,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     HOST = os.environ.get("STORY_HOST", "0.0.0.0")
     PORT = pick_port(HOST, int(os.environ.get("STORY_PORT", 7100)))
-    URL = f"http://{server_ip()}:{PORT}"
+    URL = f"http://{server_ip() if HOST == '0.0.0.0' else HOST}:{PORT}"
 
     print(f"مِسنّ القصص — الإصدار {VERSION}")
     print("المحرّك: " + ("مزوّد خاص مضبوط" if (OPENAI_BASE and OPENAI_KEY)
