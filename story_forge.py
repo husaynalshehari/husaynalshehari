@@ -47,7 +47,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "3.8"
+VERSION = "3.9"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -621,17 +621,22 @@ NOW_RE = re.compile(r"الحين|الآن|دلوقتي|هلق|توه|توّه|ل
                     r"ينتظر|تنتظر|يضحك|تضحك|عندنا الحين|في الصالة|برا الباب|نايم|نايمة")
 
 # الفحوصات التي يستحق رسوبها نداءً إضافيًا للصقل؛ الباقي إرشادي يظهر في البطاقة فقط
-CRITICAL = {"words", "numbers", "cliches", "pov", "facts", "ending", "thread", "cliff", "first", "clean", "dialect"}
+CRITICAL = {"words", "numbers", "cliches", "pov", "facts", "ending", "thread", "cliff", "first", "clean", "dialect",
+            "points", "hedge"}
 
 AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 TASHKEEL = re.compile(r"[ً-ْٰـ]")
 
 
 # ------------------------------------------------------------------ البذرة
+def item_kind(item):
+    return (item.get("kind") or (item.get("meta") or {}).get("kind") or "story")
+
+
 def recent_dna(limit=30):
     """التركيبات (الطرف، السر، الأداة) المستعملة في المحفوظات الأخيرة."""
     out = set()
-    for item in reversed(lib_read()[-limit:]):
+    for item in reversed([i for i in lib_read() if item_kind(i) == "story"][-limit:]):
         d = item.get("dna") or {}
         if d.get("who") and d.get("secret") and d.get("device"):
             out.add((d["who"], d["secret"], d["device"]))
@@ -726,9 +731,9 @@ def lib_write(items):
         os.replace(tmp, LIB_PATH)
 
 
-def recent_plots(limit=25):
+def recent_plots(limit=25, kind="story"):
     out = []
-    for item in reversed(lib_read()):
+    for item in reversed([i for i in lib_read() if item_kind(i) == kind]):
         plot = (item.get("plot") or "").strip()
         if plot:
             out.append(plot[:160])
@@ -737,9 +742,9 @@ def recent_plots(limit=25):
     return out
 
 
-def recent_openings(limit=14):
+def recent_openings(limit=14, kind="story"):
     out = []
-    for item in reversed(lib_read()):
+    for item in reversed([i for i in lib_read() if item_kind(i) == kind]):
         head = (item.get("text") or "").strip().split("\n")[0][:90]
         if head:
             out.append(head)
@@ -1167,6 +1172,281 @@ HOOKS_PROMPT = (
 )
 
 
+
+# ================================================================ منشورات المعلومات
+# نوع ثانٍ مستقل عن القصص: مجال + زاوية + إطار، وخط إنتاج وقواعد أمانة خاصة به
+INFO_DOMAINS = {
+    "kids":      ("الأطفال والتربية", "نمو الأطفال وسلوكهم وتعليمهم وعلاقتهم بالوالدين"),
+    "teens":     ("المراهقون", "تغيرات المراهقة، الجوال، الأصدقاء، العلاقة مع الأهل"),
+    "food":      ("الأكل والتغذية", "ما نأكله ومتى وكيف، وأثره على الجسم والمزاج"),
+    "weight":    ("الوزن", "زيادة الوزن ونقصه، الحمية، الشهية، الأيض"),
+    "diabetes":  ("السكر", "السكري ومقدماته، السكر في الأكل، عادات ترفع السكر وتخفضه"),
+    "heart":     ("الضغط والقلب", "ضغط الدم، القلب، الكوليسترول، والعادات المؤثرة فيها"),
+    "sleep":     ("النوم", "جودة النوم، السهر، القيلولة، الاستيقاظ"),
+    "aging":     ("الشيخوخة وكبار السن", "التقدم في العمر، الذاكرة، العزلة، رعاية الوالدين"),
+    "brain":     ("الدماغ والذاكرة", "التركيز، النسيان، التعلّم، الذكاء، العادات الذهنية"),
+    "mind":      ("الصحة النفسية", "القلق، الحزن، الضغط النفسي، التعافي، الحدود"),
+    "character": ("الشخصية والثقة", "قوة الشخصية، الثقة بالنفس، الحزم، الخجل"),
+    "talk":      ("الكلام والإقناع", "الحوار، لغة الجسد، الإقناع، الرد على الإحراج"),
+    "relations": ("العلاقات والزواج", "الزواج، الخطوبة، الأهل، الصداقة، الحدود"),
+    "money":     ("المال والادخار", "الادخار، الديون، الإنفاق، الراتب، القرارات المالية"),
+    "work":      ("الشغل والإنتاجية", "التركيز، الاجتماعات، المدير، الترقية، الاحتراق الوظيفي"),
+    "study":     ("الدراسة والتعلّم", "المذاكرة، الحفظ، الامتحانات، تعلّم مهارة جديدة"),
+    "phone":     ("الجوال ووسائل التواصل", "الإدمان الرقمي، الانتباه، المقارنة، الخصوصية"),
+    "sport":     ("الرياضة والجسم", "المشي، التمارين، الظهر والرقبة، اللياقة بعد الأربعين"),
+    "habits":    ("العادات اليومية", "بناء عادة وكسرها، الروتين، الصباح والمساء"),
+    "home":      ("البيت والأسرة", "تنظيم البيت، توزيع المسؤوليات، الضيوف، الأولاد الكبار"),
+}
+
+INFO_ANGLES = {
+    "why":      ("ليش يصير كذا", "السبب الحقيقي وراء ظاهرة يلاحظها الكل ولا يعرف سببها"),
+    "mistake":  ("الخطأ اللي الكل يسويه", "خطأ يومي شائع، أثره الفعلي، والبديل المحدد"),
+    "signs":    ("علامات مبكرة", "علامات صغيرة تظهر قبل المشكلة بوقت طويل"),
+    "howto":    ("كيف تبني أو تحسّن", "خطوات عملية محددة تُطبَّق اليوم لا نصائح عامة"),
+    "myth":     ("خرافة والحقيقة", "اعتقاد شائع خاطئ والحقيقة مقابله، مع سبب انتشار الخرافة"),
+    "untold":   ("اللي ما يقوله لك أحد", "جانب مسكوت عنه من موضوع مألوف"),
+    "number":   ("رقم يغيّر نظرتك", "حقيقة رقمية واحدة مؤكدة تُبنى حولها الفكرة كلها"),
+    "timeline": ("وش يتغير مع الوقت", "ما يحدث خلال أيام ثم أسابيع ثم سنين من فعل أو ترك شيء"),
+    "compare":  ("شخصان ونتيجتان", "عادتان أو نوعان من الناس والفرق بينهما بعد سنين"),
+    "list":     ("قائمة قصيرة", "3 إلى 5 أشياء محددة، كل واحد سطر، بلا شرح طويل"),
+    "secret":   ("سؤال يُسأل بالسر", "سؤال محرج أو مسكوت عنه وجوابه المباشر"),
+    "test":     ("اختبر نفسك", "علامات يفحص بها القارئ نفسه أو من حوله ويعرف النتيجة"),
+}
+
+INFO_FRAMES = [
+    "بمثال من بيت عادي", "بمقارنة بين شخصين", "بقصة توضيحية قصيرة", "بقائمة مرقّمة",
+    "بسؤال ثم جواب", "بمشهد يومي يعرفه الكل", "بتجربة يوم واحد", "بخطأ ثم تصحيح",
+]
+INFO_KEYS = ("domain", "angle", "frame")
+
+INFO_CRAFT = (
+    "أنت كاتب منشورات معلوماتية عربية تنتشر: معلومة مفيدة مباشرة، جمل قصيرة، كل جملة في "
+    "سطر مستقل وبين السطور سطر فارغ، لا حشو ولا وعظ ولا مقدمات.\n"
+    "الأمانة قبل الانتشار، والتزم بها حرفيًا:\n"
+    "- لا تخترع أرقامًا ولا نسبًا ولا دراسات ولا أسماء باحثين أو جامعات. إن لم تكن "
+    "متأكدًا من رقم فاكتب الفكرة بلا رقم.\n"
+    "- في الصحة والطب: لا تشخيص، لا جرعات، لا وعود علاج، لا «يشفي» ولا «يمنع». صف "
+    "الآلية والعادات فقط، والأمور الخطيرة تُحال إلى مختص بجملة واحدة بلا مبالغة.\n"
+    "- لا تعميمات جارحة على فئة (أطفال، نساء، كبار السن): الكلام عن عادة أو ظرف، لا عن "
+    "طبيعة الناس.\n"
+    "- لا رموز تعبيرية، لا وسوم، لا عناوين، لا نقاط تعداد رمزية؛ الترقيم بالأرقام إن لزم."
+)
+
+INFO_STYLE = (
+    "أسلوب المنشور المعلوماتي الذي ينتشر:\n"
+    "- السطر الأول ادعاء جريء محدد بصيغة خبرية، أو سؤال «ليش» يعرفه الكل: مثل "
+    "«أغلب الأطفال ما يضعف تفكيرهم بالوراثة، يضعف بعادة وحدة في البيت». بلا «لن تصدق».\n"
+    "- السطر الثاني يقلب التوقع: «السبب مو اللي تتوقعه» أو ما يعادله بكلمات جديدة.\n"
+    "- الآلية في سطرين أو ثلاثة: كيف يحدث الشيء فعلًا، بلغة بسيطة، بلا مصطلحات.\n"
+    "- 3 إلى 5 نقاط محددة قابلة للملاحظة أو التطبيق، كل نقطة سطر واحد يبدأ برقم.\n"
+    "- مثال من الحياة اليومية يراه القارئ في بيته أو شغله.\n"
+    "- سطر واحد يصلح للاقتباس: محدد، بلا حكمة عامة.\n"
+    "- النهاية: فعل واحد يبدأ به القارئ اليوم، أو سؤال قصير يجيب عنه في التعليقات.\n"
+    "- لا سطر أطول من ١٤ كلمة. الأرقام بالأرقام 0-9 حين تكون مؤكدة فقط."
+)
+
+
+def info_system_prompt(dialect):
+    return INFO_CRAFT + "\nاللهجة: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
+
+
+def fresh_info(domain, angle, topic="", seed=None):
+    seed = {k: str(v).strip()[:120] for k, v in (seed or {}).items() if k in INFO_KEYS and str(v).strip()}
+    spec = {
+        "kind": "info",
+        "domain": domain if domain in INFO_DOMAINS else "kids",
+        "angle": angle if angle in INFO_ANGLES else "why",
+        "frame": seed.get("frame") if seed.get("frame") in INFO_FRAMES else random.choice(INFO_FRAMES),
+    }
+    if seed:
+        spec["locked"] = [k for k in INFO_KEYS if k in seed]
+    if topic:
+        spec["topic"] = topic.strip()[:300]
+    return spec
+
+
+def info_text(spec):
+    d = INFO_DOMAINS[spec["domain"]]
+    a = INFO_ANGLES[spec["angle"]]
+    lines = [
+        f"- المجال: {d[0]} — {d[1]}",
+        f"- زاوية المنشور: {a[0]} — {a[1]}",
+        f"- الإطار: {spec['frame']}",
+    ]
+    if spec.get("topic"):
+        lines.insert(0, f"- الموضوع الذي طلبه الكاتب، وله الأولوية: {spec['topic']}")
+    return "\n".join(lines)
+
+
+def info_premise_prompt(spec, avoid_claims):
+    d = INFO_DOMAINS[spec["domain"]][0]
+    a = INFO_ANGLES[spec["angle"]][0]
+    return "\n".join([
+        f"اقترح خمس أفكار مختلفة لمنشور معلوماتي قصير في مجال «{d}» بزاوية «{a}».",
+        "كل فكرة يجب أن تكون من هذا المجال وهذه الزاوية تحديدًا.",
+        "",
+        info_text(spec),
+        "",
+        "لكل فكرة أعطِ:",
+        "- hook: السطر الأول، ادعاء جريء محدد أو سؤال «ليش»، من ٦ إلى ١٤ كلمة.",
+        "- claim: الفكرة المركزية في جملتين: ماذا يحدث ولماذا.",
+        "- why: الآلية بلغة بسيطة في جملة أو جملتين.",
+        "- points: 3 إلى 5 نقاط محددة قابلة للملاحظة أو التطبيق، كل نقطة جملة قصيرة.",
+        "- example: مثال واحد من الحياة اليومية.",
+        "- facts: حقائق رقمية مؤكدة ومعروفة فقط (مثل: البالغ يحتاج 7 إلى 9 ساعات نوم). "
+        "إن لم يوجد رقم مؤكد فاترك القائمة فارغة؛ الرقم المخترع أسوأ من غيابه.",
+        "ممنوع: أرقام أو دراسات غير مؤكدة، وعود علاج، تعميمات جارحة، أفكار مكررة.",
+        *(["", "وممنوع كذلك أي فكرة تشبه ما كُتب سابقًا:",
+           "\n".join("• " + p for p in avoid_claims)] if avoid_claims else []),
+        "",
+        'أعد JSON فقط: {"ideas":[{"hook":"...","claim":"...","why":"...",'
+        '"points":["...","..."],"example":"...","facts":["..."]}, ...]}',
+    ])
+
+
+def parse_info_ideas(raw):
+    data = json_obj(raw)
+    out = []
+    for it in data.get("ideas", []) if isinstance(data, dict) else []:
+        if not isinstance(it, dict):
+            continue
+        idea = {k: str(it.get(k) or "").strip() for k in ("hook", "claim", "why", "example")}
+        pts = it.get("points") or []
+        idea["points"] = [str(p).strip() for p in (pts if isinstance(pts, list) else [pts]) if str(p).strip()][:6]
+        facts = it.get("facts") or []
+        idea["facts"] = [str(f).strip() for f in (facts if isinstance(facts, list) else [facts]) if str(f).strip()][:6]
+        if idea["claim"]:
+            out.append(idea)
+    if not out:
+        raise RuntimeError("ردّ فارغ من المزوّد.")
+    return out
+
+
+def info_idea_score(idea, blocked):
+    text = " ".join([idea["claim"], idea["why"], " ".join(idea["points"])])
+    novelty = 1 - max([overlap(text, b) for b in blocked] or [0])
+    complete = sum([
+        len(words_of(idea["why"])) >= 3,
+        3 <= len(idea["points"]) <= 5,
+        len(words_of(idea["example"])) >= 3,
+        4 <= word_count(idea["hook"]) <= 14,
+    ]) / 4
+    penalty = 0.2 if any(b in idea["hook"] for b in BANNED) else 0.0
+    return round(0.6 * novelty + 0.4 * complete - penalty, 3), round(novelty, 2)
+
+
+def pick_info_idea(ideas, blocked):
+    scored = [(info_idea_score(i, blocked), i) for i in ideas]
+    (score, novelty), best = max(scored, key=lambda s: s[0][0])
+    return best, novelty
+
+
+def info_premise_text(idea):
+    parts = [idea["claim"]]
+    if idea["why"]:
+        parts.append("الآلية: " + idea["why"])
+    if idea["points"]:
+        parts.append("النقاط: " + " | ".join(idea["points"]))
+    if idea["example"]:
+        parts.append("المثال: " + idea["example"])
+    return "\n".join(parts)
+
+
+def info_beats(fmt):
+    closing = ("النهاية: فعل واحد يبدأ به القارئ اليوم، أو سؤال قصير يجيب عنه في التعليقات.")
+    thread = (" " + THREAD_RULES.replace("الجملة المفصلية", "السبب أو النقطة الأولى")
+              if fmt == "thread" else "")
+    return (
+        "البناء الإلزامي، بهذا الترتيب:\n"
+        "1. سطر أول: الادعاء الجريء أو سؤال «ليش»، بصيغة محددة، بلا تشويق جاهز.\n"
+        "2. سطر يقلب التوقع بكلمات جديدة (لا تكرر «السبب مو اللي تتوقعه» حرفيًا في كل مرة).\n"
+        "3. الآلية في سطرين أو ثلاثة بلغة بسيطة.\n"
+        "4. النقاط: 3 إلى 5 أسطر، كل سطر يبدأ برقم ثم نقطة محددة.\n"
+        "5. المثال اليومي في سطر أو سطرين.\n"
+        "6. سطر يصلح للاقتباس وحده، محدد، بلا حكمة عامة.\n"
+        f"7. {closing}" + thread
+    )
+
+
+def info_write_prompt(spec, idea, fmt, dialect):
+    label, low, high = FORMATS.get(fmt, FORMATS["short"])
+    return "\n".join([
+        f"اكتب {label} معلوماتيًا بلهجة {DIALECTS.get(dialect, DIALECTS['saudi'])}، "
+        f"من {low} إلى {high} كلمة.",
+        "",
+        info_text(spec),
+        "",
+        "الفكرة التي ستكتبها:",
+        info_premise_text(idea),
+        *(["افتتاحية مقترحة: " + idea["hook"]] if idea["hook"] else []),
+        "",
+        facts_block(idea["facts"]).replace("لا أرقام مثبّتة، فاختر أرقامًا واقعية والتزم بها من أول سطر لآخره.",
+                                          "لا أرقام مؤكدة، فاكتب بلا أرقام إطلاقًا."),
+        "",
+        INFO_STYLE,
+        "",
+        info_beats(fmt),
+        "",
+        "ممنوع استعمال هذه العبارات أو ما يشبهها:",
+        "، ".join(BANNED),
+        "",
+        "اكتب النص وحده.",
+    ])
+
+
+def info_edit_prompt(fmt, facts, dialect):
+    label, low, high = FORMATS.get(fmt, FORMATS["short"])
+    steps = [
+        "السطر الأول: ادعاء محدد جريء أو سؤال «ليش». إن كان عامًا أو مقدمة، بدّله.",
+        "احذف كل سطر لا يضيف معلومة أو مثالًا أو خطوة. لا كلمة زائدة.",
+        f"الطول النهائي بين {low} و{high} كلمة؛ إن قصر فأضف نقطة أو مثالًا، لا حشوًا.",
+        "الأمانة: احذف أي رقم أو دراسة أو اسم ليس في ورقة الحقائق. حوّل أي ادعاء طبي "
+        "جازم إلى صياغة حذرة أو احذفه. لا وعود علاج.",
+        "النقاط 3 إلى 5 أسطر، كل سطر يبدأ برقم، محددة وقابلة للتطبيق.",
+        "أبقِ مثالًا يوميًا واحدًا وسطرًا يصلح للاقتباس.",
+        "النهاية فعل واحد يبدأ به القارئ اليوم أو سؤال قصير للتعليقات.",
+        "كل جملة في سطر مستقل وبينها سطر فارغ. لا سطر أطول من ١٤ كلمة."
+        + (" " + THREAD_RULES.replace("الجملة المفصلية", "السبب أو النقطة الأولى") if fmt == "thread" else ""),
+        f"اللهجة: {DIALECT_HINT.get(dialect, DIALECT_HINT['saudi'])}",
+        "احذف أي عبارة جاهزة وأي حكمة عامة.",
+    ]
+    return ("أنت محرّر منشورات معلوماتية. أمامك مسودة. أعد كتابتها أقوى وأدق بنفس الفكرة.\n"
+            "افعل هذا بالترتيب:\n" + "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
+            + "\n\n" + facts_block(facts) + "\n\nأعد النص النهائي وحده، بلا أي تعليق.")
+
+
+def info_audit_prompt(facts, spec):
+    d = INFO_DOMAINS[spec["domain"]][0]
+    a = INFO_ANGLES[spec["angle"]][0]
+    return (
+        "أنت مدقّق منشورات معلوماتية. مهمتك أن تمنع نشر معلومة خاطئة أو مضللة.\n"
+        "افحص بالترتيب:\n"
+        "1. الأرقام والدراسات: أي رقم أو نسبة أو دراسة أو اسم ليس في ورقة الحقائق ولا "
+        "يُعد معرفة عامة مؤكدة → احذفه أو حوّله إلى صياغة بلا رقم.\n"
+        "2. الادعاءات الجازمة: «يسبب»، «يشفي»، «يمنع»، «دائمًا»، «كل» → صياغة حذرة "
+        "(«يرتبط»، «غالبًا»، «عند كثيرين») أو حذف.\n"
+        "3. الصحة: لا تشخيص ولا جرعات ولا وعود؛ الأمور الخطيرة تُحال إلى مختص بجملة واحدة.\n"
+        "4. التعميم الجارح على فئة → أعد الصياغة لتكون عن عادة أو ظرف.\n"
+        "5. التناقض الداخلي بين السطور.\n"
+        f"6. الملاءمة: هل المنشور فعلًا من مجال «{d}» وزاوية «{a}»؟ إن انحرف فأعد توجيهه.\n"
+        "ثم أصلح كل خلل بأقل تغيير مع الحفاظ على اللهجة والبناء وتقسيم السطور. لا تُقصّر "
+        "النص: ما تحذفه عوّضه بنقطة أو مثال.\n"
+        + facts_block(facts) + "\n"
+        'أعد JSON فقط بهذا الشكل: {"issues":["وصف مختصر لكل خلل"],"text":"النص بعد الإصلاح كاملًا"}\n'
+        "إن لم تجد أي خلل، أعد القائمة فارغة والنص كما هو."
+    )
+
+
+def info_polish_prompt(problems, fmt, facts, dialect):
+    return ("أنت محرّر. أمامك منشور معلوماتي شبه نهائي. لا تعد كتابته: أصلح فقط ما يلي بأقل "
+            "تغيير ممكن، وحافظ على الفكرة وتقسيم السطور.\n"
+            + "\n".join(f"{i}. {p}" for i, p in enumerate(problems, 1))
+            + "\n\nثوابت: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
+            + " لا أرقام غير مؤكدة ولا وعود علاج."
+            + ((" " + THREAD_RULES.replace("الجملة المفصلية", "السبب أو النقطة الأولى")) if fmt == "thread" else "")
+            + "\n" + facts_block(facts) + "\n\nأعد النص وحده، بلا أي تعليق.")
+
+
 # ---------------------------------------------------------------- أدوات نصية
 def norm_digits(text):
     return text.translate(AR_DIGITS)
@@ -1372,9 +1652,11 @@ def best_hook(hooks, previous):
 
 
 # ------------------------------------------------------------------ الفحوصات
-def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha"):
-    """نحو عشرة فحوصات محلية بلا نموذج. كل فحص يحمل تعليمة إصلاح إن كان الصقل يعالجه."""
+def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha", kind="story"):
+    """نحو عشرة فحوصات محلية بلا نموذج. كل فحص يحمل تعليمة إصلاح إن كان الصقل يعالجه.
+    المعلومات (kind=info) تتخطى فحوصات السرد: المنظور، الشك، الدليل، سطر الحاضر، شكل النهاية."""
     label, low, high = FORMATS.get(fmt, FORMATS["medium"])
+    info = kind == "info"
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     wc = word_count(text)
     out = []
@@ -1390,16 +1672,17 @@ def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha")
            else "أضف وقائع محسوسة من ورقة الحقائق، لا حشوًا."))
 
     nums = count_numbers(text)
-    add("numbers", "أرقام بالأرقام", nums >= 2, f"{nums} رقم",
-        "المدد والمبالغ مكتوبة بالكلمات أو غائبة: اكتبها بالأرقام (9 سنين، 48 ساعة، "
-        "40 ألف) من ورقة الحقائق، رقمان على الأقل.")
+    if not info:                                   # في المعلومات الرقم غير المؤكد أسوأ من غيابه
+        add("numbers", "أرقام بالأرقام", nums >= 2, f"{nums} رقم",
+            "المدد والمبالغ مكتوبة بالكلمات أو غائبة: اكتبها بالأرقام (9 سنين، 48 ساعة، "
+            "40 ألف) من ورقة الحقائق، رقمان على الأقل.")
 
     found = [b for b in BANNED if b in text]
     add("cliches", "بلا عبارات جاهزة", not found, "، ".join(found),
         "هذه العبارات ممنوعة وما زالت موجودة: " + "، ".join(found)
         + " — احذفها أو استبدلها بتفصيل محدد.")
 
-    if pov != "self":
+    if pov != "self" and not info:
         leaks = count_leaks(text)
         limit = 1 if pov == "third" else 3
         add("pov", "المنظور ثابت", leaks <= limit, f"{leaks} تسرّب" if leaks else "",
@@ -1423,27 +1706,37 @@ def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha")
             f"النص بالفصحى والمطلوب لهجة {DIALECTS[dialect]}: "
             + DIALECT_HINT[dialect] + " حوّل كل جملة إلى اللهجة.")
 
-    add("doubt", "سطر شك أو جهل", bool(DOUBT_RE.search(text)), "",
-        "لا يوجد سطر يقرّ فيه صاحب القصة بأنه لا يعرف شيئًا: أضف سطرًا واحدًا "
-        "مثل «ما أدري ليش» بما يناسب اللهجة.")
+    if info:
+        first_line = lines[0] if lines else ""
+        add("hook", "افتتاحية جريئة", 4 <= word_count(first_line) <= 16 and not any(b in first_line for b in BANNED),
+            f"{word_count(first_line)} كلمة", "السطر الأول ليس ادعاءً محددًا جريئًا: اجعله من ٦ إلى ١٤ كلمة بلا مقدمة.")
+        numbered = sum(1 for ln in lines if re.match(r"^\s*[\d\u0660-\u0669]+\s*[).\-–:/]", ln))
+        add("points", "نقاط مرقّمة", 3 <= numbered <= 5, f"{numbered} نقاط",
+            "النقاط يجب أن تكون بين 3 و5 أسطر يبدأ كل منها برقم.")
+        add("hedge", "بلا وعود علاج", not re.search(r"يشفي|تشفي|يمنع تمامًا|علاج نهائي|مضمون|100%|١٠٠٪", text), "",
+            "احذف أي وعد علاج أو ضمان: «يشفي»، «يمنع تمامًا»، «مضمون».")
+    if not info:
+        add("doubt", "سطر شك أو جهل", bool(DOUBT_RE.search(text)), "",
+            "لا يوجد سطر يقرّ فيه صاحب القصة بأنه لا يعرف شيئًا: أضف سطرًا واحدًا "
+            "مثل «ما أدري ليش» بما يناسب اللهجة.")
 
-    add("quote", "دليل مقتبس", bool(QUOTE_RE.search(text)), "",
-        "الدليل غير مقتبس بحرفه: ضع نص الرسالة أو التقرير أو النتيجة بين علامتي "
-        "تنصيص في سطر مستقل.")
+        add("quote", "دليل مقتبس", bool(QUOTE_RE.search(text)), "",
+            "الدليل غير مقتبس بحرفه: ضع نص الرسالة أو التقرير أو النتيجة بين علامتي "
+            "تنصيص في سطر مستقل.")
 
-    add("now", "سطر الحاضر", bool(NOW_RE.search(text)), "",
-        "لا يوجد سطر يقول أين الطرف الآخر الآن: أضف سطرًا قبل النهاية عنه وهو غافل.")
+        add("now", "سطر الحاضر", bool(NOW_RE.search(text)), "",
+            "لا يوجد سطر يقول أين الطرف الآخر الآن: أضف سطرًا قبل النهاية عنه وهو غافل.")
 
-    tail = " ".join(lines[-2:])
-    if ending == "dilemma":
-        ok = bool(re.search(r"(?:^|\s)(?:ولا|أو|أم|وإلا|ولّا|وإلّا)(?:\s|$)|[?؟]", tail))
-        fix = ("آخر سطرين ليسا معضلة بخيارين واضحين: اجعلهما حيرة بين خيارين "
-               "محددين، بلا سؤال للقارئ.")
-    else:
-        ok = not re.search(r"[?؟]\s*$", tail) and not any(
-            w in tail for w in ("شاركني", "رأيك", "علّقوا", "تعليق", "الدرس"))
-        fix = "النهاية يجب أن تكون لحظة أو قرارًا صغيرًا، لا سؤالًا ولا دعوة للتعليق ولا عبرة."
-    add("ending", "شكل النهاية", ok, "", fix)
+        tail = " ".join(lines[-2:])
+        if ending == "dilemma":
+            ok = bool(re.search(r"(?:^|\s)(?:ولا|أو|أم|وإلا|ولّا|وإلّا)(?:\s|$)|[?؟]", tail))
+            fix = ("آخر سطرين ليسا معضلة بخيارين واضحين: اجعلهما حيرة بين خيارين "
+                   "محددين، بلا سؤال للقارئ.")
+        else:
+            ok = not re.search(r"[?؟]\s*$", tail) and not any(
+                w in tail for w in ("شاركني", "رأيك", "علّقوا", "تعليق", "الدرس"))
+            fix = "النهاية يجب أن تكون لحظة أو قرارًا صغيرًا، لا سؤالًا ولا دعوة للتعليق ولا عبرة."
+        add("ending", "شكل النهاية", ok, "", fix)
 
     sym = bool(re.search(r"[#＃]|[\U0001F300-\U0001FAFF☀-➿]", text))
     add("clean", "بلا رموز ووسوم", not sym, "", "احذف الرموز التعبيرية والوسوم وأي عنوان.")
@@ -1611,10 +1904,104 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
     job["stage"] = "done"
 
 
+def write_info(job, spec, fmt, dialect, provider, creds, mode="full"):
+    """خط إنتاج منشورات المعلومات — منفصل عن القصص ومكتبتها."""
+    seen = recent_plots(kind="info")
+    prev_openings = recent_openings(kind="info")
+    system = {"role": "system", "content": info_system_prompt(dialect)}
+
+    def token(piece, notice):
+        _guard(job)
+        if notice:
+            job["notice"] = notice
+        elif piece:
+            job.pop("notice", None)
+            job["text"] += piece
+
+    job["stage"] = "premise"
+    ideas = parse_info_ideas(chat(
+        [system, {"role": "user", "content": info_premise_prompt(spec, seen)}],
+        provider, plan_creds(creds), temperature=1.0, timeout=150))
+    idea, novelty = pick_info_idea(ideas, seen)
+    facts = idea["facts"]
+    job["premise"] = info_premise_text(idea)
+    job["facts"] = facts
+    job["novelty"] = novelty
+    _guard(job)
+
+    job["stage"] = "draft"
+    job["text"] = ""
+    draft = clean(chat(
+        [system, {"role": "user", "content": info_write_prompt(spec, idea, fmt, dialect)}],
+        provider, creds, on_token=token, temperature=0.9, timeout=200))
+    _guard(job)
+
+    job["stage"] = "edit"
+    job["text"] = ""
+    final = clean(chat(
+        [system, {"role": "user", "content": info_edit_prompt(fmt, facts, dialect) + "\n\nالمسودة:\n" + draft}],
+        provider, creds, on_token=token, temperature=0.6, timeout=200))
+    _guard(job)
+
+    job["text"] = final
+    if mode != "fast":
+        job["stage"] = "audit"
+        try:
+            checked = json_obj(chat(
+                [system, {"role": "user", "content": info_audit_prompt(facts, spec) + "\n\nالنص:\n" + final}],
+                provider, creds, temperature=0.2, timeout=150))
+            fixed = clean(str(checked.get("text") or ""))
+            issues = [str(x) for x in checked.get("issues", [])][:6]
+            if word_count(fixed) >= word_count(final) * 0.6:
+                final = fixed
+            job["issues"] = issues
+        except Cancelled:
+            raise
+        except Exception as exc:
+            log.warning("تعذّر التدقيق: %s", exc)
+            job["issues"] = []
+        _guard(job)
+
+    checks = run_checks(final, fmt, "self", "closer", facts, prev_openings, dialect, kind="info")
+    problems = polish_problems(checks)
+    if problems:
+        job["stage"] = "polish"
+        job["text"] = final
+        try:
+            candidate = clean(chat(
+                [system, {"role": "user", "content": info_polish_prompt(problems, fmt, facts, dialect)
+                          + "\n\nالنص:\n" + final}],
+                provider, creds, temperature=0.4, timeout=150))
+            new_checks = run_checks(candidate, fmt, "self", "closer", facts, prev_openings, dialect, kind="info")
+            if score_of(new_checks) >= score_of(checks) and word_count(candidate) >= word_count(final) * 0.6:
+                final, checks = candidate, new_checks
+                job["polished"] = True
+        except Cancelled:
+            raise
+        except Exception as exc:
+            log.warning("تعذّر الصقل: %s", exc)
+
+    if fmt == "thread":
+        parts = split_thread(final)
+        job["parts"] = parts
+        final = thread_text(parts)
+    job["text"] = final
+    job["words"] = word_count(final)
+    job["numbers"] = count_numbers(final)
+    job["cliches"] = [b for b in BANNED if b in final]
+    job["checks"] = checks
+    job["score"] = score_of(checks)
+    job["plot"] = idea["claim"]
+    job["stage"] = "done"
+
+
 def _worker(job_id, dna, fmt, dialect, core, pov, drama, provider, creds, mode):
     job = JOBS[job_id]
     try:
-        write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode)
+        if job.get("kind") == "info":
+            write_info(job, dna, fmt, dialect, provider, creds, mode)
+        else:
+            write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode)
     except Cancelled:
         job["stage"] = "cancelled"
     except Exception as exc:
@@ -1658,6 +2045,8 @@ def config():
     return jsonify(version=VERSION, openai_ready=bool(OPENAI_BASE and OPENAI_KEY),
                    model=OPENAI_MODEL, plan_model=OPENAI_PLAN_MODEL, think=THINK,
                    saved=len(lib_read()), cores=cores, seeds=seeds,
+                   domains=[{"id": k, "label": v[0], "desc": v[1]} for k, v in INFO_DOMAINS.items()],
+                   angles=[{"id": k, "label": v[0], "desc": v[1]} for k, v in INFO_ANGLES.items()],
                    povs=[{"id": k, "label": v[0]} for k, v in POVS.items()])
 
 
@@ -1680,7 +2069,11 @@ def write():
 
     mode = "fast" if data.get("mode") == "fast" else "full"
     seed = data.get("seed") if isinstance(data.get("seed"), dict) else None
-    dna = fresh_dna(data.get("topic", ""), core, seed, avoid=recent_dna())
+    kind = "info" if data.get("kind") == "info" else "story"
+    if kind == "info":
+        dna = fresh_info(data.get("domain", ""), data.get("angle", ""), data.get("topic", ""), seed)
+    else:
+        dna = fresh_dna(data.get("topic", ""), core, seed, avoid=recent_dna())
 
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
@@ -1691,7 +2084,7 @@ def write():
                         "words": 0, "cliches": [], "premise": "", "issues": [],
                         "facts": [], "checks": [], "score": 0, "format": fmt,
                         "core": core, "pov": pov, "dialect": dialect, "mode": mode,
-                        "at": time.time()}
+                        "kind": kind, "at": time.time()}
 
     threading.Thread(target=_worker,
                      args=(job_id, dna, fmt, dialect, core, pov, drama, provider, creds, mode),
@@ -1776,7 +2169,9 @@ def hooks():
 @app.route("/library", methods=["GET", "POST"])
 def library():
     if request.method == "GET":
-        return jsonify(items=list(reversed(lib_read()))[:60])
+        kind = request.args.get("kind")
+        items = [i for i in lib_read() if not kind or item_kind(i) == kind]
+        return jsonify(items=list(reversed(items))[:60])
 
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
@@ -1787,6 +2182,7 @@ def library():
                   "dna": data.get("dna") or {}, "plot": (data.get("plot") or "")[:300],
                   "facts": [str(f)[:160] for f in (data.get("facts") or [])][:6],
                   "parts": [str(p)[:400] for p in (data.get("parts") or [])][:8],
+                  "kind": "info" if data.get("kind") == "info" else "story",
                   "score": int(data.get("score") or 0),
                   "meta": {k: str(data.get(k) or "")[:20] for k in ("format", "core", "pov", "dialect")},
                   "at": time.strftime("%Y-%m-%d %H:%M")})
@@ -2033,7 +2429,14 @@ PAGE = r"""<!doctype html>
       <input id="topic" placeholder="مثال: شي صار في مكتب محامي، أو سر طلع من كشف حساب — اتركه فارغًا ليختار المحرّك">
     </div>
     <div class="controls">
-      <div class="f"><label for="core">نوع الموقف</label><select id="core" data-keep></select></div>
+      <div class="f"><label for="kind">نوع المنشور</label>
+        <select id="kind" data-keep>
+          <option value="story" selected>قصة · موقف شخصي</option>
+          <option value="info">معلومات · موضوع</option>
+        </select></div>
+      <div class="f story-only"><label for="core">نوع الموقف</label><select id="core" data-keep></select></div>
+      <div class="f info-only"><label for="domain">المجال</label><select id="domain" data-keep></select></div>
+      <div class="f info-only"><label for="angle">زاوية المنشور</label><select id="angle" data-keep></select></div>
       <div class="f"><label for="format">الشكل</label>
         <select id="format" data-keep>
           <option value="short" selected>قصير · 85 كلمة</option>
@@ -2049,13 +2452,13 @@ PAGE = r"""<!doctype html>
           <option value="sham">شامية</option>
           <option value="fusha">فصحى مبسّطة</option>
         </select></div>
-      <div class="f"><label for="pov">المنشور</label>
+      <div class="f story-only"><label for="pov">المنشور</label>
         <select id="pov" data-keep>
           <option value="self" selected>شخصي · متكلم</option>
           <option value="third">عام · غائب</option>
           <option value="heard">منقول · سمعتها</option>
         </select></div>
-      <div class="f"><label for="drama">حجم الحدث</label>
+      <div class="f story-only"><label for="drama">حجم الحدث</label>
         <select id="drama" data-keep>
           <option value="small">عادي جدًا</option>
           <option value="mid">متوسط</option>
@@ -2092,7 +2495,7 @@ PAGE = r"""<!doctype html>
       </div>
     </div>
 
-    <details class="seedpanel" id="seedpanel">
+    <details class="seedpanel story-only" id="seedpanel">
       <summary>البذرة <span class="n">— اتركها عشوائية أو ثبّت ما تريد</span></summary>
       <div class="controls">
         <div class="f"><label for="seed_who">الطرف الآخر</label><select id="seed_who"></select></div>
@@ -2178,7 +2581,18 @@ const OPENING = 'دفعت حساب القهوة وطلعت. عند الباب ش
 const SEED_KEYS = ['who','secret','device','place','cost','dilemma','open'];
 const SEED_LABEL = { who:'الطرف الآخر', secret:'السر', device:'أداة الكشف',
                      place:'مكان الكشف', cost:'الثمن', dilemma:'النهاية',
-                     open:'نمط السطر الأول', topic:'موضوعك', locked:'مثبّت' };
+                     open:'نمط السطر الأول', topic:'موضوعك', locked:'مثبّت',
+                     kind:'النوع', domain:'المجال', angle:'الزاوية', frame:'الإطار' };
+const TOPIC_HINT = { story: 'مثال: شي صار في مكتب محامي، أو سر طلع من كشف حساب — اتركه فارغًا ليختار المحرّك',
+                     info: 'مثال: ليش الأطفال يضعف تفكيرهم، أو وش يصير للجسم لو تركت السكر شهر — اتركه فارغًا ليختار المحرّك' };
+
+/* قصة أو معلومات: كل نوع يظهر حقوله فقط */
+function applyKind() {
+  const info = $('kind').value === 'info';
+  document.querySelectorAll('.story-only').forEach(el => el.style.display = info ? 'none' : '');
+  document.querySelectorAll('.info-only').forEach(el => el.style.display = info ? '' : 'none');
+  $('topic').placeholder = TOPIC_HINT[info ? 'info' : 'story'];
+}
 const STAGE = { seed:'يركّب البذرة',
                 premise:'يولّد خمس حبكات بورقة حقائق ويختار الأبعد عن المستهلك',
                 draft:'يكتب المسودة الأولى',
@@ -2218,6 +2632,7 @@ document.addEventListener('change', e => {
     keep('key', $('rememberkey').checked ? $('key').value : '');
   }
   if (el.id.startsWith('seed_')) el.classList.toggle('locked', !!el.value);
+  if (el.id === 'kind') applyKind();
 });
 
 $('provider').onchange = () => {
@@ -2323,7 +2738,8 @@ async function run(seed) {
     const res = await fetch('/write', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        topic: $('topic').value.trim(), format: $('format').value,
+        topic: $('topic').value.trim(), format: $('format').value, kind: $('kind').value,
+        domain: $('domain').value, angle: $('angle').value,
         dialect: $('dialect').value, core: $('core').value, mode: $('mode').value,
         pov: $('pov').value, drama: $('drama').value, seed, ...creds()
       })
@@ -2434,7 +2850,9 @@ function showSeed(dna, facts, issues) {
   $('seedbox').style.display = 'block';
   list($('seedlist'), Object.keys(dna || {}).filter(k => k !== 'locked').map(k => {
     let v = dna[k];
-    if (k === 'open') { const o = $('seed_open').querySelector('option[value="' + v + '"]'); v = o ? o.textContent : v; }
+    const sel = { open: 'seed_open', domain: 'domain', angle: 'angle' }[k];
+    if (sel) { const o = $(sel).querySelector('option[value="' + v + '"]'); v = o ? o.textContent : v; }
+    if (k === 'kind') v = v === 'info' ? 'معلومات' : 'قصة';
     return (SEED_LABEL[k] || k) + ': ' + v + ((dna.locked || []).includes(k) ? ' (ثابت)' : '');
   }), '');
   list($('factlist'), facts || [], 'لم تُثبَّت حقائق بعد.');
@@ -2445,7 +2863,9 @@ function showSeed(dna, facts, issues) {
 $('run').onclick = () => run(seedPayload());
 $('again').onclick = () => {
   if (!current.dna) return;
-  const seed = {}; SEED_KEYS.forEach(k => { if (current.dna[k]) seed[k] = current.dna[k]; });
+  const seed = {};
+  if (current.dna.kind === 'info') { if (current.dna.frame) seed.frame = current.dna.frame; }
+  else SEED_KEYS.forEach(k => { if (current.dna[k]) seed[k] = current.dna[k]; });
   if (current.dna.topic) $('topic').value = current.dna.topic;
   run(seed);
 };
@@ -2473,6 +2893,7 @@ $('save').onclick = async () => {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: current.text || $('story').textContent, dna: current.dna, plot: current.plot,
                            facts: current.facts, score: current.score, parts: current.parts,
+                           kind: (current.dna && current.dna.kind) || 'story',
                            format: $('format').value, core: $('core').value, pov: $('pov').value, dialect: $('dialect').value })
   });
   if (res.ok) { $('save').textContent = 'حُفظ'; setTimeout(() => $('save').textContent = 'احفظ', 1600); shelf(); }
@@ -2524,7 +2945,8 @@ function drawShelf() {
     const txt = document.createElement('div'); txt.className = 'txt'; txt.textContent = it.text;
     const side = document.createElement('div'); side.className = 'side';
     const when = document.createElement('time'); when.textContent = it.at || '';
-    const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = it.score ? 'جودة ' + it.score + '٪' : '';
+    const badge = document.createElement('span'); badge.className = 'badge';
+    badge.textContent = (it.kind === 'info' ? 'معلومات' : 'قصة') + (it.score ? ' · جودة ' + it.score + '٪' : '');
     const cp = document.createElement('button'); cp.type = 'button'; cp.textContent = 'انسخ';
     const del = document.createElement('button'); del.type = 'button'; del.textContent = 'حذف';
     side.append(when, badge, cp, del);
@@ -2579,10 +3001,15 @@ fetch('/config').then(r => r.json()).then(c => {
   });
   sel.value = 'betrayal';
   fillSeeds(c.seeds || {});
+  [['domain', c.domains], ['angle', c.angles]].forEach(([id, items]) => {
+    const s = $(id); s.innerHTML = '';
+    (items || []).forEach(it => { const o = document.createElement('option'); o.value = it.id; o.textContent = it.label; o.title = it.desc; s.appendChild(o); });
+  });
   restore();
+  applyKind();
   if (c.openai_ready && !kept('provider')) { $('provider').value = 'openai'; $('model').value = c.model; if (c.plan_model) $('plan_model').value = c.plan_model; }
   $('provider').onchange();
-}).catch(() => { restore(); $('provider').onchange(); });
+}).catch(() => { restore(); applyKind(); $('provider').onchange(); });
 shelf();
 </script>
 </body>

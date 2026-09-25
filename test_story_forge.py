@@ -42,6 +42,28 @@ IDEAS = {"ideas": [
 ]}
 
 
+INFO_STORY = "\n\n".join([
+    "أغلب الأطفال ما يضعف تفكيرهم بالوراثة، يضعف بعادة وحدة في البيت.",
+    "والسبب مو الجوال نفسه.",
+    "الدماغ يتعلم من الملل: لما ما فيه شي يسوّيه يبدأ يخترع.",
+    "1. خلّ نص ساعة يوميًا بلا شاشة ولا لعبة جاهزة.",
+    "2. اسأله وش رأيه قبل ما تعطيه الجواب.",
+    "3. خلّه يشوفك تقرأ.",
+    "مثال: ولد الجيران يقعد بالسيارة بلا جوال ويسأل عن كل شي يشوفه.",
+    "الطفل اللي يملّ اليوم يفكّر بكرة.",
+    "جرّب نص ساعة ملل اليوم وشوف وش يطلع منه.",
+])
+
+INFO_IDEAS = {"ideas": [
+    {"hook": "أغلب الأطفال ما يضعف تفكيرهم بالوراثة، يضعف بعادة وحدة في البيت",
+     "claim": "الملل ضروري لنمو التفكير عند الطفل، وكثرة الترفيه الجاهز تحرمه منه.",
+     "why": "الدماغ يبني حلولًا لما ما يجد شيئًا جاهزًا.",
+     "points": ["نص ساعة بلا شاشة", "اسأله رأيه", "خله يشوفك تقرأ"],
+     "example": "ولد الجيران في السيارة بلا جوال.", "facts": []},
+    {"hook": "لن تصدق", "claim": "فكرة.", "why": "", "points": [], "example": "", "facts": []},
+]}
+
+
 class FakeProvider:
     """مزوّد وهمي: يقرر الرد من محتوى الطلب، ويسجّل ما نُودي به."""
 
@@ -53,6 +75,9 @@ class FakeProvider:
     def __call__(self, messages, provider, creds, on_token=None, temperature=0.95, timeout=240):
         user = messages[-1]["content"]
         self.models.append(creds.get("model"))
+        if '"claim"' in user:
+            self.calls.append("premise")
+            return json.dumps(INFO_IDEAS, ensure_ascii=False)
         if '"ideas"' in user:
             self.calls.append("premise")
             return "```json\n" + json.dumps(self.ideas, ensure_ascii=False) + "\n```"
@@ -451,6 +476,87 @@ class Transport(unittest.TestCase):
                 mock.patch.object(sf.time, "sleep", lambda s: slept.append(s)):
             self.assertEqual(sf.chat([{"role": "user", "content": "x"}], "openai", self.CREDS), "ok")
         self.assertEqual(slept, [8])
+
+
+class Info(unittest.TestCase):
+    """منشورات المعلومات: خط إنتاج مستقل لا يتداخل مع القصص."""
+
+    def setUp(self):
+        self._chat = sf.chat
+        sf.lib_write([])
+
+    def tearDown(self):
+        sf.chat = self._chat
+
+    def test_fresh_info_validates_and_locks(self):
+        spec = sf.fresh_info("food", "myth", "السكر البني", {"frame": sf.INFO_FRAMES[2]})
+        self.assertEqual((spec["kind"], spec["domain"], spec["angle"]), ("info", "food", "myth"))
+        self.assertEqual(spec["frame"], sf.INFO_FRAMES[2])
+        self.assertEqual(spec["locked"], ["frame"])
+        self.assertEqual(spec["topic"], "السكر البني")
+        spec = sf.fresh_info("bogus", "bogus")
+        self.assertEqual((spec["domain"], spec["angle"]), ("kids", "why"))
+        self.assertIn(spec["frame"], sf.INFO_FRAMES)
+
+    def test_info_checks_skip_story_checks_and_add_info_ones(self):
+        ids = {c["id"]: c for c in sf.run_checks(INFO_STORY, "short", "self", "closer", [], dialect="saudi", kind="info")}
+        for cid in ("doubt", "quote", "now", "ending", "pov", "numbers"):
+            self.assertNotIn(cid, ids, cid)
+        self.assertTrue(ids["hook"]["ok"], ids["hook"])
+        self.assertTrue(ids["points"]["ok"], ids["points"])
+        self.assertTrue(ids["hedge"]["ok"])
+        self.assertTrue(ids["dialect"]["ok"])
+        bad = INFO_STORY.replace("الطفل اللي يملّ اليوم يفكّر بكرة.", "هذا يشفي الطفل من كل شي 100%.")
+        ids = {c["id"]: c for c in sf.run_checks(bad, "short", "self", "closer", [], kind="info")}
+        self.assertFalse(ids["hedge"]["ok"])
+        self.assertIn("hedge", sf.CRITICAL)
+
+    def test_info_pipeline_runs_and_uses_plan_model(self):
+        fake = FakeProvider(story=INFO_STORY, audit_text=INFO_STORY, polish_text=INFO_STORY)
+        sf.chat = fake
+        job = {"stage": "seed", "text": "", "kind": "info", "issues": [], "checks": []}
+        spec = sf.fresh_info("kids", "why")
+        sf.write_info(job, spec, "short", "saudi", "openai",
+                      {"base": "https://x", "key": "k", "model": "flash", "plan_model": "pro", "think": ""})
+        self.assertEqual(job["stage"], "done")
+        self.assertEqual(fake.models[0], "pro")
+        self.assertEqual(fake.calls[:4], ["premise", "draft", "edit", "audit"])
+        self.assertIn("الملل ضروري", job["plot"])
+        self.assertTrue(job["text"].startswith("أغلب الأطفال"))
+        self.assertGreaterEqual(job["score"], 70)
+
+    def test_library_keeps_kinds_apart(self):
+        sf.lib_write([{"id": "s", "text": STORY, "plot": "قرض", "dna": {"who": "أمي", "secret": "س", "device": "د"}},
+                      {"id": "i", "text": INFO_STORY, "plot": "الملل ضروري", "kind": "info", "dna": {"kind": "info"}}])
+        self.assertEqual(sf.recent_plots(), ["قرض"])
+        self.assertEqual(sf.recent_plots(kind="info"), ["الملل ضروري"])
+        self.assertTrue(sf.recent_openings()[0].startswith("دفعت"))
+        self.assertTrue(sf.recent_openings(kind="info")[0].startswith("أغلب"))
+        self.assertEqual(sf.recent_dna(), {("أمي", "س", "د")})
+        c = sf.app.test_client()
+        self.assertEqual(len(c.get("/library?kind=info").get_json()["items"]), 1)
+        self.assertEqual(len(c.get("/library").get_json()["items"]), 2)
+
+    def test_write_route_accepts_info_kind(self):
+        sf.chat = FakeProvider(story=INFO_STORY, audit_text=INFO_STORY, polish_text=INFO_STORY)
+        c = sf.app.test_client()
+        sf.JOBS.clear()
+        r = c.post("/write", json={"kind": "info", "domain": "sleep", "angle": "signs", "format": "short", "mode": "fast"})
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertEqual(data["dna"]["kind"], "info")
+        self.assertEqual(data["dna"]["domain"], "sleep")
+        import time
+        for _ in range(200):
+            j = c.get("/write/" + data["job"]).get_json()
+            if j["stage"] in ("done", "error"):
+                break
+            time.sleep(0.02)
+        self.assertEqual(j["stage"], "done", j.get("error"))
+        self.assertEqual(j["kind"], "info")
+        cfg = c.get("/config").get_json()
+        self.assertEqual(len(cfg["domains"]), len(sf.INFO_DOMAINS))
+        self.assertEqual(len(cfg["angles"]), len(sf.INFO_ANGLES))
 
 
 class Routes(unittest.TestCase):
