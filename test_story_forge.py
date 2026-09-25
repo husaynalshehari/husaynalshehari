@@ -525,34 +525,40 @@ class Info(unittest.TestCase):
         self.assertTrue(job["text"].startswith("أغلب الأطفال"))
         self.assertGreaterEqual(job["score"], 70)
 
-    def test_info_thread_ends_part_one_with_bait(self):
+    def test_info_thread_ends_part_one_with_cut_shocking_bait(self):
         filler = "\n\n".join("سطر تمهيد فيه تفصيل يومي يعرفه كل بيت ويطوّل الجزء الأول شوي." for _ in range(3))
-        thread = ("ليش عقل طفلك ما يصير عميق؟\n\n" + filler +
-                  "\n\nالأطفال اللي يملّون كثير يطلعون أذكى.\n\n---\n\nالمقصود: الملل يدفع الدماغ يخترع.\n\n"
+        bait = "الشي اللي تسويه كل يوم عشان يسكت هو بالضبط اللي بيخليه بعد 10 سنين.."
+        thread = ("ليش عقل طفلك ما يصير عميق؟\n\n" + filler + "\n\n" + bait +
+                  "\n\n---\n\n..ينهار أول ما يواجه مشكلة بدون شاشة.\n\nالمقصود: الملل يدفع الدماغ يخترع.\n\n"
                   "1. نص ساعة بلا شاشة.\n\n2. اسأله رأيه.\n\n3. خله يشوفك تقرأ.\n\nجرّبها اليوم.")
         ids = {c["id"]: c for c in sf.run_checks(thread, "thread", "self", "closer", [], kind="info")}
         self.assertTrue(ids["cliff"]["ok"], ids["cliff"])
-        self.assertEqual(ids["cliff"]["label"], "طُعم الجزء الأول")
+        self.assertEqual(ids["cliff"]["label"], "طُعم مقطوع صادم")
         self.assertTrue(ids["first"]["ok"], ids["first"])
-        hedged = thread.replace("يطلعون أذكى.", "يطلعون أذكى لكن..")
-        ids = {c["id"]: c for c in sf.run_checks(hedged, "thread", "self", "closer", [], kind="info")}
+        # جملة كاملة هادئة بلا قطع ولا صدمة → يرسب
+        calm = thread.replace(bait, "إسكات طفلك الباكي فورًا يؤثر على نمو مشاعره.")
+        ids = {c["id"]: c for c in sf.run_checks(calm, "thread", "self", "closer", [], kind="info")}
         self.assertFalse(ids["cliff"]["ok"])
-        self.assertIn("طُعم", ids["cliff"]["fix"])
+        self.assertIn("مقطوع", ids["cliff"]["fix"])
+        # مقطوعة لكن بلا صدمة → يرسب
+        mild = thread.replace(bait, "وهذا الشي له سبب واضح عند الأطفال ووالديهم..")
+        ids = {c["id"]: c for c in sf.run_checks(mild, "thread", "self", "closer", [], kind="info")}
+        self.assertFalse(ids["cliff"]["ok"])
         # جزء أول أطول من الحدّ ينقسم وتضيع الفجوة → يرسب «امتلاء» و«طُعم» معًا
         long_head = thread.replace(filler, filler + "\n\n" + filler)
         ids = {c["id"]: c for c in sf.run_checks(long_head, "thread", "self", "closer", [], kind="info")}
         self.assertFalse(ids["first"]["ok"])
-        self.assertIn("احذف", ids["first"]["fix"])
         self.assertFalse(ids["cliff"]["ok"])
         self.assertIn("الطُعم", sf.info_write_prompt(sf.fresh_info("kids", "why"), sf.parse_info_ideas(
             json.dumps({"ideas": [{"claim": "x", "bait": "ب", "resolve": "ر"}]}, ensure_ascii=False))[0], "thread", "saudi"))
+        self.assertIn("«---»", sf.info_audit_prompt([], sf.fresh_info("kids", "why")))
         fake = FakeProvider(story=thread, audit_text=thread, polish_text=thread)
         sf.chat = fake
         job = {"stage": "seed", "text": "", "kind": "info", "issues": [], "checks": []}
         sf.write_info(job, sf.fresh_info("kids", "why"), "thread", "saudi", "free", {})
         self.assertEqual(job["stage"], "done")
-        self.assertTrue(job["parts"][0].endswith("يطلعون أذكى."))
-        self.assertTrue(job["parts"][1].startswith("المقصود"))
+        self.assertTrue(job["parts"][0].endswith("بعد 10 سنين.."))
+        self.assertTrue(job["parts"][1].startswith("..ينهار"))
 
     def test_library_keeps_kinds_apart(self):
         sf.lib_write([{"id": "s", "text": STORY, "plot": "قرض", "dna": {"who": "أمي", "secret": "س", "device": "د"}},
