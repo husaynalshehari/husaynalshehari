@@ -218,6 +218,18 @@ class Helpers(unittest.TestCase):
         self.assertFalse(ids["cliff"]["ok"])
         self.assertIn("cliff", sf.CRITICAL)
 
+    def test_thread_first_part_must_be_nearly_full(self):
+        short_head = "وقعت الورقة.\n\nيحتاج..\n\n---\n\n48 ساعة ويفيق.\n\nأوديه للشرطة ولا أسكت؟"
+        ids = {c["id"]: c for c in sf.run_checks(short_head, "thread", "self", "dilemma", [])}
+        self.assertFalse(ids["first"]["ok"])
+        self.assertIn("250", ids["first"]["fix"])
+        self.assertIn("first", sf.CRITICAL)
+        filler = "\n\n".join("سطر خلفية فيه تفصيل محسوس ورقم 6 سنين يطوّل الجزء الأول." for _ in range(4))
+        full_head = "وقعت الورقة.\n\n" + filler + "\n\nيحتاج..\n\n---\n\n48 ساعة ويفيق.\n\nأوديه للشرطة ولا أسكت؟"
+        ids = {c["id"]: c for c in sf.run_checks(full_head, "thread", "self", "dilemma", [])}
+        self.assertTrue(ids["first"]["ok"], ids["first"])
+        self.assertTrue(ids["thread"]["ok"], ids["thread"])
+
     def test_polish_only_for_critical_failures(self):
         checks = [{"id": "doubt", "ok": False, "fix": "x"}, {"id": "lines", "ok": False, "fix": "y"},
                   {"id": "facts", "ok": True, "fix": None}]

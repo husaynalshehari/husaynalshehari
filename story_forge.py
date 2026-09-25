@@ -47,7 +47,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "3.6"
+VERSION = "3.7"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -445,14 +445,17 @@ FORMATS = {
 }
 
 THREAD_MAX = 280          # أقصى أحرف للجزء الواحد
+THREAD_FIRST_MIN = 250    # الجزء الأول لا يقل عن هذا حتى يمتلئ المنشور قبل الفجوة
 THREAD_PARTS = (2, 5)     # أقل وأكثر عدد أجزاء
 THREAD_RULES = (
     "شكل الثريد: اكتب القصة سطورًا كالعادة بلا ترقيم وبلا عناوين. ضع سطرًا وحيدًا "
     "فيه «---» في موضع القطع بين الجزء الأول والثاني، وهذا الموضع هو الأهم: بعد أول "
     "كلمة أو كلمتين من الجملة المفصلية، بحيث ينتهي الجزء الأول بكلمة معلّقة تفتح فجوة "
     "(مثل: «يحتاج..») ويبدأ الجزء الثاني ببقية الجملة (مثل: «48 ساعة ويفيق»). "
-    f"الجزء الأول قبل «---» لا يتجاوز {THREAD_MAX - 30} حرفًا. باقي القصة يُقسَّم "
-    f"تلقائيًا إلى أجزاء لا يتجاوز الواحد {THREAD_MAX} حرفًا."
+    f"الجزء الأول قبل «---» يجب أن يكون بين {THREAD_FIRST_MIN} و{THREAD_MAX} حرفًا "
+    "(عدّ الأحرف بالمسافات): ممتلئ حتى آخر حرف ثم ينقطع. إن قصر فأضف سطر خلفية أو "
+    "تفصيلًا قبل الجملة المفصلية، لا بعدها. باقي القصة يُقسَّم تلقائيًا إلى أجزاء لا "
+    f"يتجاوز الواحد {THREAD_MAX} حرفًا."
 )
 
 # نواة الموقف: كل نوع له وصفه، ونوع نهايته، ومجموعة البذرة التي تناسبه
@@ -579,7 +582,7 @@ NOW_RE = re.compile(r"الحين|الآن|دلوقتي|هلق|توه|توّه|ل
                     r"ينتظر|تنتظر|يضحك|تضحك|عندنا الحين|في الصالة|برا الباب|نايم|نايمة")
 
 # الفحوصات التي يستحق رسوبها نداءً إضافيًا للصقل؛ الباقي إرشادي يظهر في البطاقة فقط
-CRITICAL = {"words", "numbers", "cliches", "pov", "facts", "ending", "thread", "cliff", "clean", "dialect"}
+CRITICAL = {"words", "numbers", "cliches", "pov", "facts", "ending", "thread", "cliff", "first", "clean", "dialect"}
 
 AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 TASHKEEL = re.compile(r"[ً-ْٰـ]")
@@ -1399,10 +1402,15 @@ def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha")
         parts = split_thread(text)
         longest = max((len(p) for p in parts), default=0)
         lo_p, hi_p = THREAD_PARTS
+        first = len(parts[0]) if parts else 0
         add("thread", "أجزاء الثريد", lo_p <= len(parts) <= hi_p and longest <= THREAD_MAX,
             f"{len(parts)} أجزاء، أطول جزء {longest} حرفًا",
             f"الثريد يجب أن يكون بين {lo_p} و{hi_p} أجزاء لا يتجاوز الواحد {THREAD_MAX} حرفًا: "
             + ("قصّر النص." if len(parts) > hi_p else "اضبط الطول والقطع."))
+        add("first", "امتلاء الجزء الأول", first >= THREAD_FIRST_MIN, f"{first} حرفًا",
+            f"الجزء الأول {first} حرفًا والمطلوب بين {THREAD_FIRST_MIN} و{THREAD_MAX}: أضف "
+            "سطر خلفية أو تفصيلًا محسوسًا قبل الجملة المفصلية (قبل «---»)، ولا تحرّك "
+            "موضع القطع عن أول كلمة أو كلمتين من الجملة المفصلية.")
         cliff = "---" in lines and parts and not re.search(r"[؟?]\s*$", parts[0])
         add("cliff", "فجوة الجزء الأول", bool(cliff), "",
             "الجزء الأول لا ينتهي بفجوة: اقطع الجملة المفصلية بعد أول كلمة أو كلمتين، "
@@ -2212,6 +2220,7 @@ function renderParts(parts) {
     const t = document.createElement('span');
     t.textContent = 'الجزء ' + (i + 1) + ' من ' + parts.length + ' · ' + p.length + ' حرف';
     if (p.length > 280) { t.className = 'over'; t.textContent += ' — يتجاوز 280'; }
+    else if (i === 0 && p.length < 250) { t.className = 'over'; t.textContent += ' — أقل من 250'; }
     const b = document.createElement('button'); b.type = 'button'; b.className = 'act'; b.textContent = 'انسخ الجزء';
     b.onclick = async () => { try { await navigator.clipboard.writeText(p); b.textContent = 'نُسخ'; setTimeout(() => b.textContent = 'انسخ الجزء', 1400); } catch (e) {} };
     h.append(t, b);
