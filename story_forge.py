@@ -46,7 +46,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "3.2"
+VERSION = "3.3"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -80,6 +80,19 @@ WHO = [
     "زميل دراسة", "سائق البيت", "صاحب المحل اللي جنبي", "محاسب الشركة",
     "شريك سكن أيام الغربة", "معلّمي القديم", "ابن خالتي", "عامل في ورشتي",
     "أبوي", "أمي", "ولدي الكبير", "صاحب العمارة اللي كنت مستأجر فيها",
+    "أخوي الصغير", "أختي الكبيرة", "زوجي", "خطيبي السابق", "طليقتي", "عمي", "خالي",
+    "عمتي", "خالتي", "جدي", "جدتي", "بنتي", "ولدي الصغير", "حماتي", "أخو زوجتي",
+    "زوجة أخوي", "زوج أختي", "بنت خالتي", "ابن عمتي", "صديقة أمي", "صديق أبوي",
+    "جارنا القديم", "جارتنا", "حارس العمارة", "عامل البقالة اللي جنبنا",
+    "الدكتور اللي يتابع أبوي", "المعلمة اللي درّست بنتي", "زميلي في الشغل",
+    "موظف جديد عندنا", "مديري القديم", "صاحب الشركة", "الشريك اللي طلع من الشركة",
+    "العميل اللي نتعامل معه من سنين", "المقاول اللي بنى بيتنا", "العقاري",
+    "المحامي اللي وكّلته", "سائق الأجرة اللي أركب معه كل يوم", "مدرّب النادي",
+    "إمام المسجد", "الممرضة", "زميلي في الدورة العسكرية", "صديقي من الجامعة اللي انقطع",
+    "صاحب المطعم اللي نتغدى فيه", "الخياط", "الحلاق", "صاحب الورشة اللي يصلح سيارتي",
+    "المستأجر عندي", "الجار في المزرعة", "ابن الجيران اللي كبر", "شاب التوصيل",
+    "عامل النظافة في العمارة", "الكاشير", "خطيبة أخوي", "جدي من جهة أمي",
+    "الشيخ اللي كتب عقدنا", "صيدلي الحي", "مشرف السكن أيام الجامعة",
 ]
 
 # النواة المخفية — مجموعتان: ثقيلة وخفيفة، يُختار منها حسب نوع الموقف
@@ -96,6 +109,37 @@ SECRET_DARK = [
     "فصل من الشغل سببه شخص ما يُتوقع",
     "بيت بيع وما أحد قال لي",
     "اتفاق صار بين اثنين وأنا آخر من يعلم",
+    "ورقة موقّعة باسمي ما شفتها في حياتي",
+    "مبلغ قُسّم بالسر وأنا آخر من علم",
+    "بيت الوالد انباع لواحد من العائلة بسعر رمزي",
+    "شهادة طبية مزوّرة أنقذت أحدهم من مسؤولية",
+    "شراكة انفضّت وأنا ما أدري إني كنت شريك فيها",
+    "ورقة طلاق مكتوبة قبل الزواج بأشهر",
+    "خطاب توصية كان هو سبب رفضي",
+    "عيّنة مختبر تبدّلت بين مريضين",
+    "تسجيل مكالمة محفوظ من عشر سنين",
+    "دين على أبوي ما أحد قال لنا عنه",
+    "مشروع تبنيته أنا وكانت الفكرة لواحد ثاني",
+    "حساب مشترك تنسحب منه فلوس بالليل",
+    "اسم شركة مسجّل باسمي بلا علمي",
+    "رسوم مدرسة تدفعها جهة ما أعرفها",
+    "وكالة شرعية قديمة ما انسحبت",
+    "خطبة انفكّت بسبب كلمة قالها قريب",
+    "ترقية راحت لواحد ثاني بسبب تقرير مجهول",
+    "ذهب أمي انباع واللي عندنا مقلّد",
+    "صندوق الجمعية اختفى منه مبلغ",
+    "سيارة الحادث كانت باسمي والسائق غيري",
+    "نتيجة اختبار غُيّرت في الملف",
+    "حصة في أرض تنازل عنها الوالد ما ندري ليش",
+    "علاج توقّف لأن أحدهم رفض يدفع",
+    "رسالة استقالة مكتوبة باسمي",
+    "زواج ثاني مكتوم عن العائلة سنين",
+    "قضية في اسمي وأنا ما دخلت محكمة في حياتي",
+    "مساعدة شهرية كانت تجينا وانقطعت فجأة",
+    "عرض شغل رُفض باسمي قبل ما يوصلني",
+    "توقيع على كفالة ما أذكر إني وقّعته",
+    "خطاب اعتذار كُتب باسمي وأُرسل",
+    "معلومة عن مرضي وصلت لناس ما كان لازم تعرف",
 ]
 
 SECRET_LIGHT = [
@@ -111,6 +155,37 @@ SECRET_LIGHT = [
     "عادة يومية كانت لأجل شخص ثاني",
     "وعد صغير محد تذكره إلا واحد",
     "شخص حفظ سرًا محرجًا ولا فضحه",
+    "كل شهر يوصل كيس أغراض للباب بلا اسم",
+    "شخص كان يصلّح شي في البيت كل ما نطلع",
+    "تذاكر رحلة انشرت وما استُخدمت",
+    "مبلغ في ظرف مكتوب عليه اسم طفل",
+    "شخص حضر كل مبارياتي وما قال",
+    "دفتر فيه تاريخ كل زيارة للمستشفى",
+    "مفتاح احتياطي كان عند واحد ما أتوقعه",
+    "أحدهم كان يدفع فاتورة الكهرباء عن بيت الوالدة",
+    "صورة قديمة فيها شخص أعرفه واقف بعيد",
+    "رسائل تهنئة تجي كل عيد من رقم غريب",
+    "جهاز طبي في البيت اشتراه واحد وسكت",
+    "مقعد محجوز باسمي كل جمعة في مكان",
+    "شخص كان يراجع درجاتي بالمدرسة من ورا",
+    "دعوة زواج ما أحد يعرف مين أرسلها",
+    "عطر أبوي القديم لسا ينشرى كل سنة",
+    "واحد يزور القبر كل خميس قبلنا",
+    "صندوق ألعابي محفوظ عند شخص غريب",
+    "سلفة صغيرة انردّت مضاعفة بلا سبب",
+    "شخص علّم عشرة أطفال بالحي وما قال",
+    "سيارة أبوي القديمة رجع اشتراها نفس اللي باعها",
+    "دواء أمي كان يجي مجانًا من صيدلية بعيدة",
+    "اسم ولدي مكتوب في وصية شخص ما أعرفه زين",
+    "جيراننا يطفّون النور بعدنا كل ليلة",
+    "شخص حفظ رسالة كتبتها وأنا طفل",
+    "موظف كان يأخّر معاملاتي عشان يحميني",
+    "واحد شال اسمي من قائمة طويلة وما قال",
+    "شخص أخذ اللوم عن طفل وما زال ساكت",
+    "محل يخصم لنا من عشرين سنة بلا ما ندري",
+    "شخص كان يوصل أمي للمستشفى وأنا مسافر",
+    "قهوة تجي لمكتبي كل صباح ما عرفت مين يرسلها",
+    "أحدهم كان يسقي شجرة أبوي بعد وفاته",
 ]
 
 DEVICE = [
@@ -128,6 +203,32 @@ DEVICE = [
     "كلام طلع من طفل بدون قصد",
     "فاتورة باسم شخص ثاني",
     "إيصال تحويل قديم في تطبيق البنك",
+    "رسالة نصية وصلت للرقم القديم",
+    "تنبيه من تطبيق البنك عن تحويل ما سويته",
+    "صورة في جوال أخوي وهو يوريني شي ثاني",
+    "ورقة في جيب ثوب قديم رحت أغسله",
+    "سجل مكالمات في فاتورة تفصيلية",
+    "تعليق في حساب تواصل من شخص ما أعرفه",
+    "جملة قالها عامل التوصيل وهو يسلّم الطرد",
+    "فاتورة صيانة مكتوب فيها اسم مو اسمي",
+    "دفتر شيكات فيه كعوب مكتوبة بخط ثاني",
+    "ورقة استلام في ملف الجمعية",
+    "بريد إلكتروني قديم في المجلد المحذوف",
+    "كشف طبي مكتوب فيه فصيلة دم",
+    "سجل دخول وخروج في بوابة الشركة",
+    "تطبيق خرائط يبيّن مكان جوال العائلة",
+    "إيصال بنزين من مدينة ثانية",
+    "صورة في ألبوم عرس قريبنا",
+    "ورقة مخبّأة خلف إطار صورة",
+    "خبر في جريدة قديمة ملفوف فيها أغراض",
+    "شهادة ميلاد فيها تاريخ مو اللي نعرفه",
+    "عقد إيجار محفوظ عند العقاري",
+    "مقطع في ذاكرة كاميرا الحفلة",
+    "سؤال عابر من موظف الجوازات",
+    "دفتر تحضير معلم قديم",
+    "محضر اجتماع مكتوب فيه اسمي",
+    "جهاز تتبّع في سيارة الشركة",
+    "ملف في درج مكتب بعد وفاة صاحبه",
 ]
 
 PLACE = [
@@ -135,6 +236,15 @@ PLACE = [
     "بمكتب محامي", "بصالة مطار", "باجتماع شغل", "بالمقبرة بعد العزاء",
     "بالبنك وأنا أراجع حسابي", "بمدرسة عيالي", "بورشة تصليح",
     "بمجلس عزاء", "بمحل الذهب", "بموقف السيارات تحت البيت",
+    "بمكتب العقار", "في المطعم وأنا مع العيال", "بصالون الحلاق", "في الطريق للمزرعة",
+    "بمكتب التقاعد", "في المصعد", "بغرفة الانتظار عند الدكتور", "بحفل تخرّج",
+    "في المستودع", "بقاعة المحكمة قبل الجلسة", "بالنادي الرياضي", "بمطبخ بيت أهلي",
+    "بموقف الأجرة", "في المخيم", "بمركز الشرطة وأنا أنهي معاملة",
+    "على طاولة العشاء الأسبوعي", "بمكتب الموارد البشرية", "في قسم الطوارئ",
+    "بالبقالة قبل الفجر", "في جناح الولادة", "بمعرض السيارات",
+    "عند كاتب العدل قبل التوقيع", "بالمقهى بعد الدوام", "في السيارة وأنا أوصّل أمي",
+    "بغرفة المعلمين", "في مكتب البريد", "بمحطة القطار", "في الفندق أثناء مؤتمر",
+    "بالحديقة وأنا أتمشى", "في مغسلة السيارات",
 ]
 
 COST_DARK = [
@@ -142,6 +252,13 @@ COST_DARK = [
     "ترك دراسته", "اشتغل وظيفتين خمس سنين", "انقطع عن أهله",
     "أجّل عملية والدته", "طلع من بيته واستأجر غرفة",
     "تسجّل باسمه دين مو دينه", "ترك شغل يحبه",
+    "دفع من مكافأة نهاية خدمته", "أوقف علاجه شهرين", "ما حضر ولادة ولده",
+    "خسر شراكة عشر سنين", "طلع من الجامعة سنة كاملة", "باع ذهب أمه",
+    "ترك المدينة اللي يحبها", "قعد سنتين بلا سيارة", "تحمّل سمعة سيئة بالحي",
+    "انقطعت علاقته بأخوه", "دفع ثلث راتبه عشر سنين", "أجّل التقاعد خمس سنين",
+    "سكن في غرفة فوق المحل", "ترك حلمه في الطيران", "باع السيارة اللي كان يجمع لها",
+    "اشتغل في مهنة ما تناسبه", "رفض عرض زواج كان يتمناه", "عاش بعيد عن عياله",
+    "تنازل عن حقه في الوصية", "خسر نص رصيده ببيع سريع",
 ]
 
 COST_LIGHT = [
@@ -149,6 +266,14 @@ COST_LIGHT = [
     "دفع من جيبه وما ذكرها", "تنازل عن دوره وسكت",
     "غيّر طريقه كل يوم عشان يمر من مكان",
     "احتفظ بشي صغير عشر سنين", "تحمّل سوء ظن طويل بلا دفاع",
+    "نام قليل سنة كاملة", "حفظ رقم جوال في دفتر عشرين سنة",
+    "مشى كل يوم نص ساعة زيادة", "ادّخر من مصروفه الصغير",
+    "قعد ساعة زيادة كل يوم بعد الدوام", "سكت على مزحة ثقيلة سنين",
+    "شال عنه شغل ثقيل بلا ما يلاحظ", "ترك المقعد الأمامي كل مرة",
+    "غسل سيارة غيره كل جمعة", "أرسل رسالة كل صباح بلا رد",
+    "كتب اسم غيره على إنجازه", "ما ذكر مرضه في العزاء",
+    "أعاد نفس الطريق كل عيد", "صبر على دين صغير عشر سنين",
+    "حضر كل موعد وهو مريض", "تنازل عن دوره في الطابور كل مرة",
 ]
 
 DILEMMA = [
@@ -160,6 +285,25 @@ DILEMMA = [
     "يأخذ المال المعروض ولا يرده بوجهه",
     "يكمل بالشي اللي بناه على كذبة ولا يهدّه بيده",
     "يقول لأمه ولا يتركها تموت وهي مرتاحة",
+    "يرد المبلغ كامل ولا يقبل إنه هدية",
+    "يقول لولده الحقيقة ولا يخليه يكبر على الصورة الحلوة",
+    "يبلّغ الجهة المسؤولة ولا يحل الموضوع داخل العائلة",
+    "يعتذر لشخص ظلمه سنين ولا يترك الماضي مكانه",
+    "يغيّر الوصية ولا يتركها كما هي عشان السلام",
+    "يقبل الشغل عند اللي أذاه ولا يرفضه ويخسر فرصته",
+    "يخبر زوجته باللي عرف ولا يحميها من الحقيقة",
+    "يواجه أبوه وهو كبير ولا يدفن السؤال معه",
+    "يرد المعروف بنفس الطريقة ولا يظل ساكت لأنه ما طُلب منه",
+    "يفتح الموضوع في الاجتماع ولا يتركه لأنه ما يقدر يثبته",
+    "يبيع البيت ويقسم الحق ولا يحتفظ فيه بالذكرى",
+    "يقبل الاعتذار المتأخر ولا يرجّعه بنفس البرود",
+    "يخلي الموظف يمشي بكرامته ولا يكشف اللي سواه",
+    "ينقل ولده من المدرسة ولا يخليه يواجه",
+    "يعطي أخوه من ورثه ولا يخليه يتحمّل نتيجة اختياره",
+    "يسمّي الشخص اللي ساعده ولا يحفظ سره كما أراد",
+    "يرجع للبلد ويشوف الشخص ولا يكتفي بالمكالمة",
+    "يوقّع الورقة عشان يخلص ولا يوقف الكل عند حقه",
+    "يعطيه فرصة ثانية ولا يقفل الباب من أول مرة",
 ]
 
 CLOSERS = [
@@ -169,6 +313,22 @@ CLOSERS = [
     "يشوف الشي الصغير بعين ثانية بعد ما عرف قصته",
     "يقرر يرد المعروف بطريقته بدون ما يذكر السبب",
     "يسكت ويحتفظ بالشي عنده ويخلي الثاني على راحته",
+    "يحتفظ بالورقة في جيبه ويطلع للعيال كأن ما صار شي",
+    "يكتب رسالة ويرسلها بعد سنين من تاريخها",
+    "يجلس في نفس الكرسي اللي كان يجلس فيه الشخص",
+    "يدفع الفاتورة القديمة باسم الشخص الثاني",
+    "يمسح الصورة من الجوال ثم يرجعها من المحذوفات",
+    "يغيّر اسم جهة الاتصال إلى الاسم الحقيقي",
+    "يطلب رقم الشخص ويقفل الجوال قبل الاتصال",
+    "يوقّع الورقة ويطلع بلا ما يسلّم على أحد",
+    "يعلّق المفتاح في نفس المكان اللي كان فيه",
+    "يشتري نفس الشي ويعطيه لشخص ثالث",
+    "يقعد في السيارة عشر دقايق قبل ما يدخل البيت",
+    "يفتح الرسالة القديمة ويقرأها لأول مرة",
+    "يمر من نفس الشارع بدل ما يتجنبه",
+    "يشيل الصورة من الجدار ويعلّقها في مكان أوضح",
+    "يرجع الشي لصاحبه بلا كلمة ويمشي",
+    "يكمل عادة الشخص الثاني من بعده",
 ]
 
 # أنماط السطر الأول — تتبدّل حتى لا تتشابه القصص في هيكلها
@@ -183,6 +343,15 @@ OPEN_STYLES = {
                "ثم من قالها بكلمتين"),
     "number": ("رقم جاف",
                "رقم أو تاريخ أو مبلغ يُذكر كواقعة جافة في جملة من ٥ إلى ١٠ كلمات، بلا تعليق"),
+    "time":   ("وقت وفعل يومي",
+               "توقيت محدد وفعل يومي بلا أي دلالة، مثل «الساعة ست ونص، كنت أفتح المحل»، "
+               "من ٥ إلى ١٠ كلمات"),
+    "list":   ("جرد بسيط",
+               "ثلاثة أشياء عادية كانت أمامه، تُذكر كقائمة قصيرة في جملة واحدة بلا تعليق"),
+    "routine": ("عادة متكررة",
+                "شيء يفعله كل أسبوع منذ سنين، جملة واحدة عادية من ٦ إلى ١٢ كلمة"),
+    "message": ("رسالة وصلت",
+                "نص رسالة قصيرة وصلت للجوال بحرفها، ثم ممن، بلا تعليق"),
 }
 
 SEED_KEYS = ("who", "secret", "device", "place", "cost", "dilemma", "open")
@@ -201,6 +370,19 @@ TIRED_PLOTS = [
     "الجار المزعج الذي تبيّن أنه يحرس البيت",
     "المعلم الذي دفع رسوم الطالب الفقير سرًا",
     "الرجل الذي تبرع بدمه فأنقذ من ظلمه",
+    "الأب الذي يبيع كليته سرًا ليموّل زواج ابنه",
+    "الزوجة التي تعمل خادمة في الخفاء لتسدد دين زوجها",
+    "الطفل اليتيم الذي تبيّن أنه وريث ثروة",
+    "الجار الذي يدفع الإيجار عن الأرملة سرًا",
+    "الابن الذي يضع أمه في دار الرعاية ثم يندم عند موتها",
+    "المعلم الذي تبيّن أنه والد الطالب",
+    "الرجل الذي يعيد محفظة فيتبيّن صاحبها مليونيرًا فيكافئه",
+    "الحبيب الذي هاجر ثم عاد ليجدها متزوجة",
+    "الغريب في القطار الذي يغيّر حياته بجملة واحدة",
+    "الأم التي تتظاهر بكراهية ابنها لتدفعه للنجاح",
+    "المدير الذي يتنكّر في هيئة موظف بسيط ليختبر الموظفين",
+    "الصديق الذي أنقذ حياته في الحادث ثم اختفى",
+    "الطبيب الذي يعالج الفقراء مجانًا ويتبيّن أنه المريض",
 ]
 
 DIALECTS = {
@@ -270,12 +452,49 @@ CORES = {
     "parenting": ("بين أب وابنه", "لحظة يكتشف فيها أحدهما الآخر", "light", "closer"),
     "work":      ("في الشغل", "موقف مع مدير أو زميل يقلب الصورة", "any", "dilemma"),
     "neighbors": ("بين الجيران", "حياة كاملة خلف باب مقابل", "light", "closer"),
+    # علاقات
+    "marriage":  ("داخل الزواج", "شيء بين زوجين يظهر بعد سنين ويعيد ترتيب البيت", "dark", "dilemma"),
+    "engagement": ("خطوبة انفكّت", "السبب الحقيقي لفراق قديم يظهر متأخرًا", "dark", "closer"),
+    "inlaws":    ("مع الأنساب", "موقف مع أهل الزوج أو الزوجة يقلب فكرة راسخة", "any", "dilemma"),
+    "siblings":  ("بين الإخوة", "حساب قديم أو معروف مكتوم بين إخوة", "any", "dilemma"),
+    "friendship": ("صداقة عمر", "صديق قديم فيه شيء ما كان معروفًا", "any", "closer"),
+    "distance":  ("قطيعة", "سبب قطيعة سنين يطلع أصغر أو أكبر مما توقّع الجميع", "dark", "dilemma"),
+    # مال وشغل
+    "inheritance": ("ورث وتقسيم", "توزيع تركة يكشف من كان يظن ومن كان يعرف", "dark", "dilemma"),
+    "debt":      ("دين قديم", "دين انسدّ أو انفتح من حيث لا يتوقع أحد", "dark", "dilemma"),
+    "partner":   ("شراكة", "شريك عمل وقرار قديم يظهر أثره الآن", "dark", "dilemma"),
+    "hire":      ("توظيف ورفض", "سبب قبول أو رفض قديم يظهر بعد سنين", "any", "closer"),
+    "boss":      ("مدير ومرؤوس", "قرار إداري كان له وجه آخر", "any", "dilemma"),
+    "customer":  ("مع عميل", "تعامل تجاري يومي وراءه حياة كاملة", "light", "closer"),
+    "failure":   ("مشروع فشل", "السبب الحقيقي لفشل قديم يظهر متأخرًا", "dark", "closer"),
+    # صحة وفقد
+    "hospital":  ("في المستشفى", "موقف في ممرات المستشفى يكشف شخصًا", "any", "closer"),
+    "caregiver": ("رعاية مريض", "من كان يرعى فعلًا ومن كان يظهر فقط", "light", "closer"),
+    "oldage":    ("كبر السن", "أب أو أم كبير يكشف ما كان يخفيه عن أبنائه", "any", "closer"),
+    "accident":  ("حادث قديم", "تفصيل عن حادث قديم يغيّر من المسؤول", "dark", "dilemma"),
+    # طفولة وذكريات
+    "childhood": ("من الطفولة", "شيء من سنوات الطفولة يُفهم الآن فقط", "light", "closer"),
+    "school":    ("أيام المدرسة", "معلم أو زميل وموقف قديم يظهر وجهه الثاني", "light", "closer"),
+    "home":      ("بيت الأهل", "شيء في بيت الوالدين له قصة ما أحد يعرفها", "light", "closer"),
+    "abroad":    ("غربة وسفر", "سنوات الغربة وما كان يحدث في البيت أثناءها", "any", "closer"),
+    # مجتمع
+    "district":  ("في الحي", "شخص في الحي يتبيّن دوره الحقيقي", "light", "closer"),
+    "charity":   ("معروف مجهول", "مساعدة كانت تصل بلا اسم", "light", "closer"),
+    "reputation": ("سمعة وظن", "حكم الناس على شخص وحقيقته", "any", "dilemma"),
+    "promise":   ("وعد قديم", "وعد صغير وفى به أحدهم بعد سنين", "light", "closer"),
+    "apology":   ("اعتذار متأخر", "اعتذار يصل بعد فوات الأوان أو في وقته تمامًا", "any", "dilemma"),
+    "rival":     ("منافس قديم", "منافس في الشغل أو الحي يطلع غير ما ظننا", "any", "closer"),
 }
 
 CORE_GROUPS = [
     ("مواقف ثقيلة", ["betrayal", "injustice", "guilt", "money", "pride", "secretill", "loss"]),
-    ("وفاء وامتنان", ["sacrifice", "gratitude", "loyalty", "return", "misread", "reversal"]),
-    ("مواقف يومية", ["surprise", "chance", "funny", "nostalgia", "parenting", "work", "neighbors"]),
+    ("علاقات", ["marriage", "engagement", "inlaws", "siblings", "friendship", "distance"]),
+    ("مال وشغل", ["inheritance", "debt", "partner", "hire", "boss", "customer", "failure", "work"]),
+    ("وفاء وامتنان", ["sacrifice", "gratitude", "loyalty", "return", "misread", "reversal",
+                       "charity", "promise", "apology"]),
+    ("صحة وفقد", ["hospital", "caregiver", "oldage", "accident"]),
+    ("طفولة وذكريات", ["childhood", "school", "home", "abroad", "nostalgia", "parenting"]),
+    ("مواقف يومية", ["surprise", "chance", "funny", "neighbors", "district", "reputation", "rival"]),
 ]
 
 DRAMA = {
@@ -1400,76 +1619,75 @@ PAGE = r"""<!doctype html>
 <link href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg:#F4F5F7; --surface:#FFFFFF; --line:#E4E7EC; --line-2:#D0D5DD;
-    --ink:#101828; --ink-2:#344054; --muted:#667085; --faint:#98A2B3;
+    --bg:#F3F4F6; --surface:#FFFFFF; --line:#E5E7EB; --line-2:#D1D5DB;
+    --ink:#111827; --ink-2:#374151; --muted:#6B7280; --faint:#9CA3AF;
     --primary:#1B3A5C; --primary-2:#14304D; --primary-soft:#EAF0F7; --primary-line:#B9CBE0;
     --ok:#067647; --ok-bg:#ECFDF3; --ok-line:#ABEFC6;
     --bad:#B42318; --bad-bg:#FEF3F2; --bad-line:#FECDCA;
-    --warn:#B54708; --warn-bg:#FFFAEB; --warn-line:#FEDF89;
-    --shadow:0 1px 2px rgba(16,24,40,.05); --shadow-lg:0 14px 36px rgba(16,24,40,.09);
-    --r:12px;
+    --shadow:0 1px 2px rgba(17,24,39,.05); --shadow-lg:0 10px 30px rgba(17,24,39,.08);
+    --r:10px;
   }
   *{box-sizing:border-box}
   html,body{margin:0}
   body{
     background:var(--bg); color:var(--ink);
-    font-family:"IBM Plex Sans Arabic",system-ui,sans-serif; font-size:15px; line-height:1.7;
+    font-family:"IBM Plex Sans Arabic",system-ui,sans-serif; font-size:13px; line-height:1.6;
     -webkit-font-smoothing:antialiased;
   }
-  .wrap{max-width:1140px; margin:0 auto; padding:0 20px 80px}
+  .wrap{max-width:1180px; margin:0 auto; padding:0 12px 56px; display:flex; flex-direction:column; gap:10px}
+  @media (min-width:700px){ body{font-size:13.5px} .wrap{padding:0 20px 64px; gap:12px} }
 
   /* الشريط العلوي */
-  .top{display:flex; align-items:center; justify-content:space-between; gap:16px; padding:18px 0 22px}
-  .brand{display:flex; align-items:center; gap:10px; font-weight:700; font-size:17px}
-  .logo{width:30px; height:30px; border-radius:9px; background:var(--primary); position:relative; flex:none}
-  .logo::after{content:""; position:absolute; inset:9px; border-radius:50%; background:#fff}
-  .ver{font-weight:500; font-size:12px; color:var(--muted); background:#fff; border:1px solid var(--line); border-radius:999px; padding:2px 9px}
-  .pill{font-size:12px; color:var(--ink-2); background:#fff; border:1px solid var(--line); border-radius:999px; padding:5px 12px; display:flex; align-items:center; gap:7px}
-  .pill::before{content:""; width:7px; height:7px; border-radius:50%; background:var(--ok)}
+  .top{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0 2px}
+  .brand{display:flex; align-items:center; gap:9px; font-weight:700; font-size:15px; min-width:0}
+  .logo{width:26px; height:26px; border-radius:8px; background:var(--primary); position:relative; flex:none}
+  .logo::after{content:""; position:absolute; inset:8px; border-radius:50%; background:#fff}
+  .ver{font-weight:500; font-size:11px; color:var(--muted); background:#fff; border:1px solid var(--line); border-radius:999px; padding:1px 8px}
+  .tagline{display:none; color:var(--muted); font-weight:400; font-size:12.5px; margin-inline-start:6px}
+  @media (min-width:900px){ .tagline{display:inline} }
+  .pill{font-size:11.5px; color:var(--ink-2); background:#fff; border:1px solid var(--line); border-radius:999px; padding:4px 10px; display:flex; align-items:center; gap:6px; white-space:nowrap}
+  .pill::before{content:""; width:6px; height:6px; border-radius:50%; background:var(--ok)}
 
-  /* التخطيط */
-  .layout{display:grid; grid-template-columns:minmax(0,1fr); gap:22px}
-  @media (min-width:980px){
-    .layout{grid-template-columns:372px minmax(0,1fr); align-items:start}
-    .side{position:sticky; top:18px}
-  }
-  .side{display:flex; flex-direction:column; gap:14px}
-  .main{display:flex; flex-direction:column; gap:16px; min-width:0}
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); padding:12px}
+  @media (min-width:700px){ .panel{padding:14px 16px} }
 
-  .panel{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); padding:20px}
-  .panel h2{font-size:13px; font-weight:600; color:var(--muted); letter-spacing:.02em; margin:0 0 14px; text-transform:uppercase}
-  .grid{display:grid; grid-template-columns:1fr 1fr; gap:12px 12px}
-  .full{grid-column:1/-1}
-  label{display:block; font-size:12.5px; font-weight:500; color:var(--ink-2); margin-bottom:6px}
+  /* شبكة الإعدادات: عمودان على الجوال، أربعة على اللوحي، سبعة على الحاسوب */
+  .controls{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 8px}
+  @media (min-width:640px){ .controls{grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px} }
+  @media (min-width:1000px){ .controls{grid-template-columns:repeat(7,minmax(0,1fr))} }
+  .f label{display:block; font-size:10.5px; font-weight:600; color:var(--muted); margin:0 0 3px; letter-spacing:.01em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   select,input,textarea{
     width:100%; background:#fff; color:var(--ink); border:1px solid var(--line-2);
-    border-radius:9px; padding:9px 11px; font-family:inherit; font-size:14px; line-height:1.5;
-    transition:border-color .15s, box-shadow .15s;
+    border-radius:8px; padding:6px 8px; font-family:inherit; font-size:12.5px; line-height:1.4; min-height:32px;
+    transition:border-color .12s, box-shadow .12s;
   }
-  select{appearance:none; -webkit-appearance:none; padding-inline-end:32px;
-         background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23667085' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-         background-repeat:no-repeat; background-position:left 11px center}
-  textarea{resize:vertical; min-height:64px}
-  select:hover,input:hover,textarea:hover{border-color:#AEB5C2}
+  select{appearance:none; -webkit-appearance:none; padding-inline-end:24px; text-overflow:ellipsis;
+         background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+         background-repeat:no-repeat; background-position:left 8px center}
+  select:hover,input:hover{border-color:#9CA3AF}
   select:focus,input:focus,textarea:focus{outline:none; border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-soft)}
-  .check{display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink-2); margin-top:10px; font-weight:400}
-  .check input{width:auto; accent-color:var(--primary)}
-  .hint{font-size:12px; color:var(--muted); margin:6px 0 0; line-height:1.6}
-  #creds{margin-top:2px; padding:14px; background:#FAFBFC; border:1px dashed var(--line-2); border-radius:10px}
-  #creds label{margin-top:10px} #creds label:first-child{margin-top:0}
+  .topic{margin-bottom:8px}
+  .topic input{font-size:13px}
+  #creds{grid-column:1/-1; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:10px; margin-top:2px;
+         background:#F9FAFB; border:1px dashed var(--line-2); border-radius:8px}
+  @media (min-width:640px){ #creds{grid-template-columns:2fr 2fr 1.2fr 1.2fr} }
+  #creds .wide{grid-column:1/-1; display:flex; align-items:center; gap:14px; flex-wrap:wrap}
+  .check{display:flex; align-items:center; gap:6px; font-size:12px; color:var(--ink-2); font-weight:400}
+  .check input{width:auto; min-height:0; accent-color:var(--primary)}
+  .hint{font-size:11.5px; color:var(--muted); margin:0; line-height:1.5}
 
-  /* البذرة */
-  .seedpanel summary{cursor:pointer; list-style:none; display:flex; align-items:center; justify-content:space-between; font-size:13.5px; font-weight:600; color:var(--ink-2)}
+  .seedpanel{margin-top:10px; border-top:1px solid var(--line); padding-top:8px}
+  .seedpanel summary{cursor:pointer; list-style:none; display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600; color:var(--ink-2); padding:2px 0}
   .seedpanel summary::-webkit-details-marker{display:none}
-  .seedpanel summary::after{content:"+"; font-size:18px; color:var(--muted); font-weight:400}
-  .seedpanel[open] summary::after{content:"–"}
-  .seedpanel .grid{margin-top:14px}
+  .seedpanel summary::before{content:"+"; width:18px; height:18px; border-radius:5px; border:1px solid var(--line-2); display:grid; place-items:center; font-size:13px; color:var(--muted); font-weight:500}
+  .seedpanel[open] summary::before{content:"–"}
+  .seedpanel summary .n{font-weight:400; color:var(--muted); font-size:11.5px}
+  .seedpanel .controls{margin-top:8px}
   .seedpanel select.locked{border-color:var(--primary); background-color:var(--primary-soft)}
-  .seedpanel .hint{margin-top:12px}
 
-  /* الأزرار */
-  .btn{font:inherit; font-weight:600; font-size:14.5px; border-radius:10px; padding:11px 16px; cursor:pointer; border:1px solid transparent; transition:background .15s, border-color .15s, color .15s}
-  .btn.primary{background:var(--primary); color:#fff; width:100%; padding:13px 16px; font-size:15.5px}
+  .actions{display:flex; gap:8px; align-items:center; margin-top:10px; padding-top:10px; border-top:1px solid var(--line); flex-wrap:wrap}
+  .btn{font:inherit; font-weight:600; font-size:13px; border-radius:8px; padding:9px 14px; cursor:pointer; border:1px solid transparent; transition:background .12s, border-color .12s, color .12s; min-height:38px}
+  .btn.primary{background:var(--primary); color:#fff; flex:1 1 160px}
   .btn.primary:hover{background:var(--primary-2)}
   .btn.primary:disabled{background:#B7C1CF; cursor:not-allowed}
   .btn.secondary{background:#fff; border-color:var(--line-2); color:var(--ink-2)}
@@ -1477,100 +1695,102 @@ PAGE = r"""<!doctype html>
   .btn.secondary:disabled{opacity:.45; cursor:not-allowed}
   .btn.danger{background:#fff; border-color:var(--bad-line); color:var(--bad)}
   .btn.danger:hover{background:var(--bad-bg)}
-  .actions{display:flex; flex-direction:column; gap:8px; margin-top:16px; padding-top:16px; border-top:1px solid var(--line)}
-  .actions .row{display:flex; gap:8px}
-  .actions .row .btn{flex:1}
-  kbd{font-family:inherit; font-size:11px; border:1px solid var(--line-2); border-bottom-width:2px; border-radius:5px; padding:0 5px; color:var(--muted); background:#fff}
+  .actions .hint{display:none; margin-inline-start:auto}
+  @media (min-width:900px){ .actions .hint{display:block} }
+  kbd{font-family:inherit; font-size:10.5px; border:1px solid var(--line-2); border-bottom-width:2px; border-radius:4px; padding:0 4px; color:var(--muted); background:#fff}
 
-  /* البطاقة التعريفية */
-  .hero-card{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); padding:22px 24px}
-  .hero{font-family:"Amiri",serif; font-size:clamp(22px,3vw,30px); line-height:1.6; margin:0; min-height:1.7em; color:var(--ink)}
-  .caret{display:inline-block; width:2px; height:.9em; background:var(--primary); vertical-align:-.1em; margin-inline-start:2px; animation:blink 1s step-end infinite}
-  @keyframes blink{50%{opacity:0}}
-  .sub{color:var(--muted); margin:10px 0 0; font-size:13.5px; line-height:1.8; max-width:70ch}
-
-  /* المراحل والحالة */
-  .progress{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); padding:16px 20px}
-  .steps{list-style:none; margin:0; padding:0; display:flex; gap:6px}
-  .steps li{flex:1; display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--faint); min-width:0; white-space:nowrap}
-  .steps li::before{content:attr(data-n); width:24px; height:24px; border-radius:50%; border:1.5px solid var(--line-2); background:#fff; display:grid; place-items:center; font-size:11px; font-weight:600; flex:none}
-  .steps li:not(:last-child)::after{content:""; flex:1; height:1.5px; background:var(--line); margin:0 4px}
+  /* المراحل */
+  .progress{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); padding:8px 12px; display:flex; align-items:center; gap:14px; flex-wrap:wrap}
+  .steps{list-style:none; margin:0; padding:0; display:flex; gap:4px; flex:1 1 320px; min-width:0}
+  .steps li{flex:1; display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--faint); min-width:0; white-space:nowrap}
+  .steps li::before{content:attr(data-n); width:20px; height:20px; border-radius:50%; border:1.5px solid var(--line-2); background:#fff; display:grid; place-items:center; font-size:10px; font-weight:600; flex:none}
+  .steps li:not(:last-child)::after{content:""; flex:1; height:1.5px; background:var(--line); margin:0 3px}
   .steps li.done{color:var(--ok)} .steps li.done::before{content:"✓"; background:var(--ok-bg); border-color:var(--ok-line); color:var(--ok)}
   .steps li.done:not(:last-child)::after{background:var(--ok-line)}
   .steps li.active{color:var(--primary); font-weight:600} .steps li.active::before{border-color:var(--primary); background:var(--primary); color:#fff}
   .steps li.hidden{display:none}
-  .state{margin:12px 0 0; font-size:13.5px; color:var(--ink-2); min-height:1.4em; display:flex; align-items:center; gap:10px}
-  #state.bad{color:var(--bad)}
-  .elapsed{color:var(--muted); font-variant-numeric:tabular-nums; font-size:12.5px}
+  .state{margin:0; font-size:12.5px; color:var(--ink-2); display:flex; align-items:center; gap:8px; flex:1 1 260px; min-width:0}
+  #state{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  #state.bad{color:var(--bad); white-space:normal}
+  .elapsed{color:var(--muted); font-variant-numeric:tabular-nums; font-size:11.5px; flex:none}
+  @media (max-width:639px){
+    .steps li{font-size:0} .steps li::before{font-size:10px} .steps li.active{font-size:11.5px}
+    .f.provider{grid-column:1/-1}            /* العنصر السابع لا يبقى وحيدًا في صف */
+    .foot .grow{flex-basis:100%}             /* البيانات فوق، والأزرار في صف تحتها */
+  }
 
-  /* الورقة */
-  .sheet{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-lg); padding:26px 32px 22px; display:none}
-  .sheet.on{display:block}
-  .tag{display:inline-block; font-size:11.5px; font-weight:600; color:var(--muted); background:var(--bg); border:1px solid var(--line); border-radius:999px; padding:3px 10px; min-height:1.6em}
+  /* النتائج: الورقة والبطاقة جنب بعض على الشاشات الواسعة */
+  .results{display:grid; grid-template-columns:minmax(0,1fr); gap:10px; align-items:start}
+  @media (min-width:900px){ .results{grid-template-columns:minmax(0,1fr) 320px; gap:12px} .aside{position:sticky; top:12px} }
+  .aside{display:flex; flex-direction:column; gap:10px; min-width:0}
+
+  .sheet{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-lg); padding:16px 18px 14px; min-width:0}
+  @media (min-width:700px){ .sheet{padding:20px 26px 16px} }
+  .tag{display:inline-block; font-size:11px; font-weight:600; color:var(--muted); background:var(--bg); border:1px solid var(--line); border-radius:999px; padding:2px 9px}
   .tag:empty{display:none}
   .tag.live{color:var(--primary); background:var(--primary-soft); border-color:var(--primary-line)}
   .tag.live::before{content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--primary); margin-inline-end:6px; animation:blink 1s step-end infinite}
-  .sheet .body{font-family:"Amiri",serif; font-size:20.5px; line-height:2; white-space:pre-wrap; min-height:3em; margin-top:14px; color:var(--ink)}
+  @keyframes blink{50%{opacity:0}}
+  .placeholder{font-family:"Amiri",serif; font-size:19px; line-height:1.9; color:var(--faint); margin:8px 0 0; min-height:2em}
+  .caret{display:inline-block; width:2px; height:.9em; background:var(--primary); vertical-align:-.1em; margin-inline-start:2px; animation:blink 1s step-end infinite}
+  .sheet.has .placeholder, .sheet.busy .placeholder{display:none}
+  .sheet .body{font-family:"Amiri",serif; font-size:19px; line-height:1.95; white-space:pre-wrap; margin-top:10px; color:var(--ink)}
+  @media (min-width:700px){ .sheet .body{font-size:20px} }
   .sheet .body::first-line{font-weight:700}
   .sheet.busy .body{color:var(--muted)}
-  .foot{display:flex; flex-wrap:wrap; gap:10px; align-items:center; border-top:1px solid var(--line); margin-top:22px; padding-top:14px; font-size:12.5px; color:var(--muted)}
-  .foot .grow{flex:1}
-  .act{background:#fff; border:1px solid var(--line-2); color:var(--ink-2); border-radius:8px; padding:7px 13px; font-family:inherit; font-size:13px; font-weight:500; cursor:pointer}
+  .foot{display:flex; flex-wrap:wrap; gap:8px; align-items:center; border-top:1px solid var(--line); margin-top:14px; padding-top:10px; font-size:12px; color:var(--muted)}
+  .foot .grow{flex:1; min-width:120px}
+  .act{background:#fff; border:1px solid var(--line-2); color:var(--ink-2); border-radius:7px; padding:6px 11px; font-family:inherit; font-size:12.5px; font-weight:500; cursor:pointer}
   .act:hover{border-color:var(--primary); color:var(--primary)}
   .act:disabled{opacity:.45; cursor:not-allowed}
   .act.solid{background:var(--primary); color:#fff; border-color:var(--primary)}
   .act.solid:hover{background:var(--primary-2); color:#fff}
 
-  .hooks{margin-top:16px; display:none}
+  .hooks{margin-top:12px; display:none}
   .hooks.on{display:block}
-  .hooks p{font-size:12.5px; color:var(--muted); margin:0 0 8px}
-  .hook{display:block; width:100%; text-align:start; background:var(--bg); border:1px solid var(--line); border-radius:9px; padding:10px 14px; margin-bottom:6px; font-family:"Amiri",serif; font-size:18px; color:var(--ink); cursor:pointer}
+  .hooks p{font-size:12px; color:var(--muted); margin:0 0 6px}
+  .hook{display:block; width:100%; text-align:start; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px 12px; margin-bottom:5px; font-family:"Amiri",serif; font-size:17px; color:var(--ink); cursor:pointer}
   .hook:hover{border-color:var(--primary); background:var(--primary-soft)}
 
   /* بطاقة الجودة */
-  .card{display:none; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); padding:18px 20px; gap:20px; align-items:flex-start}
+  .card{display:none; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); padding:12px 14px; gap:14px; align-items:flex-start}
   .card.on{display:flex}
-  .ring{--p:0; --c:var(--ok); position:relative; width:78px; height:78px; border-radius:50%; flex:none; display:grid; place-items:center; font-size:22px; font-weight:700; color:var(--ink);
+  .ring{--p:0; --c:var(--ok); position:relative; width:64px; height:64px; border-radius:50%; flex:none; display:grid; place-items:center; font-size:19px; font-weight:700; color:var(--ink);
         background:conic-gradient(var(--c) calc(var(--p)*1%), var(--line) 0)}
-  .ring::before{content:""; position:absolute; width:62px; height:62px; border-radius:50%; background:#fff}
+  .ring::before{content:""; position:absolute; width:50px; height:50px; border-radius:50%; background:#fff}
   .ring span{position:relative}
   .ring.good{--c:var(--ok)} .ring.mid{--c:#DC6803} .ring.low{--c:var(--bad)}
   .card .info{flex:1; min-width:0}
-  .card h3{margin:0 0 10px; font-size:13px; font-weight:600; color:var(--muted)}
-  .chips{list-style:none; margin:0; padding:0; display:flex; flex-wrap:wrap; gap:6px}
-  .chip{font-size:12px; font-weight:500; padding:4px 10px; border-radius:999px; border:1px solid var(--line); color:var(--ink-2); background:#fff}
+  .card h3{margin:0 0 8px; font-size:12px; font-weight:600; color:var(--muted)}
+  .chips{list-style:none; margin:0; padding:0; display:flex; flex-wrap:wrap; gap:5px}
+  .chip{font-size:11.5px; font-weight:500; padding:3px 8px; border-radius:999px; border:1px solid var(--line); color:var(--ink-2); background:#fff}
   .chip.ok{background:var(--ok-bg); border-color:var(--ok-line); color:var(--ok)} .chip.ok::before{content:"✓ "}
   .chip.bad{background:var(--bad-bg); border-color:var(--bad-line); color:var(--bad)} .chip.bad::before{content:"✗ "}
-  .chip small{opacity:.8; margin-inline-start:4px; font-weight:400}
-  .cardnote{font-size:12.5px; color:var(--muted); margin:10px 0 0}
+  .chip small{opacity:.8; margin-inline-start:3px; font-weight:400}
+  .cardnote{font-size:11.5px; color:var(--muted); margin:8px 0 0}
 
-  .seedbox{font-size:13px; color:var(--ink-2); display:none}
-  .seedbox summary{cursor:pointer; color:var(--primary); font-weight:600; font-size:13.5px}
-  .seedbox ul{margin:8px 0 0; padding-inline-start:18px; line-height:1.9}
-  .seedbox h4{margin:14px 0 0; font-size:12px; font-weight:600; color:var(--muted)}
+  .seedbox{font-size:12.5px; color:var(--ink-2); display:none}
+  .seedbox summary{cursor:pointer; color:var(--primary); font-weight:600; font-size:12.5px}
+  .seedbox ul{margin:6px 0 0; padding-inline-start:16px; line-height:1.8}
+  .seedbox h4{margin:10px 0 0; font-size:11px; font-weight:600; color:var(--muted)}
 
   /* المحفوظات */
-  .shelf .head{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px}
-  .shelf .head h2{margin:0; flex:1}
-  .shelf input{width:auto; min-width:190px; font-size:13px; padding:7px 10px}
-  .shelf a{color:var(--ink-2); font-size:12.5px; font-weight:500; text-decoration:none; border:1px solid var(--line-2); border-radius:8px; padding:6px 10px; background:#fff}
+  .shelf .head{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+  .shelf h2{margin:0; flex:1; font-size:14px; font-weight:700}
+  .shelf input{width:auto; min-width:160px; font-size:12.5px; padding:6px 9px; flex:1 1 160px}
+  .shelf a{color:var(--ink-2); font-size:12px; font-weight:500; text-decoration:none; border:1px solid var(--line-2); border-radius:7px; padding:6px 9px; background:#fff; white-space:nowrap}
   .shelf a:hover{color:var(--primary); border-color:var(--primary)}
-  .saved{border-top:1px solid var(--line); padding:14px 0; display:flex; gap:14px; align-items:flex-start}
-  .saved .txt{flex:1; font-family:"Amiri",serif; font-size:17px; line-height:1.8; color:var(--ink); max-height:3.6em; overflow:hidden; cursor:pointer}
+  .saved{border-top:1px solid var(--line); padding:10px 0; display:flex; gap:12px; align-items:flex-start}
+  .saved:first-child{border-top:0}
+  #shelf{margin-top:8px}
+  .saved .txt{flex:1; font-family:"Amiri",serif; font-size:16px; line-height:1.75; color:var(--ink); max-height:3.5em; overflow:hidden; cursor:pointer; min-width:0}
   .saved .txt:hover{color:var(--primary)}
-  .saved .side{display:flex; flex-direction:column; align-items:flex-end; gap:4px; font-size:12px; color:var(--muted); white-space:nowrap}
+  .saved .side{display:flex; flex-direction:column; align-items:flex-end; gap:3px; font-size:11.5px; color:var(--muted); white-space:nowrap}
   .saved .badge{color:var(--ok); font-weight:600}
-  .saved button{background:none; border:0; color:var(--muted); cursor:pointer; font-family:inherit; font-size:12.5px; padding:0}
+  .saved button{background:none; border:0; color:var(--muted); cursor:pointer; font-family:inherit; font-size:12px; padding:0}
   .saved button:hover{color:var(--primary)}
-  .empty{color:var(--muted); font-size:13.5px; margin:8px 0 0}
+  .empty{color:var(--muted); font-size:12.5px; margin:8px 0 0}
 
-  @media (max-width:640px){
-    .wrap{padding:0 14px 60px}
-    .sheet{padding:20px 18px 18px} .sheet .body{font-size:19px}
-    .steps li{font-size:0} .steps li::before{font-size:11px}   /* أرقام فقط على الشاشات الضيقة */
-    .steps li.active{font-size:12.5px}
-    .grid{grid-template-columns:1fr}
-  }
   @media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
   :focus-visible{outline:2px solid var(--primary); outline-offset:2px}
 </style>
@@ -1579,181 +1799,152 @@ PAGE = r"""<!doctype html>
 <div class="wrap">
 
   <header class="top">
-    <div class="brand"><span class="logo"></span>مِسنّ القصص <span class="ver">__VER__</span></div>
+    <div class="brand"><span class="logo"></span>مِسنّ القصص <span class="ver">__VER__</span>
+      <span class="tagline">منشورات قصصية بورقة حقائق، تدقيق، وفحوصات جودة</span></div>
     <div class="pill" id="engine">مجاني بلا مفتاح</div>
   </header>
 
-  <div class="layout">
-
-    <aside class="side">
-      <section class="panel">
-        <h2>الإعدادات</h2>
-        <div class="grid">
-          <div class="full">
-            <label for="topic">موضوع أو موقف (اختياري — اتركه فارغًا ليختار المحرّك)</label>
-            <textarea id="topic" rows="2" placeholder="مثال: شي صار في مكتب محامي، أو سر طلع من كشف حساب"></textarea>
-          </div>
-          <div>
-            <label for="format">الشكل</label>
-            <select id="format" data-keep>
-              <option value="short">قصير · 85 كلمة</option>
-              <option value="medium" selected>متوسط · 140 كلمة</option>
-              <option value="long">طويل · 230 كلمة</option>
-              <option value="thread">خيط مرقّم</option>
-            </select>
-          </div>
-          <div>
-            <label for="dialect">اللهجة</label>
-            <select id="dialect" data-keep>
-              <option value="saudi" selected>سعودية بيضاء</option>
-              <option value="gulf">خليجية</option>
-              <option value="egy">مصرية</option>
-              <option value="sham">شامية</option>
-              <option value="fusha">فصحى مبسّطة</option>
-            </select>
-          </div>
-          <div>
-            <label for="core">نوع الموقف</label>
-            <select id="core" data-keep></select>
-          </div>
-          <div>
-            <label for="drama">حجم الحدث</label>
-            <select id="drama" data-keep>
-              <option value="small">عادي جدًا</option>
-              <option value="mid" selected>متوسط</option>
-              <option value="big">قوي ومعقول</option>
-            </select>
-          </div>
-          <div>
-            <label for="pov">المنشور</label>
-            <select id="pov" data-keep>
-              <option value="self" selected>شخصي · بضمير المتكلم</option>
-              <option value="third">عام · بضمير الغائب</option>
-              <option value="heard">منقول · سمعتها</option>
-            </select>
-          </div>
-          <div>
-            <label for="mode">الوضع</label>
-            <select id="mode" data-keep>
-              <option value="full" selected>متأنٍ · مع تدقيق</option>
-              <option value="fast">سريع · بلا تدقيق</option>
-            </select>
-          </div>
-          <div class="full">
-            <label for="provider">المحرّك</label>
-            <select id="provider" data-keep>
-              <option value="free" selected>مجاني بلا مفتاح</option>
-              <option value="openai">مزوّد خاص (OpenAI / Gemini / متوافق)</option>
-            </select>
-          </div>
-          <div class="full" id="creds" style="display:none">
-            <label for="base">عنوان المزوّد</label>
-            <input id="base" placeholder="https://api.openai.com/v1" data-keep>
-            <label for="key">المفتاح</label>
-            <input id="key" type="password" placeholder="sk-…" autocomplete="off">
-            <label for="model">اسم النموذج</label>
-            <input id="model" placeholder="gpt-4o-mini" data-keep>
-            <label class="check"><input type="checkbox" id="rememberkey"> تذكّر المفتاح في هذا المتصفح</label>
-            <label for="think">قدر تفكير النموذج</label>
-            <select id="think" data-keep>
-              <option value="">افتراضي الخادم</option>
-              <option value="none">بلا تفكير · الأسرع</option>
-              <option value="minimal">أدنى</option>
-              <option value="low">قليل · موصى به</option>
-              <option value="medium">متوسط</option>
-              <option value="high">عالٍ · الأبطأ</option>
-            </select>
-            <p class="hint">للنماذج المفكّرة مثل Gemini. يُهمل تلقائيًا إن لم يعرفه المزوّد.</p>
-          </div>
+  <section class="panel settings">
+    <div class="f topic">
+      <label for="topic">موضوع أو موقف (اختياري)</label>
+      <input id="topic" placeholder="مثال: شي صار في مكتب محامي، أو سر طلع من كشف حساب — اتركه فارغًا ليختار المحرّك">
+    </div>
+    <div class="controls">
+      <div class="f"><label for="core">نوع الموقف</label><select id="core" data-keep></select></div>
+      <div class="f"><label for="format">الشكل</label>
+        <select id="format" data-keep>
+          <option value="short">قصير · 85 كلمة</option>
+          <option value="medium" selected>متوسط · 140 كلمة</option>
+          <option value="long">طويل · 230 كلمة</option>
+          <option value="thread">خيط مرقّم</option>
+        </select></div>
+      <div class="f"><label for="dialect">اللهجة</label>
+        <select id="dialect" data-keep>
+          <option value="saudi" selected>سعودية بيضاء</option>
+          <option value="gulf">خليجية</option>
+          <option value="egy">مصرية</option>
+          <option value="sham">شامية</option>
+          <option value="fusha">فصحى مبسّطة</option>
+        </select></div>
+      <div class="f"><label for="pov">المنشور</label>
+        <select id="pov" data-keep>
+          <option value="self" selected>شخصي · متكلم</option>
+          <option value="third">عام · غائب</option>
+          <option value="heard">منقول · سمعتها</option>
+        </select></div>
+      <div class="f"><label for="drama">حجم الحدث</label>
+        <select id="drama" data-keep>
+          <option value="small">عادي جدًا</option>
+          <option value="mid" selected>متوسط</option>
+          <option value="big">قوي ومعقول</option>
+        </select></div>
+      <div class="f"><label for="mode">الوضع</label>
+        <select id="mode" data-keep>
+          <option value="full" selected>متأنٍ · مع تدقيق</option>
+          <option value="fast">سريع · بلا تدقيق</option>
+        </select></div>
+      <div class="f provider"><label for="provider">المحرّك</label>
+        <select id="provider" data-keep>
+          <option value="free" selected>مجاني بلا مفتاح</option>
+          <option value="openai">مزوّد خاص</option>
+        </select></div>
+      <div id="creds" style="display:none">
+        <div class="f"><label for="base">عنوان المزوّد (OpenAI / Gemini / متوافق)</label><input id="base" placeholder="https://api.openai.com/v1" data-keep></div>
+        <div class="f"><label for="key">المفتاح</label><input id="key" type="password" placeholder="sk-…" autocomplete="off"></div>
+        <div class="f"><label for="model">النموذج</label><input id="model" placeholder="gpt-4o-mini" data-keep></div>
+        <div class="f"><label for="think">قدر التفكير</label>
+          <select id="think" data-keep>
+            <option value="">افتراضي الخادم</option>
+            <option value="none">بلا · الأسرع</option>
+            <option value="minimal">أدنى</option>
+            <option value="low">قليل · موصى به</option>
+            <option value="medium">متوسط</option>
+            <option value="high">عالٍ · الأبطأ</option>
+          </select></div>
+        <div class="wide">
+          <label class="check"><input type="checkbox" id="rememberkey"> تذكّر المفتاح في هذا المتصفح</label>
+          <p class="hint">قدر التفكير للنماذج المفكّرة مثل Gemini، ويُهمل تلقائيًا إن لم يعرفه المزوّد.</p>
         </div>
-
-        <div class="actions">
-          <button class="btn primary" id="run">اكتب قصة</button>
-          <div class="row">
-            <button class="btn secondary" id="again" disabled title="نفس البذرة، حبكة ونص جديدان">أعد بنفس البذرة</button>
-            <button class="btn danger" id="cancel" style="display:none">إلغاء</button>
-          </div>
-          <p class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> للكتابة · <kbd>Esc</kbd> للإلغاء</p>
-        </div>
-      </section>
-
-      <details class="panel seedpanel" id="seedpanel">
-        <summary>البذرة — اتركها عشوائية أو ثبّت ما تريد</summary>
-        <div class="grid">
-          <div><label for="seed_who">الطرف الآخر</label><select id="seed_who"></select></div>
-          <div><label for="seed_secret">السر</label><select id="seed_secret"></select></div>
-          <div><label for="seed_device">أداة الكشف</label><select id="seed_device"></select></div>
-          <div><label for="seed_place">مكان الكشف</label><select id="seed_place"></select></div>
-          <div><label for="seed_cost">الثمن</label><select id="seed_cost"></select></div>
-          <div><label for="seed_dilemma">النهاية</label><select id="seed_dilemma"></select></div>
-          <div class="full"><label for="seed_open">نمط السطر الأول</label><select id="seed_open"></select></div>
-        </div>
-        <p class="hint">ما تثبّته هنا يبقى كما هو في كل القصص القادمة؛ الباقي يتبدّل عشوائيًا ويتجنّب التركيبات المحفوظة.</p>
-      </details>
-    </aside>
-
-    <section class="main">
-      <div class="hero-card">
-        <p class="hero" id="hero"><span class="caret"></span></p>
-        <p class="sub">منشورات قصصية مؤلَّفة بأسلوب من عاشها وكتبها على جواله: سطر أول عادي، كشف في النصف
-           الثاني، ومعضلة في الآخر. المحرّك يولّد خمس حبكات بورقة حقائق ثابتة، يستبعد المتداول، يكتب،
-           يشدّ كل سطر، يدقّق الأرقام والمنطق، ثم يمرّر النص على نحو عشرة فحوصات محلية ويصقل ما رسب.</p>
       </div>
+    </div>
 
-      <div class="progress">
-        <ol class="steps" id="steps" aria-hidden="true">
-          <li data-s="premise" data-n="1">حبكة</li>
-          <li data-s="draft" data-n="2">مسودة</li>
-          <li data-s="edit" data-n="3">تحرير</li>
-          <li data-s="audit" data-n="4">تدقيق</li>
-          <li data-s="polish" data-n="5" class="hidden">صقل</li>
-        </ol>
-        <p class="state" aria-live="polite"><span id="state">جاهز.</span><span id="elapsed" class="elapsed"></span></p>
+    <details class="seedpanel" id="seedpanel">
+      <summary>البذرة <span class="n">— اتركها عشوائية أو ثبّت ما تريد</span></summary>
+      <div class="controls">
+        <div class="f"><label for="seed_who">الطرف الآخر</label><select id="seed_who"></select></div>
+        <div class="f"><label for="seed_secret">السر</label><select id="seed_secret"></select></div>
+        <div class="f"><label for="seed_device">أداة الكشف</label><select id="seed_device"></select></div>
+        <div class="f"><label for="seed_place">مكان الكشف</label><select id="seed_place"></select></div>
+        <div class="f"><label for="seed_cost">الثمن</label><select id="seed_cost"></select></div>
+        <div class="f"><label for="seed_dilemma">النهاية</label><select id="seed_dilemma"></select></div>
+        <div class="f"><label for="seed_open">نمط السطر الأول</label><select id="seed_open"></select></div>
       </div>
+    </details>
 
-      <article class="sheet" id="sheet">
-        <div class="tag" id="tag"></div>
-        <div class="body" id="story"></div>
-        <div class="hooks" id="hooks">
-          <p>اختر افتتاحية بديلة لتحلّ محل السطر الأول</p>
-          <div id="hooklist"></div>
-        </div>
-        <div class="foot">
-          <span id="meta" class="grow"></span>
-          <button class="act" id="rehook">بدائل للافتتاحية</button>
-          <button class="act" id="save">احفظ</button>
-          <button class="act solid" id="copy">انسخ النص</button>
-        </div>
-      </article>
+    <div class="actions">
+      <button class="btn primary" id="run">اكتب قصة</button>
+      <button class="btn secondary" id="again" disabled title="نفس البذرة، حبكة ونص جديدان">أعد بنفس البذرة</button>
+      <button class="btn danger" id="cancel" style="display:none">إلغاء</button>
+      <p class="hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> للكتابة · <kbd>Esc</kbd> للإلغاء</p>
+    </div>
+  </section>
 
+  <section class="progress">
+    <ol class="steps" id="steps" aria-hidden="true">
+      <li data-s="premise" data-n="1">حبكة</li>
+      <li data-s="draft" data-n="2">مسودة</li>
+      <li data-s="edit" data-n="3">تحرير</li>
+      <li data-s="audit" data-n="4">تدقيق</li>
+      <li data-s="polish" data-n="5" class="hidden">صقل</li>
+    </ol>
+    <p class="state" aria-live="polite"><span id="state">جاهز.</span><span id="elapsed" class="elapsed"></span></p>
+  </section>
+
+  <div class="results">
+    <article class="sheet" id="sheet">
+      <div class="tag" id="tag"></div>
+      <p class="placeholder" id="hero"><span class="caret"></span></p>
+      <div class="body" id="story"></div>
+      <div class="hooks" id="hooks">
+        <p>اختر افتتاحية بديلة لتحلّ محل السطر الأول</p>
+        <div id="hooklist"></div>
+      </div>
+      <div class="foot">
+        <span id="meta" class="grow"></span>
+        <button class="act" id="rehook">بدائل للافتتاحية</button>
+        <button class="act" id="save">احفظ</button>
+        <button class="act solid" id="copy">انسخ النص</button>
+      </div>
+    </article>
+
+    <aside class="aside">
       <section class="card" id="card">
         <div class="ring" id="ring"><span id="ringval">0</span></div>
         <div class="info">
-          <h3>بطاقة الجودة — فحوصات محلية لا تعتمد على النموذج</h3>
+          <h3>بطاقة الجودة — فحوصات محلية</h3>
           <ul class="chips" id="chips"></ul>
           <p class="cardnote" id="cardnote"></p>
         </div>
       </section>
-
       <details class="panel seedbox" id="seedbox">
         <summary>بذرة هذه القصة، وورقة الحقائق، وما أصلحه المدقّق</summary>
         <h4>البذرة</h4><ul id="seedlist"></ul>
         <h4>ورقة الحقائق</h4><ul id="factlist"></ul>
         <h4>المدقّق</h4><ul id="auditbox"></ul>
       </details>
-
-      <section class="panel shelf">
-        <div class="head">
-          <h2>المحفوظات</h2>
-          <input id="search" placeholder="ابحث في المحفوظات">
-          <a href="/library/export?fmt=md" download>تصدير Markdown</a>
-          <a href="/library/export?fmt=txt" download>تصدير نصي</a>
-        </div>
-        <div id="shelf"><p class="empty">لا شيء محفوظ بعد.</p></div>
-      </section>
-    </section>
-
+    </aside>
   </div>
+
+  <section class="panel shelf">
+    <div class="head">
+      <h2>المحفوظات</h2>
+      <input id="search" placeholder="ابحث في المحفوظات">
+      <a href="/library/export?fmt=md" download>تصدير Markdown</a>
+      <a href="/library/export?fmt=txt" download>تصدير نصي</a>
+    </div>
+    <div id="shelf"><p class="empty">لا شيء محفوظ بعد.</p></div>
+  </section>
+
 </div>
 
 <script>
@@ -1774,7 +1965,7 @@ const STAGE = { seed:'يركّب البذرة',
 const TAG = { draft:'مسودة أولى', edit:'التحرير', audit:'التدقيق', polish:'الصقل', hook:'الافتتاحية' };
 const ORDER = ['premise','draft','edit','audit','polish'];
 
-/* لحظة واحدة متحركة: السطر الأول يُكتب أمام القارئ */
+/* سطر يُكتب أمام القارئ في الورقة الفارغة */
 (function type(i = 0) {
   const hero = $('hero');
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -1833,6 +2024,11 @@ function state(msg, bad) {
   $('state').classList.toggle('bad', !!bad);
 }
 
+function setStory(text) {
+  $('story').textContent = text;
+  $('sheet').classList.toggle('has', !!text);
+}
+
 function steps(stage) {
   const idx = ORDER.indexOf(stage === 'hook' ? 'polish' : stage);
   document.querySelectorAll('#steps li').forEach(li => {
@@ -1869,7 +2065,7 @@ async function run(seed) {
   document.querySelectorAll('#steps li').forEach(li => { li.classList.remove('done','active'); if (li.dataset.s === 'polish') li.classList.add('hidden'); });
   steps('seed');
   state(STAGE.seed);
-  if (window.innerWidth < 980) $('sheet').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (window.innerWidth < 900) $('sheet').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   let job;
   try {
@@ -1922,13 +2118,8 @@ function stop() {
 }
 
 function apply(m) {
-  if (m.text !== undefined) {
-    $('story').textContent = m.text;
-    if (m.text) $('sheet').classList.add('on');
-  } else if (m.append) {
-    $('story').textContent += m.append;
-    $('sheet').classList.add('on');
-  }
+  if (m.text !== undefined) setStory(m.text);
+  else if (m.append) setStory($('story').textContent + m.append);
   if (!m.state) return;
   const j = m.state;
   steps(j.stage);
@@ -1942,7 +2133,6 @@ function apply(m) {
     current.facts = j.facts || [];
     current.score = j.score || 0;
     $('tag').textContent = 'النص النهائي'; $('tag').classList.remove('live');
-    $('sheet').classList.add('on');
     $('meta').textContent = j.words + ' كلمة · ' + (j.numbers || 0) + ' رقم محدد · جودة ' + (j.score || 0) + '٪';
     renderCard(j);
     showSeed(j.dna || current.dna, j.facts || [], j.issues || []);
@@ -2054,7 +2244,7 @@ $('rehook').onclick = async () => {
       b.onclick = () => {
         const rest = (current.text || $('story').textContent).split('\n').slice(1).join('\n');
         current.text = h + '\n' + rest;
-        $('story').textContent = current.text;
+        setStory(current.text);
         $('hooks').classList.remove('on');
       };
       $('hooklist').appendChild(b);
@@ -2089,13 +2279,12 @@ function drawShelf() {
     txt.onclick = () => {
       stop(); finished = true; busy(false);
       current = { text: it.text, dna: it.dna, plot: it.plot || '', facts: it.facts || [], score: it.score || 0, job: null };
-      $('story').textContent = it.text;
+      setStory(it.text);
       $('tag').textContent = 'من المحفوظات'; $('tag').classList.remove('live');
       $('meta').textContent = (it.score ? 'جودة ' + it.score + '٪' : '');
       $('card').classList.remove('on');
-      $('sheet').classList.add('on');
       if (it.dna) showSeed(it.dna, it.facts || [], []);
-      window.scrollTo({ top: $('sheet').offsetTop - 20, behavior: 'smooth' });
+      window.scrollTo({ top: $('sheet').offsetTop - 12, behavior: 'smooth' });
     };
     cp.onclick = async () => {
       try { await navigator.clipboard.writeText(it.text); cp.textContent = 'نُسخ'; setTimeout(() => cp.textContent = 'انسخ', 1400); } catch (e) {}

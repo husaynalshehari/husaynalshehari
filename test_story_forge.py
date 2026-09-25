@@ -170,6 +170,21 @@ class Helpers(unittest.TestCase):
         self.assertIn("28 ثانية", msg)
         self.assertEqual(sf.provider_error("نص عادي"), "نص عادي")
 
+    def test_seed_pools_are_large_and_free_of_duplicates(self):
+        pools = {"WHO": sf.WHO, "SECRET_DARK": sf.SECRET_DARK, "SECRET_LIGHT": sf.SECRET_LIGHT,
+                 "DEVICE": sf.DEVICE, "PLACE": sf.PLACE, "COST_DARK": sf.COST_DARK,
+                 "COST_LIGHT": sf.COST_LIGHT, "DILEMMA": sf.DILEMMA, "CLOSERS": sf.CLOSERS,
+                 "TIRED_PLOTS": sf.TIRED_PLOTS}
+        for name, pool in pools.items():
+            self.assertEqual(len(pool), len(set(pool)), f"تكرار في {name}")
+        self.assertGreaterEqual(len(sf.WHO), 60)
+        self.assertGreaterEqual(len(sf.SECRET_DARK) + len(sf.SECRET_LIGHT), 80)
+        self.assertGreaterEqual(len(sf.DEVICE), 35)
+        self.assertGreaterEqual(len(sf.CORES), 40)
+        self.assertGreaterEqual(len(sf.OPEN_STYLES), 7)
+        grouped = [k for _, keys in sf.CORE_GROUPS for k in keys]
+        self.assertEqual(sorted(grouped), sorted(sf.CORES), "كل نوع موقف يجب أن يظهر في مجموعة واحدة")
+
     def test_best_hook_filters_questions_and_clashes(self):
         prev = ["دفعت حساب القهوة وطلعت من المطعم بسرعة"]
         hooks = ["ليش صار كذا؟", "دفعت حساب القهوة وطلعت من المطعم", "فتحت الظرف وأنا واقف عند الباب"]
