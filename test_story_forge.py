@@ -526,9 +526,13 @@ class Info(unittest.TestCase):
         self.assertGreaterEqual(job["score"], 70)
 
     def test_info_thread_ends_part_one_with_cut_shocking_bait(self):
-        filler = "\n\n".join("سطر تمهيد فيه تفصيل يومي يعرفه كل بيت ويطوّل الجزء الأول شوي." for _ in range(3))
         bait = "الشي اللي تسويه كل يوم عشان يسكت هو بالضبط اللي بيخليه بعد 10 سنين.."
-        thread = ("ليش عقل طفلك ما يصير عميق؟\n\n" + filler + "\n\n" + bait +
+        hook = "ليش عقل طفلك ما يصير عميق؟"
+        lines = []                                   # تمهيد بقدر ما يوصل الجزء الأول إلى 250–280
+        while len("\n\n".join([hook, *lines, bait])) < sf.THREAD_FIRST_MIN:
+            lines.append("تفصيل يومي يعرفه كل بيت.")
+        filler = "\n\n".join(lines)
+        thread = (hook + "\n\n" + filler + "\n\n" + bait +
                   "\n\n---\n\n..ينهار أول ما يواجه مشكلة بدون شاشة.\n\nالمقصود: الملل يدفع الدماغ يخترع.\n\n"
                   "1. نص ساعة بلا شاشة.\n\n2. اسأله رأيه.\n\n3. خله يشوفك تقرأ.\n\nجرّبها اليوم.")
         ids = {c["id"]: c for c in sf.run_checks(thread, "thread", "self", "closer", [], kind="info")}
