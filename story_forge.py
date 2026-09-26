@@ -47,7 +47,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "4.6"
+VERSION = "4.7"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -633,7 +633,7 @@ HARM_RE = re.compile(r"اضربها|اضربه|يضربها|ضربها|اقتل�
 
 # الفحوصات التي يستحق رسوبها نداءً إضافيًا للصقل؛ الباقي إرشادي يظهر في البطاقة فقط
 CRITICAL = {"words", "numbers", "cliches", "pov", "facts", "ending", "thread", "cliff", "first", "clean", "dialect",
-            "points", "hedge", "faith", "gender", "harm"}
+            "points", "hedge", "faith", "gender", "harm", "reach"}
 
 AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 TASHKEEL = re.compile(r"[ً-ْٰـ]")
@@ -654,25 +654,31 @@ def recent_dna(limit=30):
     return out
 
 
-def fresh_dna(topic="", core="betrayal", seed=None, avoid=()):
-    """يركّب بذرة جديدة. ما يثبّته المستخدم في seed يبقى كما هو ويُعلَّم كثابت."""
+def fresh_dna(topic="", core="betrayal", seed=None, avoid=(), reach="global"):
+    """يركّب بذرة جديدة. ما يثبّته المستخدم في seed يبقى كما هو ويُعلَّم كثابت.
+    في الوضع العالمي تُستبعد عناصر البذرة ذات المراجع المحلية."""
     label, desc, pool, ending = CORES.get(core, CORES["betrayal"])
+
+    def ok(items):
+        kept = [i for i in items if not LOCAL_RE.search(i)] if reach == "global" else list(items)
+        return kept or list(items)
     if pool == "any":
         pool = random.choice(("dark", "light"))
     seed = {k: str(v).strip()[:120] for k, v in (seed or {}).items()
             if k in SEED_KEYS and str(v).strip()}
     if seed.get("open") not in OPEN_STYLES:
         seed.pop("open", None)
-    secrets = SECRET_DARK if pool == "dark" else SECRET_LIGHT
-    costs = COST_DARK if pool == "dark" else COST_LIGHT
-    endings = DILEMMA if ending == "dilemma" else CLOSERS
+    secrets = ok(SECRET_DARK if pool == "dark" else SECRET_LIGHT)
+    costs = ok(COST_DARK if pool == "dark" else COST_LIGHT)
+    endings = ok(DILEMMA if ending == "dilemma" else CLOSERS)
+    places, devices = ok(PLACE), ok(DEVICE)
     avoid = set(avoid)
     dna = {
         "who": seed.get("who") or random.choice(
-            [w for t in CORE_WHO.get(core, ()) for w in WHO_TAGS[t]] or WHO),
+            ok([w for t in CORE_WHO.get(core, ()) for w in WHO_TAGS[t]] or WHO)),
         "secret": seed.get("secret") or random.choice(secrets),
-        "device": seed.get("device") or random.choice(DEVICE),
-        "place": seed.get("place") or random.choice(PLACE),
+        "device": seed.get("device") or random.choice(devices),
+        "place": seed.get("place") or random.choice(places),
         "cost": seed.get("cost") or random.choice(costs),
         "dilemma": seed.get("dilemma") or random.choice(endings),
         "open": seed.get("open") or random.choices(
@@ -683,8 +689,8 @@ def fresh_dna(topic="", core="betrayal", seed=None, avoid=()):
         return (d["who"], d["secret"], d["device"]) in avoid
 
     # تركيبة مستعملة في المحفوظات؟ بدّل محورًا واحدًا غير مثبّت حتى تصير جديدة
-    who_pool = [w for t in CORE_WHO.get(core, ()) for w in WHO_TAGS[t]] or WHO
-    for key, pool in (("device", DEVICE), ("secret", secrets), ("who", who_pool)):
+    who_pool = ok([w for t in CORE_WHO.get(core, ()) for w in WHO_TAGS[t]] or WHO)
+    for key, pool in (("device", devices), ("secret", secrets), ("who", who_pool)):
         if not used(dna):
             break
         if key in seed:
@@ -698,6 +704,7 @@ def fresh_dna(topic="", core="betrayal", seed=None, avoid=()):
         dna["locked"] = [k for k in SEED_KEYS if k in seed]
     if topic:
         dna["topic"] = topic.strip()[:300]
+    dna["reach"] = reach if reach in REACH else "global"
     return dna
 
 
@@ -956,6 +963,31 @@ HEAT = {
 }
 
 
+# الانتشار: عالمي = موقف يفهمه أي إنسان في أي بلد، بلا مراجع محلية ضيقة
+REACH = {
+    "global": ("عالمي",
+               "المنشور موجّه لقارئ في أي بلد: الموقف إنساني عام (أب، أم، أخ، زوج، صديق، مدير، جار، "
+               "دين، ورث، مرض، خيانة، طفل) يعرفه الأمريكي والهندي والمصري بنفس القوة. ممنوع "
+               "المراجع المحلية الضيقة: أسماء عملات محلية (اكتب «40 ألف» بلا عملة أو «دولار»)، "
+               "المجالس والأعراس بتفاصيلها المحلية، المهور، القبيلة، جهات وتطبيقات حكومية "
+               "محلية، أسماء مدن وأحياء، أكلات ومناسبات محلية. الأماكن عامة: مستشفى، بنك، "
+               "مكتب محامٍ، مطار، مطعم، بيت الأهل. اللهجة تبقى كما طُلبت لكن المضمون عالمي."),
+    "local": ("محلي",
+              "المنشور موجّه لقارئ محلي: التفاصيل المحلية (المجلس، العزاء، المهر، الريال، "
+              "الأحياء) مرحّب بها لأنها تزيد الصدق."),
+}
+# مراجع محلية تُستبعد من البذرة والنص في الوضع العالمي
+LOCAL_RE = re.compile(r"ريال|درهم|دينار|جنيه|مجلس|عزاء|عرس|أعراس|مهر|كاتب العدل|قبيلة|قبلية|أبشر|"
+                      r"توكلنا|بقالة|مزرعة|كوشة|الحج|رمضان|العيد|بيت شعر|ديوانية|استراحة|ثوب|شماغ|"
+                      r"عبايتها|عباية|جدة|الرياض|الدمام|الشرقية|القصيم|المدينة|مكة|كبسة|جريش|"
+                      r"صالة عرس|محل الذهب|جمعية|الدورة العسكرية")
+
+
+def reach_block(reach):
+    label, rules = REACH.get(reach, REACH["global"])
+    return f"نطاق الانتشار ({label}): {rules}"
+
+
 def heat_block(heat):
     label, rules = HEAT.get(heat, HEAT["hot"])
     return f"حرارة الخطاف ({label}): {rules}"
@@ -1030,6 +1062,8 @@ def premise_prompt(dna, core, drama, avoid_plots):
         "ابنِ كل فكرة على هذه العناصر، وإن تعارض عنصر مع نوع الموقف فعدّله ليخدم النوع:",
         dna_text(dna),
         "",
+        reach_block(dna.get("reach", "global")),
+        "",
         "لكل فكرة أعطِ:",
         "- hook: سطر أول مقترح، موقف عادي من ٦ إلى ١٢ كلمة، بلا سؤال وبلا تشويق.",
         "- hidden: ما المخفي وكيف انكشف، في جملتين محددتين.",
@@ -1100,6 +1134,8 @@ def write_prompt(dna, idea, fmt, dialect, core, pov, drama, heat="hot"):
         "",
         heat_block(heat),
         "",
+        reach_block(dna.get("reach", "global")),
+        "",
         VIRAL,
         "",
         beats(pov, ending, dna.get("open", "scene")),
@@ -1111,7 +1147,7 @@ def write_prompt(dna, idea, fmt, dialect, core, pov, drama, heat="hot"):
     ])
 
 
-def edit_prompt(fmt, pov, ending, facts, dialect="saudi", heat="hot"):
+def edit_prompt(fmt, pov, ending, facts, dialect="saudi", heat="hot", reach="global"):
     label, low, high = FORMATS.get(fmt, FORMATS["medium"])
     closing = ("آخر سطر: سؤال يسأله لنفسه بخيارين محددين متناقضين بصيغة «أسوي كذا "
                "ولا كذا؟» وعلامة استفهام. لا مخاطبة للقارئ ولا دعوة تعليق."
@@ -1149,6 +1185,7 @@ def edit_prompt(fmt, pov, ending, facts, dialect="saudi", heat="hot"):
         f"اللهجة: {DIALECT_HINT.get(dialect, DIALECT_HINT['saudi'])} إن كانت المسودة "
         "بالفصحى فحوّلها إلى اللهجة المطلوبة جملةً جملة.",
         "احذف أي عبارة جاهزة أو مألوفة واستبدلها بتفصيل محدد.",
+        reach_block(reach),
     ]
     return ("أنت محرّر منشورات. أمامك مسودة. أعد كتابتها أقوى بنفس الحكاية.\n"
             "افعل هذا بالترتيب:\n"
@@ -1533,7 +1570,7 @@ def info_system_prompt(dialect, kind="info"):
     return topic_cfg(kind)["craft"] + "\nاللهجة: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
 
 
-def fresh_info(domain, angle, topic="", seed=None, kind="info"):
+def fresh_info(domain, angle, topic="", seed=None, kind="info", reach="global"):
     kind = kind if kind in TOPIC_KINDS else "info"
     cfg = topic_cfg(kind)
     seed = {k: str(v).strip()[:120] for k, v in (seed or {}).items() if k in INFO_KEYS and str(v).strip()}
@@ -1547,6 +1584,7 @@ def fresh_info(domain, angle, topic="", seed=None, kind="info"):
         spec["locked"] = [k for k in INFO_KEYS if k in seed]
     if topic:
         spec["topic"] = topic.strip()[:300]
+    spec["reach"] = reach if reach in REACH else "global"
     return spec
 
 
@@ -1573,6 +1611,8 @@ def info_premise_prompt(spec, avoid_claims):
         "كل فكرة يجب أن تكون من هذا المجال وهذه الزاوية تحديدًا.",
         "",
         info_text(spec),
+        "",
+        reach_block(spec.get("reach", "global")),
         "",
         "لكل فكرة أعطِ:",
         f"- hook: السطر الأول، {cfg['hook']}، من ٦ إلى ١٤ كلمة.",
@@ -1681,6 +1721,8 @@ def info_write_prompt(spec, idea, fmt, dialect, heat="hot"):
         "",
         heat_block(heat),
         "",
+        reach_block(spec.get("reach", "global")),
+        "",
         info_beats(fmt, spec.get("kind", "info")),
         "",
         "ممنوع استعمال هذه العبارات أو ما يشبهها:",
@@ -1690,7 +1732,7 @@ def info_write_prompt(spec, idea, fmt, dialect, heat="hot"):
     ])
 
 
-def info_edit_prompt(fmt, facts, dialect, kind="info", heat="hot"):
+def info_edit_prompt(fmt, facts, dialect, kind="info", heat="hot", reach="global"):
     cfg = topic_cfg(kind)
     label, low, high = FORMATS.get(fmt, FORMATS["short"])
     steps = [
@@ -1706,6 +1748,7 @@ def info_edit_prompt(fmt, facts, dialect, kind="info", heat="hot"):
         + (" " + INFO_THREAD_RULES if fmt == "thread" else ""),
         f"اللهجة: {DIALECT_HINT.get(dialect, DIALECT_HINT['saudi'])}",
         "احذف أي عبارة جاهزة وأي حكمة عامة.",
+        reach_block(reach),
     ]
     return (f"أنت محرّر {cfg['noun']}. أمامك مسودة. أعد كتابتها أقوى وأدق بنفس الفكرة.\n"
             "افعل هذا بالترتيب:\n" + "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
@@ -1956,7 +1999,7 @@ def best_hook(hooks, previous):
 
 
 # ------------------------------------------------------------------ الفحوصات
-def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha", kind="story"):
+def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha", kind="story", reach="local"):
     """نحو عشرة فحوصات محلية بلا نموذج. كل فحص يحمل تعليمة إصلاح إن كان الصقل يعالجه.
     المعلومات (kind=info) تتخطى فحوصات السرد: المنظور، الشك، الدليل، سطر الحاضر، شكل النهاية."""
     label, low, high = FORMATS.get(fmt, FORMATS["medium"])
@@ -2052,6 +2095,12 @@ def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha",
                 w in tail for w in ("شاركني", "رأيك", "علّقوا", "تعليق", "الدرس"))
             fix = "النهاية يجب أن تكون لحظة أو قرارًا صغيرًا، لا سؤالًا ولا دعوة للتعليق ولا عبرة."
         add("ending", "شكل النهاية", ok, "", fix)
+
+    if reach == "global":
+        found_local = sorted({m.group(0) for m in LOCAL_RE.finditer(text)})
+        add("reach", "عالمي بلا مراجع محلية", not found_local, "، ".join(found_local),
+            "النص فيه مراجع محلية ضيقة: " + "، ".join(found_local)
+            + " — استبدلها بما يفهمه قارئ في أي بلد (مبلغ بلا عملة، مكان عام، مناسبة عامة).")
 
     sym = bool(re.search(r"[#＃]|[\U0001F300-\U0001FAFF☀-➿]", text))
     add("clean", "بلا رموز ووسوم", not sym, "", "احذف الرموز التعبيرية والوسوم وأي عنوان.")
@@ -2156,7 +2205,7 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
     job["stage"] = "edit"
     job["text"] = ""
     final = clean(chat(
-        [system, {"role": "user", "content": edit_prompt(fmt, pov, ending, facts, dialect, heat)
+        [system, {"role": "user", "content": edit_prompt(fmt, pov, ending, facts, dialect, heat, dna.get("reach", "global"))
                   + "\n\nالمسودة:\n" + draft}],
         provider, creds, on_token=token, temperature=0.75, timeout=200))
     _guard(job)
@@ -2183,7 +2232,8 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
         _guard(job)
 
     # 5. الفحوصات المحلية، ثم جولة صقل واحدة إن رسب فحص جوهري
-    checks = run_checks(final, fmt, pov, ending, facts, prev_openings, dialect)
+    reach = dna.get("reach", "global")
+    checks = run_checks(final, fmt, pov, ending, facts, prev_openings, dialect, reach=reach)
     problems = polish_problems(checks)
     if problems:
         job["stage"] = "polish"
@@ -2194,7 +2244,7 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
                           "content": polish_prompt(problems, fmt, pov, ending, facts, dialect)
                           + "\n\nالنص:\n" + final}],
                 provider, creds, temperature=0.5, timeout=150))
-            new_checks = run_checks(candidate, fmt, pov, ending, facts, prev_openings, dialect)
+            new_checks = run_checks(candidate, fmt, pov, ending, facts, prev_openings, dialect, reach=reach)
             if (score_of(new_checks) >= score_of(checks)
                     and word_count(candidate) >= word_count(final) * 0.6):
                 final, checks = candidate, new_checks
@@ -2212,7 +2262,7 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
             pick = best_hook(make_hooks(final, provider, creds, dialect), prev_openings)
             if pick:
                 final = pick + "\n" + "\n".join(final.split("\n")[1:])
-                checks = run_checks(final, fmt, pov, ending, facts, prev_openings, dialect)
+                checks = run_checks(final, fmt, pov, ending, facts, prev_openings, dialect, reach=reach)
                 job["rehooked"] = True
         except Cancelled:
             raise
@@ -2269,7 +2319,7 @@ def write_info(job, spec, fmt, dialect, provider, creds, mode="full", heat="hot"
     job["stage"] = "edit"
     job["text"] = ""
     final = clean(chat(
-        [system, {"role": "user", "content": info_edit_prompt(fmt, facts, dialect, kind, heat) + "\n\nالمسودة:\n" + draft}],
+        [system, {"role": "user", "content": info_edit_prompt(fmt, facts, dialect, kind, heat, spec.get("reach", "global")) + "\n\nالمسودة:\n" + draft}],
         provider, creds, on_token=token, temperature=0.6, timeout=200))
     _guard(job)
 
@@ -2292,7 +2342,8 @@ def write_info(job, spec, fmt, dialect, provider, creds, mode="full", heat="hot"
             job["issues"] = []
         _guard(job)
 
-    checks = run_checks(final, fmt, "self", "closer", facts, prev_openings, dialect, kind=kind)
+    reach = spec.get("reach", "global")
+    checks = run_checks(final, fmt, "self", "closer", facts, prev_openings, dialect, kind=kind, reach=reach)
     problems = polish_problems(checks)
     if problems:
         job["stage"] = "polish"
@@ -2302,7 +2353,7 @@ def write_info(job, spec, fmt, dialect, provider, creds, mode="full", heat="hot"
                 [system, {"role": "user", "content": info_polish_prompt(problems, fmt, facts, dialect, kind)
                           + "\n\nالنص:\n" + final}],
                 provider, creds, temperature=0.4, timeout=150))
-            new_checks = run_checks(candidate, fmt, "self", "closer", facts, prev_openings, dialect, kind=kind)
+            new_checks = run_checks(candidate, fmt, "self", "closer", facts, prev_openings, dialect, kind=kind, reach=reach)
             if score_of(new_checks) >= score_of(checks) and word_count(candidate) >= word_count(final) * 0.6:
                 final, checks = candidate, new_checks
                 job["polished"] = True
@@ -2404,12 +2455,13 @@ def write():
 
     mode = "fast" if data.get("mode") == "fast" else "full"
     heat = data.get("heat") if data.get("heat") in HEAT else "hot"
+    reach = data.get("reach") if data.get("reach") in REACH else "global"
     seed = data.get("seed") if isinstance(data.get("seed"), dict) else None
     kind = data.get("kind") if data.get("kind") in TOPIC_KINDS else "story"
     if kind != "story":
-        dna = fresh_info(data.get("domain", ""), data.get("angle", ""), data.get("topic", ""), seed, kind)
+        dna = fresh_info(data.get("domain", ""), data.get("angle", ""), data.get("topic", ""), seed, kind, reach)
     else:
-        dna = fresh_dna(data.get("topic", ""), core, seed, avoid=recent_dna())
+        dna = fresh_dna(data.get("topic", ""), core, seed, avoid=recent_dna(), reach=reach)
 
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
@@ -2803,6 +2855,11 @@ PAGE = r"""<!doctype html>
           <option value="mid">متوسط</option>
           <option value="big" selected>قوي ومثبت</option>
         </select></div>
+      <div class="f"><label for="reach">الانتشار</label>
+        <select id="reach" data-keep>
+          <option value="global" selected>عالمي · يفهمه أي قارئ</option>
+          <option value="local">محلي · تفاصيل خليجية</option>
+        </select></div>
       <div class="f"><label for="heat">حرارة الخطاف</label>
         <select id="heat" data-keep>
           <option value="warm">عادي</option>
@@ -2927,7 +2984,7 @@ const SEED_KEYS = ['who','secret','device','place','cost','dilemma','open'];
 const SEED_LABEL = { who:'الطرف الآخر', secret:'السر', device:'أداة الكشف',
                      place:'مكان الكشف', cost:'الثمن', dilemma:'النهاية',
                      open:'نمط السطر الأول', topic:'موضوعك', locked:'مثبّت',
-                     kind:'النوع', domain:'المجال', angle:'الزاوية', frame:'الإطار' };
+                     kind:'النوع', domain:'المجال', angle:'الزاوية', frame:'الإطار', reach:'الانتشار' };
 const TOPIC_HINT = { story: 'مثال: شي صار في مكتب محامي، أو سر طلع من كشف حساب — اتركه فارغًا ليختار المحرّك',
                      info: 'مثال: ليش الأطفال يضعف تفكيرهم، أو وش يصير للجسم لو تركت السكر شهر — اتركه فارغًا ليختار المحرّك',
                      critique: 'مثال: عادة رمي الأكل في الولائم، أو «إن شاء الله» اللي تعني لا — اتركه فارغًا ليختار المحرّك',
@@ -3124,7 +3181,7 @@ async function run(seed) {
       body: JSON.stringify({
         topic: $('topic').value.trim(), format: $('format').value, kind: $('kind').value,
         domain: $('domain').value, angle: $('angle').value,
-        dialect: $('dialect').value, core: $('core').value, mode: $('mode').value, heat: $('heat').value,
+        dialect: $('dialect').value, core: $('core').value, mode: $('mode').value, heat: $('heat').value, reach: $('reach').value,
         pov: $('pov').value, drama: $('drama').value, seed, ...creds()
       })
     });
@@ -3237,6 +3294,7 @@ function showSeed(dna, facts, issues) {
     const sel = { open: 'seed_open', domain: 'domain', angle: 'angle' }[k];
     if (sel) { const o = $(sel).querySelector('option[value="' + v + '"]'); v = o ? o.textContent : v; }
     if (k === 'kind') v = KIND_LABEL[v] || v;
+    if (k === 'reach') v = v === 'global' ? 'عالمي' : 'محلي';
     return (SEED_LABEL[k] || k) + ': ' + v + ((dna.locked || []).includes(k) ? ' (ثابت)' : '');
   }), '');
   list($('factlist'), facts || [], 'لم تُثبَّت حقائق بعد.');

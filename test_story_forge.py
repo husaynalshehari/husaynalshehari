@@ -657,6 +657,29 @@ class Info(unittest.TestCase):
         r = c.post("/write", json={"kind": "story", "heat": "bogus", "mode": "fast"})
         self.assertEqual(sf.JOBS[r.get_json()["job"]]["heat"], "hot")
 
+    def test_global_reach_filters_seeds_prompts_and_checks(self):
+        for _ in range(60):
+            d = sf.fresh_dna("", "betrayal", reach="global")
+            for k in ("who", "secret", "device", "place", "cost", "dilemma"):
+                self.assertFalse(sf.LOCAL_RE.search(d[k]), (k, d[k]))
+        self.assertEqual(sf.fresh_dna()["reach"], "global")
+        self.assertEqual(sf.fresh_dna("", "betrayal", reach="local")["reach"], "local")
+        self.assertEqual(sf.fresh_dna("", "betrayal", {"place": "بمجلس عزاء"}, reach="global")["place"], "بمجلس عزاء")
+        d = sf.fresh_dna("", "betrayal", reach="global")
+        idea = {"hook": "", "hidden": "x", "why_hidden": "", "why_now": "", "evidence": "", "motive": "", "facts": []}
+        self.assertIn("نطاق الانتشار (عالمي)", sf.write_prompt(d, idea, "short", "saudi", "betrayal", "self", "big"))
+        self.assertIn("نطاق الانتشار (محلي)", sf.edit_prompt("short", "self", "dilemma", [], "saudi", "hot", "local"))
+        spec = sf.fresh_info("kids", "why", reach="global")
+        self.assertIn("نطاق الانتشار (عالمي)", sf.info_premise_prompt(spec, []))
+        local_text = STORY.replace("المفتاح لسا في جيبي.", "دفعت 40 ألف ريال في مجلس العزاء.")
+        ids = {c["id"]: c for c in sf.run_checks(local_text, "short", "self", "dilemma", [], reach="global")}
+        self.assertFalse(ids["reach"]["ok"]); self.assertIn("ريال", ids["reach"]["note"])
+        self.assertIn("reach", sf.CRITICAL)
+        self.assertNotIn("reach", {c["id"] for c in sf.run_checks(local_text, "short", "self", "dilemma", [], reach="local")})
+        c = sf.app.test_client(); sf.JOBS.clear(); sf.chat = FakeProvider()
+        r = c.post("/write", json={"reach": "local", "mode": "fast"})
+        self.assertEqual(r.get_json()["dna"]["reach"], "local")
+
     def test_library_keeps_kinds_apart(self):
         sf.lib_write([{"id": "s", "text": STORY, "plot": "قرض", "dna": {"who": "أمي", "secret": "س", "device": "د"}},
                       {"id": "i", "text": INFO_STORY, "plot": "الملل ضروري", "kind": "info", "dna": {"kind": "info"}}])
