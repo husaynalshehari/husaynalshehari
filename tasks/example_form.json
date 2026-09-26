@@ -1,0 +1,15 @@
+{
+  "name": "مثال: تعبئة نموذج لكل صف في ملف CSV",
+  "data": "../data/customers.csv",
+  "steps": [
+    { "action": "goto", "url": "https://httpbin.org/forms/post" },
+    { "action": "fill", "selector": "input[name=custname]", "value": "{{الاسم}}" },
+    { "action": "fill", "selector": "input[name=custtel]", "value": "{{الجوال}}" },
+    { "action": "fill", "selector": "input[name=custemail]", "value": "{{البريد}}" },
+    { "action": "check", "selector": "input[value={{الحجم}}]" },
+    { "action": "fill", "selector": "textarea[name=comments]", "value": "{{ملاحظات}}" },
+    { "action": "click", "selector": "button" },
+    { "action": "wait", "seconds": 1 },
+    { "action": "screenshot", "path": "form-{{الاسم}}.png" }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "مثال: تنزيل تقرير يومي من موقع يحتاج تسجيل دخول",
+  "session": "work",
+  "steps": [
+    { "action": "goto", "url": "https://example.com/dashboard/reports" },
+    { "action": "wait_for", "selector": "#report-table" },
+    { "action": "download", "selector": "text=تصدير", "path": "reports/report-{{date}}.xlsx" },
+    { "action": "screenshot", "path": "reports/dashboard-{{date}}.png" }
+  ]
+}

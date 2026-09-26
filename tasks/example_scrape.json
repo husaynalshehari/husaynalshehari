@@ -1,0 +1,18 @@
+{
+  "name": "مثال: استخراج الاقتباسات وحفظها في CSV",
+  "steps": [
+    { "action": "goto", "url": "https://quotes.toscrape.com/" },
+    { "action": "wait_for", "selector": ".quote" },
+    {
+      "action": "extract",
+      "selector": ".quote",
+      "fields": {
+        "النص": ".text",
+        "الكاتب": ".author",
+        "الرابط": "a@href"
+      },
+      "save": "quotes-{{date}}.csv"
+    },
+    { "action": "screenshot", "path": "quotes-{{date}}.png" }
+  ]
+}
