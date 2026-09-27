@@ -50,7 +50,7 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
-VERSION = "4.8"
+VERSION = "4.9"
 FREE_URL = "https://text.pollinations.ai/openai"
 FREE_MODEL = os.environ.get("STORY_FREE_MODEL", "openai")
 FREE_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "")
@@ -414,6 +414,32 @@ HOOK_RULE = (
     "«أخوي راتبه ضعف راتبي.» — لا مبالغة، ومع ذلك لا يستطيع القارئ أن يتوقف."
 )
 
+# الراوي: رجل افتراضيًا. يدخل في طلب النظام لكل المراحل، ويُفحص محليًا
+NARRATORS = {
+    "male": ("رجل",
+             "صاحب المنشور وكاتبه رجل. كل ما يعود على المتكلم بصيغة المذكر: «كنت متأكد»، "
+             "«رحت»، «أنا تعبان»، «زوجتي»، «طليقتي»، «خطيبتي»، «أبو عيالي» لا يُقال. "
+             "ممنوع أي صيغة مؤنثة للمتكلم مثل «متأكدة»، «خايفة»، «زوجي»، «طليقي»، «خطيبي». "
+             "زاوية النظر زاوية رجل: أب، ابن، أخ، زوج، موظف، صاحب محل."),
+    "female": ("امرأة",
+               "صاحبة المنشور وكاتبته امرأة. كل ما يعود على المتكلمة بصيغة المؤنث: "
+               "«كنت متأكدة»، «أنا تعبانة»، «زوجي»."),
+}
+# صيغ تدل على متكلمة أنثى — تكشف انزلاق الراوي حين يكون رجلًا
+FEM_SELF_RE = re.compile(r"(?:^|\s)(?:زوجي|طليقي|خطيبي|أبو عيالي|زوجي السابق)(?=\s|$|[،.؟!])|"
+                         r"(?:أنا|كنت|صرت|ظليت|بقيت)\s+(?:مو\s+|ما\s+كنت\s+)?"
+                         r"(?:متأكدة|خايفة|زعلانة|تعبانة|مبسوطة|حامل|مصدومة|محتارة|ساكتة|قاعدة|جالسة|"
+                         r"نايمة|واقفة|مستغربة|متضايقة|مقهورة|مرتاحة|فرحانة|عارفة|ناوية|مضطرة|مستعدة|"
+                         r"متزوجة|مطلقة|حاسة|شايفة|داخلة|طالعة|راجعة|رايحة)(?=\s|$|[،.؟!])")
+# أطراف لا تناسب راويًا رجلًا
+FEM_ONLY_WHO = {"زوجي", "خطيبي السابق"}
+
+
+def narrator_rule(narrator):
+    label, rule = NARRATORS.get(narrator, NARRATORS["male"])
+    return f"الراوي ({label}): {rule}"
+
+
 # الأنماط التي تنتشر أكثر تُختار أكثر
 OPEN_WEIGHTS = {"act": 4, "evidence": 3, "scene": 3, "object": 2, "message": 2,
                 "quote": 1, "number": 1, "time": 1, "list": 1, "routine": 1}
@@ -656,7 +682,7 @@ EXAG_RE = re.compile(r"مبالغة؟|انصدمت|صدمة عمري|الصدم�
 HEAVY_RE = re.compile(r"مزوّر|مزور|تزوير|سجن|محكمة|قضية|اختلاس|مليون|تآمر|مؤامرة|انتقام|جريمة|عصابة")
 
 # الفحوصات التي يستحق رسوبها نداءً إضافيًا للصقل؛ الباقي إرشادي يظهر في البطاقة فقط
-CRITICAL = {"words", "numbers", "cliches", "tone", "pov", "facts", "ending", "thread", "cliff", "first", "clean", "dialect",
+CRITICAL = {"words", "numbers", "cliches", "tone", "narrator", "pov", "facts", "ending", "thread", "cliff", "first", "clean", "dialect",
             "points", "hedge", "faith", "gender", "harm", "reach"}
 
 AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -678,13 +704,17 @@ def recent_dna(limit=30):
     return out
 
 
-def fresh_dna(topic="", core="betrayal", seed=None, avoid=(), reach="global"):
+def fresh_dna(topic="", core="betrayal", seed=None, avoid=(), reach="global", narrator="male"):
     """يركّب بذرة جديدة. ما يثبّته المستخدم في seed يبقى كما هو ويُعلَّم كثابت.
     في الوضع العالمي تُستبعد عناصر البذرة ذات المراجع المحلية."""
     label, desc, pool, ending = CORES.get(core, CORES["betrayal"])
 
+    narrator = narrator if narrator in NARRATORS else "male"
+
     def ok(items):
         kept = [i for i in items if not LOCAL_RE.search(i)] if reach == "global" else list(items)
+        if narrator == "male":
+            kept = [i for i in kept if i not in FEM_ONLY_WHO]
         return kept or list(items)
     if pool == "any":
         pool = random.choice(("dark", "light"))
@@ -729,6 +759,7 @@ def fresh_dna(topic="", core="betrayal", seed=None, avoid=(), reach="global"):
     if topic:
         dna["topic"] = topic.strip()[:300]
     dna["reach"] = reach if reach in REACH else "global"
+    dna["narrator"] = narrator
     return dna
 
 
@@ -943,8 +974,9 @@ CRAFT = (
 )
 
 
-def system_prompt(dialect):
-    return CRAFT + "\nاللهجة: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
+def system_prompt(dialect, narrator="male"):
+    return (CRAFT + "\nاللهجة: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
+            + "\n" + narrator_rule(narrator))
 
 
 REALISM = (
@@ -1300,6 +1332,7 @@ def polish_prompt(problems, fmt, pov, ending, facts, dialect="saudi"):
             "تغيير ممكن، وحافظ على الحكاية وتقسيم السطور.\n"
             + "\n".join(f"{i}. {p}" for i, p in enumerate(problems, 1))
             + f"\n\nثوابت لا تُمَس: منظور السرد {POVS.get(pov, POVS['self'])[1]}. {closing} "
+            + "الراوي رجل إن كان المتكلم رجلًا: لا تغيّر جنسه. "
             + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
             + (" " + THREAD_RULES if fmt == "thread" else "")
             + "\n" + facts_block(facts)
@@ -1632,11 +1665,12 @@ def topic_cfg(kind):
     return TOPIC_KINDS.get(kind, TOPIC_KINDS["info"])
 
 
-def info_system_prompt(dialect, kind="info"):
-    return topic_cfg(kind)["craft"] + "\nاللهجة: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
+def info_system_prompt(dialect, kind="info", narrator="male"):
+    return (topic_cfg(kind)["craft"] + "\nاللهجة: " + DIALECT_HINT.get(dialect, DIALECT_HINT["saudi"])
+            + "\n" + narrator_rule(narrator))
 
 
-def fresh_info(domain, angle, topic="", seed=None, kind="info", reach="global"):
+def fresh_info(domain, angle, topic="", seed=None, kind="info", reach="global", narrator="male"):
     kind = kind if kind in TOPIC_KINDS else "info"
     cfg = topic_cfg(kind)
     seed = {k: str(v).strip()[:120] for k, v in (seed or {}).items() if k in INFO_KEYS and str(v).strip()}
@@ -1651,6 +1685,7 @@ def fresh_info(domain, angle, topic="", seed=None, kind="info", reach="global"):
     if topic:
         spec["topic"] = topic.strip()[:300]
     spec["reach"] = reach if reach in REACH else "global"
+    spec["narrator"] = narrator if narrator in NARRATORS else "male"
     return spec
 
 
@@ -2055,8 +2090,8 @@ def dialect_hits(text, dialect):
     return sum(1 for m in DIALECT_MARKERS.get(dialect, []) if m in text)
 
 
-def make_hooks(text, provider, creds, dialect="saudi"):
-    raw = chat([{"role": "system", "content": system_prompt(dialect)},
+def make_hooks(text, provider, creds, dialect="saudi", narrator="male"):
+    raw = chat([{"role": "system", "content": system_prompt(dialect, narrator)},
                 {"role": "user", "content": HOOKS_PROMPT + text[:4000]}],
                provider, creds, temperature=1.0, timeout=90)
     data = json_obj(raw)
@@ -2079,7 +2114,8 @@ def best_hook(hooks, previous):
 
 
 # ------------------------------------------------------------------ الفحوصات
-def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha", kind="story", reach="local"):
+def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha", kind="story", reach="local",
+               narrator=None):
     """نحو عشرة فحوصات محلية بلا نموذج. كل فحص يحمل تعليمة إصلاح إن كان الصقل يعالجه.
     المعلومات (kind=info) تتخطى فحوصات السرد: المنظور، الشك، الدليل، سطر الحاضر، شكل النهاية."""
     label, low, high = FORMATS.get(fmt, FORMATS["medium"])
@@ -2153,6 +2189,12 @@ def run_checks(text, fmt, pov, ending, facts, prev_openings=(), dialect="fusha",
             add("faith", "بعيد عن الدين والسياسة", not FAITH_RE.search(text), "",
                 "النص يمس الدين أو السياسة: احذف أي ذكر لآيات أو أحاديث أو شعائر أو أحزاب "
                 "وأي تعليق على المتدينين، واستبدل المثال بمثال دنيوي يومي.")
+    if narrator == "male" and pov == "self":
+        slips = sorted({m.group(0).strip() for m in FEM_SELF_RE.finditer(text)})
+        add("narrator", "الراوي رجل", not slips, "، ".join(slips),
+            "هذه صيغ متكلمة أنثى والراوي رجل: " + "، ".join(slips)
+            + " — حوّلها إلى المذكر (زوجتي لا زوجي، متأكد لا متأكدة).")
+
     if not info:
         loud = sorted({m.group(0) for m in EXAG_RE.finditer(text)})
         add("tone", "بلا تهويل", not loud, "، ".join(loud),
@@ -2256,7 +2298,8 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
     prev_openings = recent_openings()
     blocked = TIRED_PLOTS + seen_plots
     ending = CORES.get(core, CORES["betrayal"])[3]
-    system = {"role": "system", "content": system_prompt(dialect)}
+    narrator = dna.get("narrator", "male")
+    system = {"role": "system", "content": system_prompt(dialect, narrator)}
 
     def token(piece, notice):
         _guard(job)
@@ -2318,7 +2361,7 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
 
     # 5. الفحوصات المحلية، ثم جولة صقل واحدة إن رسب فحص جوهري
     reach = dna.get("reach", "global")
-    checks = run_checks(final, fmt, pov, ending, facts, prev_openings, dialect, reach=reach)
+    checks = run_checks(final, fmt, pov, ending, facts, prev_openings, dialect, reach=reach, narrator=narrator)
     problems = polish_problems(checks)
     if problems:
         job["stage"] = "polish"
@@ -2329,7 +2372,7 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
                           "content": polish_prompt(problems, fmt, pov, ending, facts, dialect)
                           + "\n\nالنص:\n" + final}],
                 provider, creds, temperature=0.5, timeout=150))
-            new_checks = run_checks(candidate, fmt, pov, ending, facts, prev_openings, dialect, reach=reach)
+            new_checks = run_checks(candidate, fmt, pov, ending, facts, prev_openings, dialect, reach=reach, narrator=narrator)
             if (score_of(new_checks) >= score_of(checks)
                     and word_count(candidate) >= word_count(final) * 0.6):
                 final, checks = candidate, new_checks
@@ -2344,10 +2387,10 @@ def write_story(job, dna, fmt, dialect, core, pov, drama, provider, creds, mode=
     if any(c["id"] == "opening" and not c["ok"] for c in checks):
         job["stage"] = "hook"
         try:
-            pick = best_hook(make_hooks(final, provider, creds, dialect), prev_openings)
+            pick = best_hook(make_hooks(final, provider, creds, dialect, narrator), prev_openings)
             if pick:
                 final = pick + "\n" + "\n".join(final.split("\n")[1:])
-                checks = run_checks(final, fmt, pov, ending, facts, prev_openings, dialect, reach=reach)
+                checks = run_checks(final, fmt, pov, ending, facts, prev_openings, dialect, reach=reach, narrator=narrator)
                 job["rehooked"] = True
         except Cancelled:
             raise
@@ -2373,7 +2416,8 @@ def write_info(job, spec, fmt, dialect, provider, creds, mode="full", heat="hot"
     kind = spec.get("kind") if spec.get("kind") in TOPIC_KINDS else "info"
     seen = recent_plots(kind=kind)
     prev_openings = recent_openings(kind=kind)
-    system = {"role": "system", "content": info_system_prompt(dialect, kind)}
+    narrator = spec.get("narrator", "male")
+    system = {"role": "system", "content": info_system_prompt(dialect, kind, narrator)}
 
     def token(piece, notice):
         _guard(job)
@@ -2428,7 +2472,7 @@ def write_info(job, spec, fmt, dialect, provider, creds, mode="full", heat="hot"
         _guard(job)
 
     reach = spec.get("reach", "global")
-    checks = run_checks(final, fmt, "self", "closer", facts, prev_openings, dialect, kind=kind, reach=reach)
+    checks = run_checks(final, fmt, "self", "closer", facts, prev_openings, dialect, kind=kind, reach=reach, narrator=narrator)
     problems = polish_problems(checks)
     if problems:
         job["stage"] = "polish"
@@ -2438,7 +2482,7 @@ def write_info(job, spec, fmt, dialect, provider, creds, mode="full", heat="hot"
                 [system, {"role": "user", "content": info_polish_prompt(problems, fmt, facts, dialect, kind)
                           + "\n\nالنص:\n" + final}],
                 provider, creds, temperature=0.4, timeout=150))
-            new_checks = run_checks(candidate, fmt, "self", "closer", facts, prev_openings, dialect, kind=kind, reach=reach)
+            new_checks = run_checks(candidate, fmt, "self", "closer", facts, prev_openings, dialect, kind=kind, reach=reach, narrator=narrator)
             if score_of(new_checks) >= score_of(checks) and word_count(candidate) >= word_count(final) * 0.6:
                 final, checks = candidate, new_checks
                 job["polished"] = True
@@ -2543,10 +2587,11 @@ def write():
     reach = data.get("reach") if data.get("reach") in REACH else "global"
     seed = data.get("seed") if isinstance(data.get("seed"), dict) else None
     kind = data.get("kind") if data.get("kind") in TOPIC_KINDS else "story"
+    narrator = data.get("narrator") if data.get("narrator") in NARRATORS else "male"
     if kind != "story":
-        dna = fresh_info(data.get("domain", ""), data.get("angle", ""), data.get("topic", ""), seed, kind, reach)
+        dna = fresh_info(data.get("domain", ""), data.get("angle", ""), data.get("topic", ""), seed, kind, reach, narrator)
     else:
-        dna = fresh_dna(data.get("topic", ""), core, seed, avoid=recent_dna(), reach=reach)
+        dna = fresh_dna(data.get("topic", ""), core, seed, avoid=recent_dna(), reach=reach, narrator=narrator)
 
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
@@ -2634,7 +2679,8 @@ def hooks():
     provider, creds = _creds(data)
     dialect = data.get("dialect") if data.get("dialect") in DIALECTS else "saudi"
     try:
-        return jsonify(hooks=make_hooks(text, provider, creds, dialect))
+        narrator = data.get("narrator") if data.get("narrator") in NARRATORS else "male"
+        return jsonify(hooks=make_hooks(text, provider, creds, dialect, narrator))
     except Exception as exc:
         return jsonify(error=str(exc)), 400
 
@@ -2940,6 +2986,11 @@ PAGE = r"""<!doctype html>
           <option value="mid" selected>متوسط · يصير لأي أحد</option>
           <option value="big">ثقيل ومثبت</option>
         </select></div>
+      <div class="f"><label for="narrator">الراوي</label>
+        <select id="narrator" data-keep>
+          <option value="male" selected>رجل</option>
+          <option value="female">امرأة</option>
+        </select></div>
       <div class="f"><label for="reach">الانتشار</label>
         <select id="reach" data-keep>
           <option value="global" selected>عالمي · يفهمه أي قارئ</option>
@@ -3069,7 +3120,7 @@ const SEED_KEYS = ['who','secret','device','place','cost','dilemma','open'];
 const SEED_LABEL = { who:'الطرف الآخر', secret:'السر', device:'أداة الكشف',
                      place:'مكان الكشف', cost:'الثمن', dilemma:'النهاية',
                      open:'نمط السطر الأول', topic:'موضوعك', locked:'مثبّت',
-                     kind:'النوع', domain:'المجال', angle:'الزاوية', frame:'الإطار', reach:'الانتشار' };
+                     kind:'النوع', narrator:'الراوي', domain:'المجال', angle:'الزاوية', frame:'الإطار', reach:'الانتشار' };
 const TOPIC_HINT = { story: 'مثال: شي صار في مكتب محامي، أو سر طلع من كشف حساب — اتركه فارغًا ليختار المحرّك',
                      info: 'مثال: ليش الأطفال يضعف تفكيرهم، أو وش يصير للجسم لو تركت السكر شهر — اتركه فارغًا ليختار المحرّك',
                      critique: 'مثال: عادة رمي الأكل في الولائم، أو «إن شاء الله» اللي تعني لا — اتركه فارغًا ليختار المحرّك',
@@ -3266,7 +3317,7 @@ async function run(seed) {
       body: JSON.stringify({
         topic: $('topic').value.trim(), format: $('format').value, kind: $('kind').value,
         domain: $('domain').value, angle: $('angle').value,
-        dialect: $('dialect').value, core: $('core').value, mode: $('mode').value, heat: $('heat').value, reach: $('reach').value,
+        dialect: $('dialect').value, core: $('core').value, mode: $('mode').value, heat: $('heat').value, reach: $('reach').value, narrator: $('narrator').value,
         pov: $('pov').value, drama: $('drama').value, seed, ...creds()
       })
     });
@@ -3380,6 +3431,7 @@ function showSeed(dna, facts, issues) {
     if (sel) { const o = $(sel).querySelector('option[value="' + v + '"]'); v = o ? o.textContent : v; }
     if (k === 'kind') v = KIND_LABEL[v] || v;
     if (k === 'reach') v = v === 'global' ? 'عالمي' : 'محلي';
+    if (k === 'narrator') v = v === 'female' ? 'امرأة' : 'رجل';
     return (SEED_LABEL[k] || k) + ': ' + v + ((dna.locked || []).includes(k) ? ' (ثابت)' : '');
   }), '');
   list($('factlist'), facts || [], 'لم تُثبَّت حقائق بعد.');
@@ -3432,7 +3484,7 @@ $('rehook').onclick = async () => {
   try {
     const res = await fetch('/hooks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, dialect: $('dialect').value, ...creds() })
+      body: JSON.stringify({ text, dialect: $('dialect').value, narrator: $('narrator').value, ...creds() })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);

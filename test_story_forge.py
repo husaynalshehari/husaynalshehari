@@ -704,6 +704,30 @@ class Info(unittest.TestCase):
         info = {c["id"] for c in sf.run_checks(loud, "short", "self", "closer", [], kind="info")}
         self.assertNotIn("tone", info)
 
+    def test_narrator_defaults_to_man_in_prompts_seeds_and_checks(self):
+        self.assertIn("رجل", sf.system_prompt("saudi"))
+        self.assertIn("امرأة", sf.system_prompt("saudi", "female"))
+        self.assertIn("رجل", sf.info_system_prompt("saudi", "fire"))
+        for _ in range(40):
+            dna = sf.fresh_dna("", "marriage")
+            self.assertEqual(dna["narrator"], "male")
+            self.assertNotIn(dna["who"], sf.FEM_ONLY_WHO)
+        self.assertEqual(sf.fresh_info("kids", "why")["narrator"], "male")
+        slip = "كنت متأكدة إن زوجي يعرف.\n\nكنت في السيارة."
+        checks = {c["id"]: c for c in sf.run_checks(slip, "short", "self", "dilemma", [], narrator="male")}
+        self.assertFalse(checks["narrator"]["ok"])
+        self.assertIn("زوجي", checks["narrator"]["note"])
+        self.assertNotIn("السيارة", checks["narrator"]["note"])
+        ok = {c["id"]: c for c in sf.run_checks("كنت متأكد إن زوجتي تعرف.", "short", "self", "dilemma", [],
+                                                narrator="male")}
+        self.assertTrue(ok["narrator"]["ok"])
+        self.assertNotIn("narrator", {c["id"] for c in sf.run_checks(slip, "short", "self", "dilemma", [],
+                                                                     narrator="female")})
+        c = sf.app.test_client(); sf.JOBS.clear(); sf.chat = FakeProvider()
+        self.assertEqual(c.post("/write", json={"kind": "story", "mode": "fast"}).get_json()["dna"]["narrator"], "male")
+        self.assertEqual(c.post("/write", json={"kind": "story", "mode": "fast", "narrator": "female"})
+                         .get_json()["dna"]["narrator"], "female")
+
     def test_pack_cuts_spaceless_line_at_the_limit(self):
         parts = sf._pack(["ا" * 300], 280)
         self.assertEqual([len(p) for p in parts], [280, 20])
