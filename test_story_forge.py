@@ -640,22 +640,73 @@ class Info(unittest.TestCase):
         self.assertEqual(r.get_json()["dna"]["kind"], "fire")
         self.assertIn("fire", c.get("/config").get_json()["topics"])
 
-    def test_heat_levels_reach_prompts_and_route(self):
+    def test_heat_reaches_topic_prompts_but_never_stories(self):
         dna = sf.fresh_dna("", "betrayal")
         idea = {"hook": "", "hidden": "x", "why_hidden": "", "why_now": "", "evidence": "", "motive": "", "facts": []}
         for heat, word in (("warm", "بلا مبالغة"), ("hot", "مبالغة؟ شوي"), ("blazing", "قلت يقتل؟")):
-            self.assertIn(word, sf.write_prompt(dna, idea, "short", "saudi", "betrayal", "self", "big", heat))
-            self.assertIn(word, sf.edit_prompt("short", "self", "dilemma", [], "saudi", heat))
+            # القصة لا تبالغ مهما كانت الحرارة: الخطاف فيها فجوة لا صراخ
+            story = sf.write_prompt(dna, idea, "short", "saudi", "betrayal", "self", "big", heat)
+            edit = sf.edit_prompt("short", "self", "dilemma", [], "saudi", heat)
+            for prompt in (story, edit):
+                self.assertIn("قاعدة الافتتاحية", prompt)
+                self.assertNotIn("مبالغة؟ شوي", prompt)
+                self.assertNotIn("قلت يقتل؟", prompt)
             spec = sf.fresh_info("kids", "why")
             self.assertIn(word, sf.info_write_prompt(spec, {"hook": "", "claim": "x", "why": "", "points": [],
                                                             "example": "", "facts": [], "bait": "", "resolve": ""}, "short", "saudi", heat))
         self.assertIn("مخترعة", sf.heat_block("blazing"))
-        self.assertIn("لا تطفئ", sf.audit_prompt([], "dilemma", "betrayal"))
+        self.assertNotIn("لا تطفئ", sf.audit_prompt([], "dilemma", "betrayal"))
         c = sf.app.test_client(); sf.JOBS.clear(); sf.chat = FakeProvider()
         r = c.post("/write", json={"kind": "story", "heat": "blazing", "mode": "fast"})
         self.assertEqual(sf.JOBS[r.get_json()["job"]]["heat"], "blazing")
         r = c.post("/write", json={"kind": "story", "heat": "bogus", "mode": "fast"})
         self.assertEqual(sf.JOBS[r.get_json()["job"]]["heat"], "hot")
+
+    def test_story_realism_prompts_seed_timeline_and_short_beats(self):
+        dna = sf.fresh_dna("", "betrayal")
+        premise = sf.premise_prompt(dna, "betrayal", "mid", [])
+        self.assertIn("لا يلزم استعمال كل العناصر", premise)
+        self.assertIn('"timeline"', premise)
+        self.assertIn('"plausible"', premise)
+        idea = {"hook": "", "hidden": "x", "why_hidden": "", "why_now": "", "evidence": "", "motive": "", "facts": []}
+        write = sf.write_prompt(dna, idea, "short", "saudi", "betrayal", "self", "mid")
+        # غير المثبّت من البذرة لا يُفرض على الكاتب
+        self.assertNotIn(dna["device"], write)
+        self.assertIn(dna["who"], write)
+        locked = sf.fresh_dna("", "betrayal", seed={"device": "مقطع من كاميرا مراقبة"})
+        self.assertIn("مقطع من كاميرا مراقبة", sf.write_prompt(locked, idea, "short", "saudi", "betrayal", "self", "mid"))
+        self.assertLess(sf.beats("self", "dilemma", "scene", "short").count("\n"),
+                        sf.beats("self", "dilemma", "scene", "medium").count("\n"))
+        self.assertIn("احسب الأعمار", sf.audit_prompt([], "dilemma", "betrayal"))
+
+    def test_pick_idea_prefers_plausible_over_heavy(self):
+        base = {"hook": "لقيت فاتورة كهرباء بيت أمي مدفوعة من رقم أخوي", "why_hidden": "كان يستحي يقول إنه يساعد",
+                "why_now": "أمي نسيت الجوال مفتوح على التطبيق", "evidence": "«تم السداد من حساب ماجد»",
+                "motive": "حرج", "facts": ["6 سنين", "1500 كل شهر"], "timeline": "قبل 6 سنين كنت 24، الحين 30"}
+        calm = dict(base, hidden="أخوي يدفع فواتير بيت أمي من 6 سنين وما قال لأحد عشان ما نحس بالتقصير",
+                    plausible=9)
+        wild = dict(base, hidden="أخوي زوّر توقيع أمي في المحكمة واختلس مليون من الورث وسجن محاميها ظلمًا",
+                    plausible=3)
+        best, _ = sf.pick_idea([wild, calm], [], "mid")
+        self.assertIs(best, calm)
+        raw = json.dumps({"ideas": [dict(base, hidden="x y z", plausible="7")]}, ensure_ascii=False)
+        idea = sf.parse_ideas(raw)[0]
+        self.assertEqual(idea["plausible"], 7)
+        self.assertIn("30", idea["timeline"])
+        self.assertIsNone(sf.parse_ideas('{"ideas": ["فكرة"]}')[0]["plausible"])
+
+    def test_tone_check_flags_melodrama_in_stories_only(self):
+        loud = "انصدمت.\n\nأهلي يخططون لخراب بيتي."
+        checks = {c["id"]: c for c in sf.run_checks(loud, "short", "self", "dilemma", [])}
+        self.assertFalse(checks["tone"]["ok"])
+        self.assertIn("tone", sf.CRITICAL)
+        self.assertIn("خراب بيتي", checks["tone"]["note"])
+        info = {c["id"] for c in sf.run_checks(loud, "short", "self", "closer", [], kind="info")}
+        self.assertNotIn("tone", info)
+
+    def test_pack_cuts_spaceless_line_at_the_limit(self):
+        parts = sf._pack(["ا" * 300], 280)
+        self.assertEqual([len(p) for p in parts], [280, 20])
 
     def test_global_reach_filters_seeds_prompts_and_checks(self):
         for _ in range(60):
