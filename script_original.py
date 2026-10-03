@@ -3331,7 +3331,7 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
 
 def launch_x_browser(playwright, auth_token: str):
     browser = playwright.chromium.launch(
-        headless=True,
+        headless=False,
         args=[
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
@@ -3343,7 +3343,7 @@ def launch_x_browser(playwright, auth_token: str):
 
 def open_x_context(browser, auth_token: str):
     context = browser.new_context(
-        viewport={"width": 1280, "height": 1600},
+        viewport={"width": 1280, "height": 3000},
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -3436,7 +3436,7 @@ class BrowserHub:
             if self._playwright is None:
                 self._playwright = sync_playwright().start()
             self._browser = self._playwright.chromium.launch(
-                headless=True,
+                headless=False,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
@@ -3486,7 +3486,7 @@ def run_on_fresh_browser(auth_token: str, work):
     context = None
     try:
         browser = playwright.chromium.launch(
-            headless=True,
+            headless=False,
             args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"],
         )
         context, page = open_x_context(browser, auth_token)
@@ -3674,7 +3674,7 @@ def open_chat(page, pin: str) -> str | None:
         return None
     page.goto(CHAT_URLS[0], wait_until="domcontentloaded", timeout=60_000)
     typed = False
-    deadline = time.monotonic() + 28
+    deadline = time.monotonic() + 55
     while time.monotonic() < deadline:
         if page.locator('[data-testid^="dm-conversation-item-"]').count():
             return None
@@ -3685,7 +3685,7 @@ def open_chat(page, pin: str) -> str | None:
                 error = pin_error_message(page)
                 if error:
                     return error
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(700)
     if page.locator('[data-testid="dm-inbox-panel"]').count():
         return None
     return pin_error_message(page) or "تعذّر فتح الدردشة بعد إدخال الرمز."
@@ -3900,32 +3900,6 @@ def open_named_group(page, name: str) -> None:
             pass
         page.wait_for_timeout(400)
     raise RuntimeError("تم البحث عن القروب لكن قائمة الرسائل لم تُفتح.")
-
-
-def warm_up_group(page, on_status=None) -> None:
-    """Long scrolls up so X loads older messages, then back to the bottom."""
-    for index in range(5):
-        if on_status:
-            on_status(f"تمريرة طويلة للأعلى {index + 1} من 5…")
-        focus_group_scroller(page)
-        try:
-            page.mouse.wheel(0, -2500)
-        except Exception:
-            pass
-        page.wait_for_timeout(1000)
-    if on_status:
-        on_status("العودة إلى أسفل القروب…")
-    for _ in range(3):
-        try:
-            page.evaluate(GROUP_CHAT_SCROLL_JS, "latest")
-        except Exception:
-            pass
-        focus_group_scroller(page)
-        try:
-            page.mouse.wheel(0, 20000)
-        except Exception:
-            pass
-        page.wait_for_timeout(500)
 
 
 def group_chat_state(page) -> dict:
@@ -4278,13 +4252,14 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         while not spotted and rounds < max_seek and quiet < 8 and time.monotonic() < deadline:
             if should_stop and should_stop():
                 raise JobStopped
+            close_popups(page)
             scan = scan_stop(0)
             if scan.get("hit"):
                 spotted = True
                 hit_top = float(scan.get("hitTop") or 0)
                 break
             client = int(scan.get("clientHeight") or 0) or 800
-            step = max(400, min(800, int(client * 0.5)))
+            step = max(250, min(500, int(client * 0.2)))
             before_top = int(scan.get("scrollTop") or 0)
             focus_group_scroller(page)
             try:
@@ -4353,6 +4328,7 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         while rounds < max_seek and stall < 5:
             if should_stop and should_stop():
                 raise JobStopped
+            close_popups(page)
             try:
                 payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": 1, "stopId": stop_id}) or {}
             except Exception:
@@ -4408,6 +4384,7 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         if should_stop and should_stop():
             raise JobStopped
         before_count = len(found)
+        close_popups(page)
         try:
             payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": -1, "stopId": ""}) or {}
         except Exception:
@@ -4678,9 +4655,6 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
                 open_named_group(page, group_name)
                 publish_job(job_id, phase="login", message="فُتح القروب. انتظار ٥ ثوانٍ قبل بدء التمرير والجمع…")
-                page.wait_for_timeout(5_000)
-                warm_up_group(page, lambda text: publish_job(job_id, phase="login", message=text))
-                publish_job(job_id, phase="login", message="انتظار ٥ ثوانٍ قبل بدء التمرير والجمع…")
                 page.wait_for_timeout(5_000)
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
                 items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
