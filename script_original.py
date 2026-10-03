@@ -2595,6 +2595,7 @@ def real_click(locator) -> None:
     page = locator.page
     _move_like_a_hand(page, x, y)
     page.mouse.down()
+    page.wait_for_timeout(100)
     page.mouse.up()
 
 
@@ -2618,6 +2619,7 @@ def click_box(page, box: dict) -> None:
     y = float(box["y"]) + height * random.uniform(0.4, 0.6)
     _move_like_a_hand(page, x, y)
     page.mouse.down()
+    page.wait_for_timeout(100)
     page.mouse.up()
 
 
@@ -2688,7 +2690,7 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
                 except PlaywrightTimeoutError:
                     pass
             confirmed = False
-            deadline = time.monotonic() + 0.55
+            deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
                 again = read_action_state(page, status_id, [action]) or {}
                 if (again.get(action) or {}).get("on"):
