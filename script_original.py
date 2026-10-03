@@ -4145,13 +4145,13 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             grew = height > last_height + 24 or bool(oldest and last_oldest and oldest != last_oldest)
             if not at_edge:
                 quiet = 0
-                page.wait_for_timeout(40)
+                page.wait_for_timeout(600)
             elif loading or grew:
                 quiet = 0
-                page.wait_for_timeout(70)
+                page.wait_for_timeout(800)
             else:
                 quiet += 1
-                page.wait_for_timeout(320 if quiet < 3 else 180)
+                page.wait_for_timeout(1200)
             if oldest:
                 last_oldest = oldest
             last_height = max(last_height, height)
