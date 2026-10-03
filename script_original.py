@@ -2145,7 +2145,7 @@ GROUP_READ_TWEETS_JS = r"""
     const beforeTop = scroller.scrollTop || 0;
     atOlderEdge = beforeTop <= 48;
     const client = scroller.clientHeight || 800;
-    const step = Math.max(560, Math.min(1200, Math.round(client * 0.75)));
+    const step = Math.max(400, Math.min(800, Math.round(client * 0.5)));
     if (dir === -1 || dir === 1) {
       if (dir < 0 && beforeTop <= 48) {
         scroller.scrollTop = 0;
@@ -3962,7 +3962,7 @@ SCAN_STOP_JS = r"""
   if (scroller && !hit && (dir === -1 || dir === 1)) {
     const beforeTop = scroller.scrollTop || 0;
     const client = scroller.clientHeight || 800;
-    const step = Math.max(560, Math.min(1200, Math.round(client * 0.75)));
+    const step = Math.max(400, Math.min(800, Math.round(client * 0.5)));
     if (dir < 0 && beforeTop <= 48) {
       scroller.scrollTop = 0;
       try { scroller.dispatchEvent(new WheelEvent("wheel", {deltaY: -640, bubbles: true, cancelable: true})); } catch (error) {}
@@ -4144,14 +4144,14 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
                 hit_top = float(scan.get("hitTop") or 0)
                 break
             client = int(scan.get("clientHeight") or 0) or 800
-            step = max(560, min(1200, int(client * 0.75)))
+            step = max(400, min(800, int(client * 0.5)))
             before_top = int(scan.get("scrollTop") or 0)
             focus_group_scroller(page)
             try:
                 page.mouse.wheel(0, -step)
             except Exception:
                 pass
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(2000)
             state = scan_stop(0)
             if state.get("hit"):
                 spotted = True
@@ -4241,10 +4241,10 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             moved = bool(fp and last_fp and fp != last_fp) or int(payload.get("moved") or 0) > 8
             if pending or moved:
                 stall = 0
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(2000)
             else:
                 stall += 1
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(2000)
             last_fp = fp or last_fp
             rounds += 1
             if os.environ.get("COLLECT_DEBUG"):
@@ -4300,11 +4300,11 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         if len(found) >= limit:
             break
         if loading:
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(2000)
         elif at_edge and not moved:
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(2000)
         else:
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(2000)
         last_fp = fp or last_fp
         last_h = max(last_h, height)
         rounds += 1
