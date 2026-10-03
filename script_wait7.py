@@ -4112,107 +4112,80 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         return height > 0 and top + client >= height - 80
 
     if stop_id:
-        spotted = False
+        # Walk toward older messages and collect every tweet on the way. The stop
+        # tweet is detected by the same reader that collects (it sees shadow DOM
+        # and lazy cards), and each screen is read only after it has settled, so
+        # a fast scroll cannot jump over the stop tweet.
+        def read_settled() -> dict:
+            payload: dict = {}
+            last_sig = ""
+            for _ in range(14):
+                try:
+                    payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": 0, "stopId": stop_id}) or {}
+                except Exception:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                sig = str(payload.get("fingerprint") or "") + "#" + str(len(payload.get("tweets") or []))
+                busy = int(payload.get("pending") or 0) > 0 or bool(payload.get("loading"))
+                if not busy and sig == last_sig:
+                    return payload
+                last_sig = sig
+                page.wait_for_timeout(150)
+            return payload
+
         quiet = 0
         rounds = 0
-        hit_top = None
-        last_oldest = ""
         last_height = 0
-        max_seek = 8000
-
-        def scan_stop(direction: int) -> dict:
-            try:
-                payload = page.evaluate(SCAN_STOP_JS, {"stopId": stop_id, "dir": direction}) or {}
-            except Exception:
-                payload = {}
-            return payload if isinstance(payload, dict) else {}
-
-        while not spotted and rounds < max_seek and quiet < 6:
-            if should_stop and should_stop():
-                raise JobStopped
-            scan = scan_stop(-1)
-            pending = int(scan.get("pending") or 0)
-            oldest = str(scan.get("oldest") or "")
-            if scan.get("hit"):
-                spotted = True
-                hit_top = float(scan.get("hitTop") or 0)
-                break
-            height = int(scan.get("scrollHeight") or 0)
-            at_edge = int(scan.get("scrollTop") or 0) <= 48
-            loading = bool(scan.get("loading")) or pending > 0
-            grew = height > last_height + 24 or bool(oldest and last_oldest and oldest != last_oldest)
-            if not at_edge:
-                quiet = 0
-                page.wait_for_timeout(40)
-            elif loading or grew:
-                quiet = 0
-                page.wait_for_timeout(70)
-            else:
-                quiet += 1
-                page.wait_for_timeout(320 if quiet < 3 else 180)
-            if oldest:
-                last_oldest = oldest
-            last_height = max(last_height, height)
-            rounds += 1
-            if on_progress and rounds % 3 == 0:
-                on_progress(rounds, 0, "seek")
-            if os.environ.get("COLLECT_DEBUG"):
-                print(
-                    f"seek round={rounds} quiet={quiet} top={scan.get('scrollTop')} h={height} oldest={oldest} load={loading} spotted={spotted}",
-                    flush=True,
-                )
-        if not spotted:
-            return [], False
-        rows, _pending = read_rows()
-        target_top = hit_top
-        for row in rows:
-            if row_id(row) == stop_id:
-                target_top = float(row.get("top") or 0)
-                break
-        for row in rows:
-            status_id = row_id(row)
-            top = float(row.get("top") or 0)
-            if target_top is not None and top < target_top - 12:
-                continue
-            add_tweet(status_id, row)
-        if stop_id not in {row_id(row) for row in rows}:
-            add_tweet(stop_id, {"url": f"https://x.com/i/web/status/{stop_id}", "text": "تغريدة"})
-        if on_progress:
-            on_progress(len(found), 0, "collect")
-        stall = 0
-        rounds = 0
         last_fp = ""
-        while rounds < max_seek and stall < 5:
+        max_seek = 4000
+        while rounds < max_seek:
             if should_stop and should_stop():
                 raise JobStopped
-            try:
-                payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": 1, "stopId": stop_id}) or {}
-            except Exception:
-                payload = {}
-            if not isinstance(payload, dict):
-                payload = {}
-            for row in payload.get("tweets") or []:
-                if isinstance(row, dict):
-                    add_tweet(row_id(row), row)
-            if on_progress and found:
+            payload = read_settled()
+            rows = [row for row in payload.get("tweets") or [] if isinstance(row, dict)]
+            rows.sort(key=lambda row: float(row.get("top") or 0), reverse=True)
+            before_count = len(found)
+            for row in rows:
+                status_id = row_id(row)
+                add_tweet(status_id, row)
+                if status_id == stop_id:
+                    reached = True
+                    break
+            if reached:
+                break
+            if on_progress and len(found) != before_count:
                 on_progress(len(found), 0, "collect")
+            client = int(payload.get("clientHeight") or 0) or 800
+            try:
+                step = page.evaluate(STEP_OLDER_JS, max(240, int(client * 0.5))) or {}
+            except Exception:
+                step = {}
+            at_top = bool(step.get("atTop")) or int(step.get("after") or 0) <= 48
+            height = int(step.get("height") or payload.get("scrollHeight") or 0)
             fp = str(payload.get("fingerprint") or "")
-            height = int(payload.get("scrollHeight") or 0)
-            top = int(payload.get("scrollTop") or 0)
-            client = int(payload.get("clientHeight") or 0) or 700
-            latest = height > 0 and top + client >= height - 80
-            pending = int(payload.get("pending") or 0)
-            moved = bool(fp and last_fp and fp != last_fp) or int(payload.get("moved") or 0) > 8
-            if pending or moved:
-                stall = 0
-                page.wait_for_timeout(40 if moved else 70)
+            if at_top:
+                nudge_older(page, -700)
+            grew = height > last_height + 24 or bool(fp and last_fp and fp != last_fp) or len(found) > before_count
+            if at_top and not grew:
+                quiet += 1
+                page.wait_for_timeout(1500)
             else:
-                stall += 1
-                page.wait_for_timeout(120)
+                quiet = 0
+                page.wait_for_timeout(250)
+            last_height = max(last_height, height)
             last_fp = fp or last_fp
             rounds += 1
             if os.environ.get("COLLECT_DEBUG"):
-                print(f"down round={rounds} found={len(found)} stall={stall} top={top} h={height} latest={latest}", flush=True)
+                print(f"seek round={rounds} found={len(found)} quiet={quiet} top={step.get('after')} h={height}", flush=True)
+            if quiet >= 8:
+                break
+        if not reached:
+            print(f"X group seek: stop tweet {stop_id} not found after {len(found)} tweets", flush=True)
+            return found, False
+        found.reverse()
+        if on_progress:
+            on_progress(len(found), 0, "collect")
         return found, True
 
     for _ in range(8):
