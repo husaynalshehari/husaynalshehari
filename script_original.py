@@ -4252,7 +4252,6 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         while not spotted and rounds < max_seek and quiet < 8 and time.monotonic() < deadline:
             if should_stop and should_stop():
                 raise JobStopped
-            close_popups(page)
             scan = scan_stop(0)
             if scan.get("hit"):
                 spotted = True
@@ -4328,7 +4327,6 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         while rounds < max_seek and stall < 5:
             if should_stop and should_stop():
                 raise JobStopped
-            close_popups(page)
             try:
                 payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": 1, "stopId": stop_id}) or {}
             except Exception:
@@ -4384,7 +4382,6 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         if should_stop and should_stop():
             raise JobStopped
         before_count = len(found)
-        close_popups(page)
         try:
             payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": -1, "stopId": ""}) or {}
         except Exception:
