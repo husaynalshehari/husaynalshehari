@@ -4171,10 +4171,13 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             if row_id(row) == stop_id:
                 target_top = float(row.get("top") or 0)
                 break
+        older: set[str] = set()
         for row in rows:
             status_id = row_id(row)
             top = float(row.get("top") or 0)
             if target_top is not None and top < target_top - 12:
+                if status_id and status_id != stop_id:
+                    older.add(status_id)
                 continue
             add_tweet(status_id, row)
         if stop_id not in {row_id(row) for row in rows}:
@@ -4193,9 +4196,17 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
                 payload = {}
             if not isinstance(payload, dict):
                 payload = {}
-            for row in payload.get("tweets") or []:
-                if isinstance(row, dict):
-                    add_tweet(row_id(row), row)
+            down_rows = [row for row in payload.get("tweets") or [] if isinstance(row, dict)]
+            stop_row = next((row for row in down_rows if row_id(row) == stop_id), None)
+            stop_top = float(stop_row.get("top") or 0) if stop_row else None
+            for row in down_rows:
+                status_id = row_id(row)
+                if not status_id or status_id in older:
+                    continue
+                if stop_top is not None and status_id != stop_id and float(row.get("top") or 0) < stop_top - 12:
+                    older.add(status_id)
+                    continue
+                add_tweet(status_id, row)
             if on_progress and found:
                 on_progress(len(found), 0, "collect")
             fp = str(payload.get("fingerprint") or "")
