@@ -4133,6 +4133,35 @@ STEP_OLDER_JS = r"""
 """
 
 
+LOCATE_MESSAGE_JS = r"""
+(testid) => {
+  const roots = [];
+  const walk = (root) => {
+    if (!root || roots.includes(root)) return;
+    roots.push(root);
+    const nodes = root.querySelectorAll ? root.querySelectorAll("*") : [];
+    for (const node of nodes) if (node.shadowRoot) walk(node.shadowRoot);
+  };
+  walk(document);
+  const query = (selector) => {
+    for (const root of roots) {
+      const found = root.querySelector && root.querySelector(selector);
+      if (found) return found;
+    }
+    return null;
+  };
+  const scroller = query('[data-testid="dm-message-scroller"]') || query('[data-testid="dm-message-list"]');
+  if (!scroller) return {ok: false};
+  const view = scroller.getBoundingClientRect();
+  const el = query('[data-testid="' + CSS.escape(testid) + '"]');
+  const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40;
+  if (!el) return {ok: true, mounted: false, viewTop: view.top, viewBottom: view.bottom, atBottom};
+  const rect = el.getBoundingClientRect();
+  return {ok: true, mounted: true, top: rect.top, bottom: rect.bottom, viewTop: view.top, viewBottom: view.bottom, atBottom};
+}
+"""
+
+
 def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", should_stop=None) -> tuple[list[dict], bool]:
     found: list[dict] = []
     seen: set[str] = set()
@@ -4247,6 +4276,39 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         # older messages). Progress = the oldest mounted message changes, the
         # scroll position moves, or the list grows. Unfinished tweet cards no
         # longer keep the loop alive forever, and the climb has a time limit.
+        def sweep_back_to(anchor_id: str, step: int) -> dict | None:
+            for sweep_round in range(30):
+                if should_stop and should_stop():
+                    raise JobStopped
+                found_here = scan_stop(0)
+                if found_here.get("hit"):
+                    return found_here
+                try:
+                    where = page.evaluate(LOCATE_MESSAGE_JS, anchor_id) or {}
+                except Exception:
+                    where = {}
+                if not where.get("ok"):
+                    return None
+                view_top = float(where.get("viewTop") or 0)
+                view_bottom = float(where.get("viewBottom") or 0)
+                if where.get("mounted"):
+                    top = float(where.get("top") or 0)
+                    if view_top - 4 <= top <= view_bottom:
+                        return None
+                    if top < view_top:
+                        return None
+                if where.get("atBottom"):
+                    return None
+                focus_group_scroller(page)
+                try:
+                    page.mouse.wheel(0, max(200, step // 2))
+                except Exception:
+                    pass
+                page.wait_for_timeout(1500)
+                if os.environ.get("COLLECT_DEBUG"):
+                    print(f"sweep round={sweep_round} anchor={anchor_id} mounted={where.get('mounted')} top={where.get('top')}", flush=True)
+            return None
+
         last_top = -1
         deadline = time.monotonic() + 360
         while not spotted and rounds < max_seek and quiet < 8 and time.monotonic() < deadline:
@@ -4260,6 +4322,7 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             client = int(scan.get("clientHeight") or 0) or 800
             step = max(400, min(800, int(client * 0.5)))
             before_top = int(scan.get("scrollTop") or 0)
+            anchor_id = str(scan.get("oldest") or "")
             focus_group_scroller(page)
             try:
                 page.mouse.wheel(0, -step)
@@ -4281,6 +4344,18 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
                 state = scan_stop(0)
                 top_now = int(state.get("scrollTop") or 0)
             oldest = str(state.get("oldest") or "")
+            if anchor_id and oldest and oldest != anchor_id:
+                # A batch of older messages loaded and the view may have jumped
+                # past it. Walk back down to the message that was oldest before
+                # the batch, checking every screen, so nothing is skipped.
+                swept = sweep_back_to(anchor_id, step)
+                if swept is not None:
+                    spotted = True
+                    hit_top = float(swept.get("hitTop") or 0)
+                    break
+                state = scan_stop(0)
+                top_now = int(state.get("scrollTop") or 0)
+                oldest = str(state.get("oldest") or "") or oldest
             height = int(state.get("scrollHeight") or 0)
             moved = last_top >= 0 and abs(top_now - last_top) > 8
             grew = height > last_height + 24 or bool(oldest and last_oldest and oldest != last_oldest)
