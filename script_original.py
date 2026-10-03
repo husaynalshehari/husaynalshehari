@@ -2690,6 +2690,44 @@ ACTION_BUTTON_PROBE_JS = r"""
 """
 
 
+CLOSE_POPUPS_JS = r"""
+() => {
+  const words = /^(close|dismiss|not now|maybe later|got it|skip|no thanks|cancel|إغلاق|اغلاق|ليس الآن|لاحقًا|لاحقا|فهمت|تخطي|تخطّي|لا شكرًا|لا شكرا|إلغاء)$/i;
+  const chat = '[data-testid="dm-message-list"], [data-testid="dm-message-scroller"], [data-testid="dm-conversation-content"], [data-testid="dm-inbox-panel"]';
+  const layers = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"], [data-testid="sheetDialog"], [data-testid="confirmationSheetDialog"]')]
+    .filter((el) => el.getClientRects().length && !el.closest(chat) && !el.querySelector(chat));
+  const closed = [];
+  for (const layer of layers) {
+    const buttons = [...layer.querySelectorAll('button, [role="button"]')].filter((node) => node.getClientRects().length);
+    const hit = buttons.find((node) => {
+      const label = (node.getAttribute("aria-label") || "").trim();
+      const text = (node.innerText || "").replace(/\s+/g, " ").trim();
+      const testid = node.getAttribute("data-testid") || "";
+      return words.test(label) || words.test(text) || testid === "app-bar-close" || testid === "confirmationSheetCancel";
+    });
+    if (hit) {
+      hit.click();
+      closed.push(layer.getAttribute("data-testid") || layer.getAttribute("aria-label") || "dialog");
+    }
+  }
+  return closed;
+}
+"""
+
+
+def close_popups(page) -> int:
+    """Close pop-up dialogs that cover the page. The chat itself is never touched."""
+    try:
+        closed = page.evaluate(CLOSE_POPUPS_JS) or []
+    except Exception:
+        return 0
+    if closed:
+        if os.environ.get("COLLECT_DEBUG"):
+            print(f"closed popups: {closed}", flush=True)
+        page.wait_for_timeout(400)
+    return len(closed)
+
+
 def press_action_button(page, path: str, status_id: str, action: str) -> str:
     """Scroll the button into view, make sure nothing covers it, then click it.
 
@@ -2699,6 +2737,7 @@ def press_action_button(page, path: str, status_id: str, action: str) -> str:
     testid = ACTION_CONTROLS[action][1]
     blocker = ""
     for _ in range(3):
+        close_popups(page)
         try:
             page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": testid, "scroll": True})
         except Exception:
@@ -4213,6 +4252,7 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         while not spotted and rounds < max_seek and quiet < 8 and time.monotonic() < deadline:
             if should_stop and should_stop():
                 raise JobStopped
+            close_popups(page)
             scan = scan_stop(0)
             if scan.get("hit"):
                 spotted = True
@@ -4288,6 +4328,7 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         while rounds < max_seek and stall < 5:
             if should_stop and should_stop():
                 raise JobStopped
+            close_popups(page)
             try:
                 payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": 1, "stopId": stop_id}) or {}
             except Exception:
@@ -4343,6 +4384,7 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         if should_stop and should_stop():
             raise JobStopped
         before_count = len(found)
+        close_popups(page)
         try:
             payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": -1, "stopId": ""}) or {}
         except Exception:
@@ -4510,6 +4552,7 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             continue
         result["url"] = "https://x.com" + opened
         page.wait_for_timeout(2000)
+        close_popups(page)
         try:
             result["actions"] = apply_actions_on_path(page, opened, actions)
         except Exception as exc:
