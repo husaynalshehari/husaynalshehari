@@ -4112,21 +4112,23 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         return height > 0 and top + client >= height - 80
 
     if stop_id:
-        # Walk toward older messages and collect every tweet on the way. The stop
-        # tweet is detected by the same reader that collects (it sees shadow DOM
-        # and lazy cards), and each screen is read only after it has settled, so
-        # a fast scroll cannot jump over the stop tweet.
-        def read_settled() -> dict:
+        # Phase 1: climb to the stop tweet without collecting.
+        # Phase 2: walk down from it to the bottom of the group, collecting.
+        # Every screen is read only after it settles (lazy tweet cards loaded),
+        # and each step moves half a screen so screens overlap.
+        def read_settled(tries: int) -> dict:
             payload: dict = {}
             last_sig = ""
-            for _ in range(14):
+            for _ in range(tries):
                 try:
                     payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": 0, "stopId": stop_id}) or {}
                 except Exception:
                     payload = {}
                 if not isinstance(payload, dict):
                     payload = {}
-                sig = str(payload.get("fingerprint") or "") + "#" + str(len(payload.get("tweets") or []))
+                sig = str(payload.get("fingerprint") or "") + "#" + ",".join(
+                    sorted(row_id(row) for row in payload.get("tweets") or [] if isinstance(row, dict))
+                )
                 busy = int(payload.get("pending") or 0) > 0 or bool(payload.get("loading"))
                 if not busy and sig == last_sig:
                     return payload
@@ -4134,28 +4136,22 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
                 page.wait_for_timeout(150)
             return payload
 
+        def rows_of(payload: dict) -> list[dict]:
+            return [row for row in payload.get("tweets") or [] if isinstance(row, dict)]
+
         quiet = 0
         rounds = 0
         last_height = 0
         last_fp = ""
         max_seek = 4000
+        spotted = False
         while rounds < max_seek:
             if should_stop and should_stop():
                 raise JobStopped
-            payload = read_settled()
-            rows = [row for row in payload.get("tweets") or [] if isinstance(row, dict)]
-            rows.sort(key=lambda row: float(row.get("top") or 0), reverse=True)
-            before_count = len(found)
-            for row in rows:
-                status_id = row_id(row)
-                add_tweet(status_id, row)
-                if status_id == stop_id:
-                    reached = True
-                    break
-            if reached:
+            payload = read_settled(14)
+            if any(row_id(row) == stop_id for row in rows_of(payload)):
+                spotted = True
                 break
-            if on_progress and len(found) != before_count:
-                on_progress(len(found), 0, "collect")
             client = int(payload.get("clientHeight") or 0) or 800
             try:
                 step = page.evaluate(STEP_OLDER_JS, max(240, int(client * 0.5))) or {}
@@ -4166,7 +4162,7 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             fp = str(payload.get("fingerprint") or "")
             if at_top:
                 nudge_older(page, -700)
-            grew = height > last_height + 24 or bool(fp and last_fp and fp != last_fp) or len(found) > before_count
+            grew = height > last_height + 24 or bool(fp and last_fp and fp != last_fp)
             if at_top and not grew:
                 quiet += 1
                 page.wait_for_timeout(1500)
@@ -4176,16 +4172,55 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             last_height = max(last_height, height)
             last_fp = fp or last_fp
             rounds += 1
+            if on_progress and rounds % 3 == 0:
+                on_progress(rounds, 0, "seek")
             if os.environ.get("COLLECT_DEBUG"):
-                print(f"seek round={rounds} found={len(found)} quiet={quiet} top={step.get('after')} h={height}", flush=True)
+                print(f"up round={rounds} quiet={quiet} top={step.get('after')} h={height}", flush=True)
             if quiet >= 8:
                 break
-        if not reached:
-            print(f"X group seek: stop tweet {stop_id} not found after {len(found)} tweets", flush=True)
-            return found, False
-        found.reverse()
-        if on_progress:
-            on_progress(len(found), 0, "collect")
+        if not spotted:
+            print(f"X group seek: stop tweet {stop_id} not found", flush=True)
+            return [], False
+
+        older: set[str] = set()
+        idle = 0
+        rounds = 0
+        while rounds < max_seek:
+            if should_stop and should_stop():
+                raise JobStopped
+            payload = read_settled(20)
+            rows = rows_of(payload)
+            rows.sort(key=lambda row: float(row.get("top") or 0))
+            stop_row = next((row for row in rows if row_id(row) == stop_id), None)
+            before_count = len(found)
+            for row in rows:
+                status_id = row_id(row)
+                if not status_id or status_id in older:
+                    continue
+                if stop_row is not None and float(row.get("top") or 0) < float(stop_row.get("top") or 0) - 4 and status_id != stop_id:
+                    older.add(status_id)
+                    continue
+                add_tweet(status_id, row)
+            if stop_id not in seen and stop_row is None:
+                add_tweet(stop_id, {"url": f"https://x.com/i/web/status/{stop_id}", "text": "تغريدة"})
+            if on_progress and len(found) != before_count:
+                on_progress(len(found), 0, "collect")
+            top = int(payload.get("scrollTop") or 0)
+            client = int(payload.get("clientHeight") or 0) or 800
+            height = int(payload.get("scrollHeight") or 0)
+            at_bottom = height > 0 and top + client >= height - 80
+            if at_bottom:
+                idle = idle + 1 if len(found) == before_count else 0
+                if idle >= 3:
+                    break
+                page.wait_for_timeout(1000)
+            else:
+                idle = 0
+                park_scroller(page, top + max(240, int(client * 0.5)))
+                page.wait_for_timeout(250)
+            rounds += 1
+            if os.environ.get("COLLECT_DEBUG"):
+                print(f"down round={rounds} found={len(found)} idle={idle} top={top} h={height}", flush=True)
         return found, True
 
     for _ in range(8):
