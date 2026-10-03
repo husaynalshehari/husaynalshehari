@@ -4436,6 +4436,7 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
                 on_progress(index + 1, total, "act")
             continue
         result["url"] = "https://x.com" + opened
+        page.wait_for_timeout(2000)
         try:
             result["actions"] = apply_actions_on_path(page, opened, actions)
         except Exception as exc:
