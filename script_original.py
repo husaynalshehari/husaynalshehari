@@ -2145,7 +2145,9 @@ GROUP_READ_TWEETS_JS = r"""
     const beforeTop = scroller.scrollTop || 0;
     atOlderEdge = beforeTop <= 48;
     const client = scroller.clientHeight || 800;
-    const step = Math.max(400, Math.min(800, Math.round(client * 0.5)));
+    const step = dir > 0
+      ? Math.max(560, Math.min(1200, Math.round(client * 0.75)))
+      : Math.max(400, Math.min(800, Math.round(client * 0.5)));
     if (dir === -1 || dir === 1) {
       if (dir < 0 && beforeTop <= 48) {
         scroller.scrollTop = 0;
@@ -4241,10 +4243,10 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             moved = bool(fp and last_fp and fp != last_fp) or int(payload.get("moved") or 0) > 8
             if pending or moved:
                 stall = 0
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1000)
             else:
                 stall += 1
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1000)
             last_fp = fp or last_fp
             rounds += 1
             if os.environ.get("COLLECT_DEBUG"):
