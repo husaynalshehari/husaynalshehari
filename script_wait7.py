@@ -4139,52 +4139,93 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         def rows_of(payload: dict) -> list[dict]:
             return [row for row in payload.get("tweets") or [] if isinstance(row, dict)]
 
+        debug_dir = DATA_DIR / "debug"
+        debug_lines: list[str] = []
+
+        def debug_shot(name: str) -> None:
+            try:
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(debug_dir / f"seek-{name}.png"), full_page=False, timeout=8000)
+            except Exception:
+                pass
+
+        def debug_save(ok: bool) -> None:
+            try:
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                head = [f"stop_id={stop_id} found={ok} seen={len(seen_up)}", "seen_ids=" + " ".join(seen_up), ""]
+                (debug_dir / "seek.log").write_text("\n".join(head + debug_lines), encoding="utf-8")
+                html = page.evaluate(
+                    """() => {
+                      const node = document.querySelector('[data-testid="dm-message-list"]')
+                        || document.querySelector('[data-testid="dm-message-scroller"]')
+                        || document.body;
+                      return node ? node.outerHTML : "";
+                    }"""
+                ) or ""
+                (debug_dir / "seek-list.html").write_text(str(html), encoding="utf-8")
+            except Exception:
+                pass
+
         quiet = 0
         rounds = 0
         last_height = 0
-        last_fp = ""
-        max_seek = 4000
+        last_top = -1
         spotted = False
-        while rounds < max_seek:
+        seen_up: list[str] = []
+        deadline = time.monotonic() + 240
+        debug_shot("start")
+        while time.monotonic() < deadline:
             if should_stop and should_stop():
                 raise JobStopped
             payload = read_settled(14)
-            if any(row_id(row) == stop_id for row in rows_of(payload)):
+            ids = [row_id(row) for row in rows_of(payload)]
+            new_ids = [status_id for status_id in ids if status_id and status_id not in seen_up]
+            seen_up.extend(new_ids)
+            if stop_id in ids:
                 spotted = True
+                debug_lines.append(f"round={rounds} HIT")
                 break
             client = int(payload.get("clientHeight") or 0) or 800
             try:
                 step = page.evaluate(STEP_OLDER_JS, max(240, int(client * 0.5))) or {}
             except Exception:
                 step = {}
-            at_top = bool(step.get("atTop")) or int(step.get("after") or 0) <= 48
+            after = int(step.get("after") or 0)
+            at_top = bool(step.get("atTop")) or after <= 48
             height = int(step.get("height") or payload.get("scrollHeight") or 0)
-            fp = str(payload.get("fingerprint") or "")
             if at_top:
                 nudge_older(page, -700)
-            grew = height > last_height + 24 or bool(fp and last_fp and fp != last_fp)
-            if at_top and not grew:
-                quiet += 1
-                page.wait_for_timeout(1500)
-            else:
+            progressed = bool(new_ids) or height > last_height + 24 or (last_top >= 0 and abs(after - last_top) > 8)
+            if progressed:
                 quiet = 0
                 page.wait_for_timeout(250)
+            else:
+                quiet += 1
+                page.wait_for_timeout(1500)
+            debug_lines.append(
+                f"round={rounds} ok={step.get('ok')} before={step.get('before')} after={after} h={height} "
+                f"client={client} msgs={payload.get('messages')} pending={payload.get('pending')} "
+                f"ids={len(ids)} new={len(new_ids)} quiet={quiet}"
+            )
             last_height = max(last_height, height)
-            last_fp = fp or last_fp
+            last_top = after
             rounds += 1
             if on_progress and rounds % 3 == 0:
                 on_progress(rounds, 0, "seek")
             if os.environ.get("COLLECT_DEBUG"):
-                print(f"up round={rounds} quiet={quiet} top={step.get('after')} h={height}", flush=True)
-            if quiet >= 8:
+                print("up " + debug_lines[-1], flush=True)
+            if quiet >= 10:
                 break
+        debug_save(spotted)
         if not spotted:
-            print(f"X group seek: stop tweet {stop_id} not found", flush=True)
-            return [], False
+            debug_shot("end")
+            print(f"X group seek: stop tweet {stop_id} not found; saw {len(seen_up)} tweets", flush=True)
+            return [{"url": f"https://x.com/i/web/status/{status_id}", "text": "تغريدة"} for status_id in seen_up], False
 
         older: set[str] = set()
         idle = 0
         rounds = 0
+        max_seek = 4000
         while rounds < max_seek:
             if should_stop and should_stop():
                 raise JobStopped
@@ -4514,7 +4555,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if job_cancelled(job_id):
                     raise JobStopped
                 if stop_id and not reached:
-                    publish_job(job_id, status="done", success=False, collected=len(items), message="وصلت نهاية السجل ولم تظهر التغريدة المحددة. لم يُنفَّذ شيء.")
+                    publish_job(job_id, status="done", success=False, collected=len(items), message=f"لم تظهر التغريدة المحددة. ظهرت {len(items)} تغريدة أثناء الصعود ولم تكن بينها. لم يُنفَّذ شيء. حُفظ سجل التشخيص في data/debug.")
                     return
                 if not items:
                     publish_job(job_id, status="done", success=False, message="فُتح القروب لكن لم تُستخرج تغريدات.")
