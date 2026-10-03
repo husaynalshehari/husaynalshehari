@@ -3390,10 +3390,8 @@ def run_on_fresh_browser(auth_token: str, work):
 
 
 def run_on_browser(auth_token: str, work):
-    def wrapped():
-        page = browser_hub.page_for(auth_token)
-        return work(page)
-    return browser_hub.call(wrapped)
+    """Every action gets its own browser, closed as soon as the action ends."""
+    return run_on_fresh_browser(auth_token, work)
 
 
 def ensure_logged_in(page) -> bool:
@@ -3713,7 +3711,7 @@ def prepare_chat(auth_token: str, pin: str) -> dict:
             "ok": True,
             "groups": names,
             "rows": rows,
-            "message": f"تمت التهيئة. ظهر {len(names)} قروب و{rows} محادثة. الخاص مفتوح وينتظر المهمة ولن يغادر وحده.",
+            "message": f"تمت التهيئة. ظهر {len(names)} قروب و{rows} محادثة. أُغلق المتصفح، وكل مهمة تفتح متصفحها الخاص.",
         }
     try:
         return run_on_browser(auth_token, work)
@@ -5261,7 +5259,7 @@ def reload_browser_endpoint(access_path: str):
     except Exception:
         return jsonify(success=False, message="تعذّر تحديث صفحة المتصفح."), 502
     if not url:
-        return jsonify(success=False, message="لا توجد صفحة مفتوحة. اضغط تهيئة أولًا.")
+        return jsonify(success=False, message="لا يوجد متصفح مفتوح لتحديثه: كل مهمة تفتح متصفحها الخاص وتغلقه عند انتهائها.")
     return jsonify(success=True, message="تم تحديث صفحة متصفح السكربت.")
 
 
