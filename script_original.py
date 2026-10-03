@@ -4129,38 +4129,61 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
                 payload = {}
             return payload if isinstance(payload, dict) else {}
 
-        while not spotted and rounds < max_seek and quiet < 6:
+        # Climb with real mouse-wheel input (what X's chat listens to for loading
+        # older messages). Progress = the oldest mounted message changes, the
+        # scroll position moves, or the list grows. Unfinished tweet cards no
+        # longer keep the loop alive forever, and the climb has a time limit.
+        last_top = -1
+        deadline = time.monotonic() + 360
+        while not spotted and rounds < max_seek and quiet < 8 and time.monotonic() < deadline:
             if should_stop and should_stop():
                 raise JobStopped
-            scan = scan_stop(-1)
-            pending = int(scan.get("pending") or 0)
-            oldest = str(scan.get("oldest") or "")
+            scan = scan_stop(0)
             if scan.get("hit"):
                 spotted = True
                 hit_top = float(scan.get("hitTop") or 0)
                 break
-            height = int(scan.get("scrollHeight") or 0)
-            at_edge = int(scan.get("scrollTop") or 0) <= 48
-            loading = bool(scan.get("loading")) or pending > 0
+            client = int(scan.get("clientHeight") or 0) or 800
+            step = max(560, min(1200, int(client * 0.75)))
+            before_top = int(scan.get("scrollTop") or 0)
+            focus_group_scroller(page)
+            try:
+                page.mouse.wheel(0, -step)
+            except Exception:
+                pass
+            page.wait_for_timeout(1000)
+            state = scan_stop(0)
+            if state.get("hit"):
+                spotted = True
+                hit_top = float(state.get("hitTop") or 0)
+                break
+            top_now = int(state.get("scrollTop") or 0)
+            if abs(top_now - before_top) <= 8 and top_now > 48:
+                try:
+                    page.evaluate(STEP_OLDER_JS, step)
+                except Exception:
+                    pass
+                page.wait_for_timeout(300)
+                state = scan_stop(0)
+                top_now = int(state.get("scrollTop") or 0)
+            oldest = str(state.get("oldest") or "")
+            height = int(state.get("scrollHeight") or 0)
+            moved = last_top >= 0 and abs(top_now - last_top) > 8
             grew = height > last_height + 24 or bool(oldest and last_oldest and oldest != last_oldest)
-            if not at_edge:
+            if moved or grew:
                 quiet = 0
-                page.wait_for_timeout(1000)
-            elif loading or grew:
-                quiet = 0
-                page.wait_for_timeout(1000)
             else:
                 quiet += 1
-                page.wait_for_timeout(1000)
             if oldest:
                 last_oldest = oldest
             last_height = max(last_height, height)
+            last_top = top_now
             rounds += 1
             if on_progress and rounds % 3 == 0:
                 on_progress(rounds, 0, "seek")
             if os.environ.get("COLLECT_DEBUG"):
                 print(
-                    f"seek round={rounds} quiet={quiet} top={scan.get('scrollTop')} h={height} oldest={oldest} load={loading} spotted={spotted}",
+                    f"seek round={rounds} quiet={quiet} top={top_now} h={height} oldest={oldest} msgs={state.get('count')} pending={state.get('pending')}",
                     flush=True,
                 )
         if not spotted:
