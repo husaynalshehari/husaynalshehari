@@ -2656,6 +2656,77 @@ def read_action_state(page, status_id: str, actions: list[str]) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+ACTION_BUTTON_PROBE_JS = r"""
+({statusId, testid, scroll}) => {
+  const articles = [...document.querySelectorAll('article[data-testid="tweet"]')];
+  let card = null;
+  if (statusId) {
+    card = articles.find((article) => [...article.querySelectorAll('a[href*="/status/"]')]
+      .some((node) => (node.getAttribute("href") || "").includes("/status/" + statusId)));
+  }
+  if (!card) card = articles[0] || null;
+  if (!card) return null;
+  const button = card.querySelector('div[role="group"] [data-testid="' + testid + '"]')
+    || card.querySelector('[data-testid="' + testid + '"]');
+  if (!button) return {box: null};
+  if (scroll) {
+    try { button.scrollIntoView({block: "center", inline: "nearest", behavior: "instant"}); } catch (error) {}
+    return {scrolled: true};
+  }
+  const rect = button.getBoundingClientRect();
+  if (rect.width < 2 || rect.height < 2) return {box: null};
+  const x = rect.x + rect.width / 2;
+  const y = rect.y + rect.height / 2;
+  const hit = document.elementFromPoint(x, y);
+  const ok = !!hit && (button === hit || button.contains(hit));
+  let blocker = "";
+  if (!ok && hit) {
+    const tag = hit.closest("[data-testid]");
+    blocker = (tag && tag.getAttribute("data-testid")) || hit.tagName.toLowerCase();
+  }
+  return {box: {x: rect.x, y: rect.y, width: rect.width, height: rect.height}, ok, blocker,
+          inView: y > 0 && y < window.innerHeight};
+}
+"""
+
+
+def press_action_button(page, path: str, status_id: str, action: str) -> str:
+    """Scroll the button into view, make sure nothing covers it, then click it.
+
+    Returns "" after a click reached the button, "missing" when the button is
+    not on the page, or the name of whatever was covering the button.
+    """
+    testid = ACTION_CONTROLS[action][1]
+    blocker = ""
+    for _ in range(3):
+        try:
+            page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": testid, "scroll": True})
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+        try:
+            info = page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": testid, "scroll": False})
+        except Exception:
+            info = None
+        if not info or not info.get("box"):
+            return "missing"
+        if info.get("ok") and info.get("inView"):
+            click_box(page, info["box"])
+            return ""
+        blocker = str(info.get("blocker") or "خارج الشاشة")
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        page.wait_for_timeout(600)
+    try:
+        button = article_locator(page, path).first.locator(f'[data-testid="{testid}"]').first
+        button.click(timeout=4000, delay=100)
+        return ""
+    except Exception:
+        return blocker or "غير معروف"
+
+
 def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]:
     """Click only inactive controls. Already-on actions are left untouched."""
     status_id = ""
@@ -2676,12 +2747,14 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
         if row.get("on"):
             outcome[action] = "مفعّل مسبقًا — تم التجاوز"
             continue
-        box = row.get("box") if isinstance(row.get("box"), dict) else None
-        if not box:
-            outcome[action] = "زر الإجراء غير متاح — تم التجاوز"
-            continue
         try:
-            click_box(page, box)
+            blocker = press_action_button(page, path, status_id, action)
+            if blocker == "missing":
+                outcome[action] = "زر الإجراء غير متاح — تم التجاوز"
+                continue
+            if blocker:
+                outcome[action] = f"تعذر النقر: الزر مغطى بـ {blocker}"
+                continue
             if action == "repost":
                 confirm = page.locator('[data-testid="retweetConfirm"]')
                 try:
