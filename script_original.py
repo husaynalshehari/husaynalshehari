@@ -4145,13 +4145,13 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             grew = height > last_height + 24 or bool(oldest and last_oldest and oldest != last_oldest)
             if not at_edge:
                 quiet = 0
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(1000)
             elif loading or grew:
                 quiet = 0
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(1000)
             else:
                 quiet += 1
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(1000)
             if oldest:
                 last_oldest = oldest
             last_height = max(last_height, height)
@@ -4207,10 +4207,10 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             moved = bool(fp and last_fp and fp != last_fp) or int(payload.get("moved") or 0) > 8
             if pending or moved:
                 stall = 0
-                page.wait_for_timeout(40 if moved else 70)
+                page.wait_for_timeout(1000)
             else:
                 stall += 1
-                page.wait_for_timeout(120)
+                page.wait_for_timeout(1000)
             last_fp = fp or last_fp
             rounds += 1
             if os.environ.get("COLLECT_DEBUG"):
@@ -4266,11 +4266,11 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         if len(found) >= limit:
             break
         if loading:
-            page.wait_for_timeout(70)
+            page.wait_for_timeout(1000)
         elif at_edge and not moved:
-            page.wait_for_timeout(180)
+            page.wait_for_timeout(1000)
         else:
-            page.wait_for_timeout(35)
+            page.wait_for_timeout(1000)
         last_fp = fp or last_fp
         last_h = max(last_h, height)
         rounds += 1
@@ -4501,6 +4501,8 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 show_groups_only(page)
                 publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
                 open_named_group(page, group_name)
+                publish_job(job_id, phase="login", message="فُتح القروب. انتظار ٥ ثوانٍ قبل بدء التمرير والجمع…")
+                page.wait_for_timeout(5_000)
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
                 items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
                 if job_cancelled(job_id):
