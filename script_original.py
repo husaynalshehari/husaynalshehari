@@ -3902,6 +3902,32 @@ def open_named_group(page, name: str) -> None:
     raise RuntimeError("تم البحث عن القروب لكن قائمة الرسائل لم تُفتح.")
 
 
+def warm_up_group(page, on_status=None) -> None:
+    """Long scrolls up so X loads older messages, then back to the bottom."""
+    for index in range(5):
+        if on_status:
+            on_status(f"تمريرة طويلة للأعلى {index + 1} من 5…")
+        focus_group_scroller(page)
+        try:
+            page.mouse.wheel(0, -2500)
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    if on_status:
+        on_status("العودة إلى أسفل القروب…")
+    for _ in range(3):
+        try:
+            page.evaluate(GROUP_CHAT_SCROLL_JS, "latest")
+        except Exception:
+            pass
+        focus_group_scroller(page)
+        try:
+            page.mouse.wheel(0, 20000)
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+
+
 def group_chat_state(page) -> dict:
     try:
         return page.evaluate(GROUP_CHAT_SCROLL_JS, "state") or {}
@@ -4652,6 +4678,9 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
                 open_named_group(page, group_name)
                 publish_job(job_id, phase="login", message="فُتح القروب. انتظار ٥ ثوانٍ قبل بدء التمرير والجمع…")
+                page.wait_for_timeout(5_000)
+                warm_up_group(page, lambda text: publish_job(job_id, phase="login", message=text))
+                publish_job(job_id, phase="login", message="انتظار ٥ ثوانٍ قبل بدء التمرير والجمع…")
                 page.wait_for_timeout(5_000)
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
                 items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
