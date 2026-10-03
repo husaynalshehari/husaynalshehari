@@ -25,6 +25,7 @@ import queue
 import random
 import re
 import secrets
+import shutil
 import socket
 import threading
 import time
@@ -3479,29 +3480,99 @@ browser_hub = BrowserHub()
 MAX_PARALLEL_JOBS = 4
 
 
-def run_on_fresh_browser(auth_token: str, work):
-    """A private browser for one task, so other tasks can run at the same time."""
-    playwright = sync_playwright().start()
-    browser = None
-    context = None
-    try:
-        browser = playwright.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"],
-        )
-        context, page = open_x_context(browser, auth_token)
-        return work(page)
-    finally:
-        for obj, method in ((context, "close"), (browser, "close")):
-            try:
-                if obj is not None:
-                    getattr(obj, method)()
-            except Exception:
-                pass
+PROFILES_DIR = DATA_DIR / "profiles"
+profile_locks: dict[str, threading.Lock] = {}
+profile_locks_guard = threading.Lock()
+
+
+def profile_key(auth_token: str) -> str:
+    """Folder name for an account's browser profile. Derived from the token, never the token itself."""
+    return hashlib.sha256((auth_token or "").encode("utf-8")).hexdigest()[:24]
+
+
+def profile_lock(key: str) -> threading.Lock:
+    with profile_locks_guard:
+        lock = profile_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            profile_locks[key] = lock
+        return lock
+
+
+def open_x_profile(playwright, auth_token: str, profile_dir: Path):
+    """Open the account's permanent browser profile (created on first use)."""
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    context = playwright.chromium.launch_persistent_context(
+        str(profile_dir),
+        headless=False,
+        args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"],
+        viewport={"width": 1280, "height": 3000},
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        locale="en-US",
+    )
+    context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    )
+    if auth_token:
+        context.add_cookies([{
+            "name": "auth_token",
+            "value": auth_token,
+            "domain": ".x.com",
+            "path": "/",
+            "httpOnly": True,
+            "secure": True,
+            "sameSite": "Lax",
+        }])
+    page = context.pages[0] if context.pages else context.new_page()
+    for extra in context.pages[1:]:
         try:
-            playwright.stop()
+            extra.close()
         except Exception:
             pass
+    page.set_default_timeout(20_000)
+    page.set_default_navigation_timeout(60_000)
+    return context, page
+
+
+def run_on_fresh_browser(auth_token: str, work):
+    """Open the account's own permanent browser profile for one task, then close the browser.
+
+    Each account has one profile folder under data/profiles, created the first time
+    the account is used. Cookies and chat data stay in it between tasks. Two tasks on
+    the same account take turns, because a profile can only be open once; tasks on
+    different accounts still run at the same time.
+    """
+    key = profile_key(auth_token)
+    with profile_lock(key):
+        playwright = sync_playwright().start()
+        context = None
+        try:
+            context, page = open_x_profile(playwright, auth_token, PROFILES_DIR / key)
+            return work(page)
+        finally:
+            try:
+                if context is not None:
+                    context.close()
+            except Exception:
+                pass
+            try:
+                playwright.stop()
+            except Exception:
+                pass
+
+
+def delete_profile(auth_token: str) -> None:
+    key = profile_key(auth_token)
+    lock = profile_lock(key)
+    if not lock.acquire(timeout=5):
+        return
+    try:
+        shutil.rmtree(PROFILES_DIR / key, ignore_errors=True)
+    finally:
+        lock.release()
 
 
 
@@ -5744,6 +5815,7 @@ def delete_session_endpoint(access_path: str):
             current = str(screen.get("auth_token") or "")
         if current and hmac.compare_digest(current, removed["token"]):
             save_screen(auth_token="")
+        delete_profile(removed["token"])
     return jsonify(success=True, message="حُذفت الجلسة.")
 
 
