@@ -71,7 +71,7 @@ saved_gemini = {"api_key": "", "model": "gemini-3.5-flash"}
 JOB_FIELDS = (
     "owner", "client_id", "created_at", "updated_at", "status", "phase", "kind",
     "collected", "done", "requested", "message", "success", "preview_id",
-    "username", "actions", "items", "results", "key_hash", "shot",
+    "username", "actions", "items", "results", "key_hash", "shot", "shot_end",
 )
 logging.getLogger("werkzeug").disabled = True
 
@@ -981,7 +981,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     taskBoard.hidden = false;
     const card = document.createElement("article");
     card.className = "task-card";
-    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><div class="task-buttons"><button class="btn btn-ghost task-stop" type="button">إيقاف هذه المهمة</button><button class="btn btn-ghost task-shot-btn" type="button" hidden>عرض الصورة</button></div><img class="task-shot" alt="صورة القروب عند بدء التمرير" hidden>';
+    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><div class="task-buttons"><button class="btn btn-ghost task-stop" type="button">إيقاف هذه المهمة</button><button class="btn btn-ghost task-shot-btn" type="button" hidden>عرض الصورة</button><button class="btn btn-ghost task-shot-end-btn" type="button" hidden>صورة النهاية</button></div><img class="task-shot" alt="صورة القروب عند بدء التمرير" hidden>';
     card.querySelector("h3").textContent = task.title || "مهمة";
     const stopTask = card.querySelector(".task-stop");
     stopTask.addEventListener("click", async () => {
@@ -993,16 +993,18 @@ EMBEDDED_PAGE = r'''<!doctype html>
       }
     });
     const shotButton = card.querySelector(".task-shot-btn");
+    const shotEndButton = card.querySelector(".task-shot-end-btn");
     const shotImage = card.querySelector(".task-shot");
-    shotButton.addEventListener("click", async () => {
-      if (!shotImage.hidden) {
+    let shownShot = "";
+    const showShot = async (which, button) => {
+      if (!shotImage.hidden && shownShot === which) {
         shotImage.hidden = true;
-        shotButton.textContent = "عرض الصورة";
+        shownShot = "";
         return;
       }
-      shotButton.disabled = true;
+      button.disabled = true;
       try {
-        const response = await fetch(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "/shot", {
+        const response = await fetch(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "/shot" + (which === "end" ? "?which=end" : ""), {
           headers: {"X-CSRF-Token": csrf, "X-Job-Key": task.key, "X-Client-Id": clientId()},
           cache: "no-store"
         });
@@ -1011,13 +1013,15 @@ EMBEDDED_PAGE = r'''<!doctype html>
         if (shotImage.src) URL.revokeObjectURL(shotImage.src);
         shotImage.src = URL.createObjectURL(blob);
         shotImage.hidden = false;
-        shotButton.textContent = "إخفاء الصورة";
+        shownShot = which;
       } catch (_) {
         showNotice("تعذّر عرض الصورة.", false);
       } finally {
-        shotButton.disabled = false;
+        button.disabled = false;
       }
-    });
+    };
+    shotButton.addEventListener("click", () => showShot("start", shotButton));
+    shotEndButton.addEventListener("click", () => showShot("end", shotEndButton));
     taskList.prepend(card);
     const paint = (data) => {
       const phase = data.phase || "collect";
@@ -1033,6 +1037,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       card.querySelector(".task-bar").style.width = indeterminate ? "" : Math.max(0, Math.min(100, total ? Math.round((current / total) * 100) : 100)) + "%";
       stopTask.hidden = data.status !== "running";
       shotButton.hidden = !data.shot;
+      shotEndButton.hidden = !data.shot_end;
     };
     (async () => {
       try {
@@ -4453,6 +4458,26 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         # scroll position moves, or the list grows. Unfinished tweet cards no
         # longer keep the loop alive forever, and the climb has a time limit.
         last_top = -1
+        last_state: dict = {}
+
+        def bounce_to_top(page, step: int) -> dict:
+            try:
+                page.evaluate(SET_SCROLL_TOP_JS, max(600, step * 2))
+            except Exception:
+                pass
+            page.wait_for_timeout(700)
+            focus_group_scroller(page)
+            try:
+                page.mouse.wheel(0, -max(3000, step * 6))
+            except Exception:
+                pass
+            try:
+                page.evaluate(SET_SCROLL_TOP_JS, 0)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+            return scan_stop(0)
+
         deadline = time.monotonic() + 360
         while not spotted and rounds < max_seek and quiet < 8 and time.monotonic() < deadline:
             if should_stop and should_stop():
@@ -4490,6 +4515,21 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             height = int(state.get("scrollHeight") or 0)
             moved = last_top >= 0 and abs(top_now - last_top) > 8
             grew = height > last_height + 24 or bool(oldest and last_oldest and oldest != last_oldest)
+            if not moved and not grew and top_now <= 48:
+                # Stuck at the top: move down a little and come back up, so X sees a
+                # fresh scroll to the top and loads the older batch.
+                bounced = bounce_to_top(page, step)
+                if bounced.get("hit"):
+                    spotted = True
+                    hit_top = float(bounced.get("hitTop") or 0)
+                    break
+                state = bounced or state
+                top_now = int(state.get("scrollTop") or 0)
+                new_oldest = str(state.get("oldest") or "")
+                new_height = int(state.get("scrollHeight") or 0)
+                grew = new_height > last_height + 24 or bool(new_oldest and last_oldest and new_oldest != last_oldest)
+                oldest = new_oldest or oldest
+                height = max(height, new_height)
             if moved or grew:
                 quiet = 0
             else:
@@ -4498,6 +4538,7 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
                 last_oldest = oldest
             last_height = max(last_height, height)
             last_top = top_now
+            last_state = state
             rounds += 1
             if on_progress and rounds % 3 == 0:
                 on_progress(rounds, 0, "seek")
@@ -4507,6 +4548,13 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
                     flush=True,
                 )
         if not spotted:
+            try:
+                page._seek_stats = (
+                    f"خطوات الصعود {rounds}، الرسائل الظاهرة {last_state.get('count')}، "
+                    f"موضع التمرير {last_state.get('scrollTop')} من {last_state.get('scrollHeight')}"
+                )
+            except Exception:
+                pass
             return [], False
         rows, _pending = read_rows()
         target_top = hit_top
@@ -4933,15 +4981,16 @@ SHOTS_DIR = DATA_DIR / "shots"
 MAX_SAVED_SHOTS = 30
 
 
-def shot_path(job_id: str) -> Path:
-    return SHOTS_DIR / (re.sub(r"[^A-Za-z0-9_-]", "", job_id)[:60] + ".jpg")
+def shot_path(job_id: str, which: str = "") -> Path:
+    suffix = "-end" if which == "end" else ""
+    return SHOTS_DIR / (re.sub(r"[^A-Za-z0-9_-]", "", job_id)[:60] + suffix + ".jpg")
 
 
-def save_job_shot(page, job_id: str) -> bool:
+def save_job_shot(page, job_id: str, which: str = "") -> bool:
     """Picture of the group at the moment scrolling starts, shown on the task card."""
     try:
         SHOTS_DIR.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(shot_path(job_id)), type="jpeg", quality=55, timeout=20_000)
+        page.screenshot(path=str(shot_path(job_id, which)), type="jpeg", quality=55, timeout=20_000)
         old = sorted(SHOTS_DIR.glob("*.jpg"), key=lambda item: item.stat().st_mtime, reverse=True)
         for extra in old[MAX_SAVED_SHOTS:]:
             try:
@@ -5005,7 +5054,10 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if job_cancelled(job_id):
                     raise JobStopped
                 if stop_id and not reached:
-                    publish_job(job_id, status="done", success=False, collected=len(items), message="وصلت نهاية السجل ولم تظهر التغريدة المحددة. لم يُنفَّذ شيء.")
+                    if save_job_shot(page, job_id, "end"):
+                        publish_job(job_id, shot_end=True)
+                    stats = getattr(page, "_seek_stats", "")
+                    publish_job(job_id, status="done", success=False, collected=len(items), message=(f"[{stats}] " if stats else "") + "وصلت نهاية السجل ولم تظهر التغريدة المحددة. لم يُنفَّذ شيء.")
                     return
                 if not items:
                     publish_job(job_id, status="done", success=False, message="فُتح القروب لكن لم تُستخرج تغريدات.")
@@ -5481,6 +5533,7 @@ def public_job(job: dict) -> dict:
         "items": job.get("items") or [],
         "results": job.get("results") or [],
         "shot": bool(job.get("shot")),
+        "shot_end": bool(job.get("shot_end")),
     }
     if job["status"] != "running":
         preview_id = job.get("preview_id")
@@ -6017,7 +6070,7 @@ def job_shot(access_path: str, job_id: str):
             allowed = bool(job.get("owner")) and job.get("owner") == session.get("csrf_token", "")
     if not allowed:
         abort(404)
-    path = shot_path(job_id)
+    path = shot_path(job_id, "end" if request.args.get("which") == "end" else "")
     if not path.is_file():
         abort(404)
     response = make_response(path.read_bytes())
