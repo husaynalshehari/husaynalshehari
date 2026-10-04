@@ -3344,7 +3344,7 @@ def launch_x_browser(playwright, auth_token: str):
 
 def open_x_context(browser, auth_token: str):
     context = browser.new_context(
-        viewport={"width": 1280, "height": 3000},
+        viewport={"width": 1280, "height": NORMAL_VIEWPORT_HEIGHT},
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -3481,6 +3481,9 @@ MAX_PARALLEL_JOBS = 4
 
 
 PROFILES_DIR = DATA_DIR / "profiles"
+# Page height while opening the chat and collecting from the group, and for everything else.
+COLLECT_VIEWPORT_HEIGHT = 15000
+NORMAL_VIEWPORT_HEIGHT = 2000
 profile_locks: dict[str, threading.Lock] = {}
 profile_locks_guard = threading.Lock()
 
@@ -3506,7 +3509,7 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
         str(profile_dir),
         headless=False,
         args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"],
-        viewport={"width": 1280, "height": 3000},
+        viewport={"width": 1280, "height": NORMAL_VIEWPORT_HEIGHT},
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -3562,6 +3565,14 @@ def run_on_fresh_browser(auth_token: str, work):
                 playwright.stop()
             except Exception:
                 pass
+
+
+def set_page_height(page, height: int) -> None:
+    try:
+        page.set_viewport_size({"width": 1280, "height": int(height)})
+        page.wait_for_timeout(500)
+    except Exception:
+        pass
 
 
 def delete_profile(auth_token: str) -> None:
@@ -4718,6 +4729,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if handle:
                     remember_session(auth_token, handle, pin)
                 publish_job(job_id, phase="login", message="إدخال رمز الدردشة…")
+                set_page_height(page, COLLECT_VIEWPORT_HEIGHT)
                 error = open_chat(page, pin)
                 if error:
                     publish_job(job_id, status="done", success=False, message=error)
@@ -4729,6 +4741,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 page.wait_for_timeout(5_000)
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
                 items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
+                set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
                 if job_cancelled(job_id):
                     raise JobStopped
                 if stop_id and not reached:
