@@ -4613,6 +4613,27 @@ QUICK_ACTIONS_ON_JS = r"""
 """
 
 
+def tweet_flags_from_api(data, status_id: str) -> dict | None:
+    """Find the tweet in X's own API reply and read its like / repost / bookmark state."""
+    stack = [data]
+    seen = 0
+    while stack and seen < 20000:
+        node = stack.pop()
+        seen += 1
+        if isinstance(node, dict):
+            legacy = node.get("legacy")
+            if str(node.get("rest_id") or "") == status_id and isinstance(legacy, dict):
+                return {
+                    "like": bool(legacy.get("favorited")),
+                    "repost": bool(legacy.get("retweeted")),
+                    "bookmark": bool(legacy.get("bookmarked")),
+                }
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return None
+
+
 def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tuple[str | None, str]:
     """Open a tweet. With skip_if_on, return (path, "already_on") the moment the
     tweet's buttons show every listed action already on, without waiting for the
@@ -4629,48 +4650,77 @@ def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tup
     quick = [name for name in (skip_if_on or []) if name in ACTION_CONTROLS]
     if skip_if_on and len(quick) != len(skip_if_on):
         quick = []
+    # X's page asks its API for the tweet before drawing it. Listening to that reply
+    # gives the button states before they appear on screen.
+    replies: list = []
+    api_flags: dict | None = None
+
+    def on_response(response):
+        address = response.url
+        if "/graphql/" in address and ("TweetDetail" in address or "TweetResultByRestId" in address):
+            replies.append(response)
+
+    if quick and status_id:
+        page.on("response", on_response)
     try:
-        page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
-    except Exception:
+        try:
+            page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
+        except Exception:
+            return None, "fail"
+        revealed = False
+        deadline = time.monotonic() + (12 if quick else 8)
+        while time.monotonic() < deadline:
+            if quick and status_id:
+                while replies and api_flags is None:
+                    response = replies.pop(0)
+                    try:
+                        api_flags = tweet_flags_from_api(response.json(), status_id)
+                    except Exception:
+                        api_flags = None
+                    if api_flags is not None and os.environ.get("COLLECT_DEBUG"):
+                        print(f"tweet {status_id} api state: {api_flags}", flush=True)
+                if api_flags is not None and all(api_flags.get(name) for name in quick):
+                    return canonical or f"/i/web/status/{status_id}", "already_on"
+                try:
+                    if page.evaluate(QUICK_ACTIONS_ON_JS, {"statusId": status_id, "names": quick}):
+                        return canonical or f"/i/web/status/{status_id}", "already_on"
+                except Exception:
+                    pass
+            state = read_status_gate(page)
+            if state == "gone":
+                return None, "gone"
+            if state == "tweet":
+                href = ""
+                if status_id:
+                    try:
+                        href = page.evaluate(
+                            """(id) => {
+                              const link = [...document.querySelectorAll('a[href*="/status/"]')]
+                                .find((node) => (node.getAttribute("href") || "").includes("/status/" + id));
+                              return link ? (link.getAttribute("href") || "") : "";
+                            }""",
+                            status_id,
+                        ) or ""
+                    except Exception:
+                        href = ""
+                return normalize_status_path(str(href)) or canonical or f"/i/web/status/{status_id}", ""
+            if not revealed and time.monotonic() + 5 < deadline:
+                pass
+            elif not revealed:
+                reveal_status(page)
+                revealed = True
+                if read_status_gate(page) == "gone":
+                    return None, "gone"
+            page.wait_for_timeout(120)
+        if read_status_gate(page) == "gone":
+            return None, "gone"
         return None, "fail"
-    revealed = False
-    deadline = time.monotonic() + (12 if quick else 8)
-    while time.monotonic() < deadline:
+    finally:
         if quick and status_id:
             try:
-                if page.evaluate(QUICK_ACTIONS_ON_JS, {"statusId": status_id, "names": quick}):
-                    return canonical or f"/i/web/status/{status_id}", "already_on"
+                page.remove_listener("response", on_response)
             except Exception:
                 pass
-        state = read_status_gate(page)
-        if state == "gone":
-            return None, "gone"
-        if state == "tweet":
-            href = ""
-            if status_id:
-                try:
-                    href = page.evaluate(
-                        """(id) => {
-                          const link = [...document.querySelectorAll('a[href*="/status/"]')]
-                            .find((node) => (node.getAttribute("href") || "").includes("/status/" + id));
-                          return link ? (link.getAttribute("href") || "") : "";
-                        }""",
-                        status_id,
-                    ) or ""
-                except Exception:
-                    href = ""
-            return normalize_status_path(str(href)) or canonical or f"/i/web/status/{status_id}", ""
-        if not revealed and time.monotonic() + 5 < deadline:
-            pass
-        elif not revealed:
-            reveal_status(page)
-            revealed = True
-            if read_status_gate(page) == "gone":
-                return None, "gone"
-        page.wait_for_timeout(120)
-    if read_status_gate(page) == "gone":
-        return None, "gone"
-    return None, "fail"
 
 
 def all_actions_already_on(page, path: str, actions: list[str], timeout_s: float = 1.5) -> bool:
