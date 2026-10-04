@@ -4783,7 +4783,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
                 open_named_group(page, group_name)
                 publish_job(job_id, phase="login", message="فُتح القروب. انتظار ٥ ثوانٍ قبل بدء التمرير والجمع…")
-                page.wait_for_timeout(5_000)
+                page.wait_for_timeout(8_000)
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
                 items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
                 set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
