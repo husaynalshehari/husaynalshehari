@@ -3568,8 +3568,26 @@ PROFILES_DIR = DATA_DIR / "profiles"
 # Page height while opening the chat and collecting from the group, and for everything else.
 COLLECT_VIEWPORT_HEIGHT = 50000
 NORMAL_VIEWPORT_HEIGHT = 2500
+# Browser profiles kept per account. Each profile can run one task at a time, so an
+# account can run this many tasks at the same time.
+PROFILES_PER_ACCOUNT = 3
 profile_locks: dict[str, threading.Lock] = {}
 profile_locks_guard = threading.Lock()
+
+
+def profile_slot_dir(key: str, slot: int) -> Path:
+    # Slot 1 keeps the original folder name so an existing profile is reused.
+    return PROFILES_DIR / (key if slot == 1 else f"{key}-{slot}")
+
+
+def acquire_profile_slot(key: str) -> tuple[int, threading.Lock]:
+    """Take the first free profile of this account, waiting if all are busy."""
+    while True:
+        for slot in range(1, PROFILES_PER_ACCOUNT + 1):
+            lock = profile_lock(f"{key}-{slot}")
+            if lock.acquire(blocking=False):
+                return slot, lock
+        time.sleep(0.5)
 
 
 def profile_key(auth_token: str) -> str:
@@ -3628,17 +3646,18 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
 def run_on_fresh_browser(auth_token: str, work):
     """Open the account's own permanent browser profile for one task, then close the browser.
 
-    Each account has one profile folder under data/profiles, created the first time
-    the account is used. Cookies and chat data stay in it between tasks. Two tasks on
-    the same account take turns, because a profile can only be open once; tasks on
-    different accounts still run at the same time.
+    Each account has PROFILES_PER_ACCOUNT profile folders under data/profiles, each
+    created the first time it is needed. Cookies and chat data stay in them between
+    tasks. A task takes the first free profile of its account, so up to
+    PROFILES_PER_ACCOUNT tasks of one account run at the same time; more wait.
     """
     key = profile_key(auth_token)
-    with profile_lock(key):
+    slot, lock = acquire_profile_slot(key)
+    try:
         playwright = sync_playwright().start()
         context = None
         try:
-            context, page = open_x_profile(playwright, auth_token, PROFILES_DIR / key)
+            context, page = open_x_profile(playwright, auth_token, profile_slot_dir(key, slot))
             return work(page)
         finally:
             try:
@@ -3650,6 +3669,8 @@ def run_on_fresh_browser(auth_token: str, work):
                 playwright.stop()
             except Exception:
                 pass
+    finally:
+        lock.release()
 
 
 def set_page_height(page, height: int) -> None:
@@ -3662,13 +3683,14 @@ def set_page_height(page, height: int) -> None:
 
 def delete_profile(auth_token: str) -> None:
     key = profile_key(auth_token)
-    lock = profile_lock(key)
-    if not lock.acquire(timeout=5):
-        return
-    try:
-        shutil.rmtree(PROFILES_DIR / key, ignore_errors=True)
-    finally:
-        lock.release()
+    for slot in range(1, PROFILES_PER_ACCOUNT + 1):
+        lock = profile_lock(f"{key}-{slot}")
+        if not lock.acquire(timeout=5):
+            continue
+        try:
+            shutil.rmtree(profile_slot_dir(key, slot), ignore_errors=True)
+        finally:
+            lock.release()
 
 
 
