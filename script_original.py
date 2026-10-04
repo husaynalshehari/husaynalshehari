@@ -3342,6 +3342,31 @@ def launch_x_browser(playwright, auth_token: str):
     return browser, page
 
 
+# Do not download images, videos or audio in the automation browser.
+BLOCK_MEDIA = True
+BLOCKED_RESOURCE_TYPES = {"image", "media"}
+
+
+def block_media(context) -> None:
+    if not BLOCK_MEDIA:
+        return
+
+    def handle(route):
+        request = route.request
+        try:
+            if request.resource_type in BLOCKED_RESOURCE_TYPES or "video.twimg.com" in request.url:
+                route.abort()
+            else:
+                route.continue_()
+        except Exception:
+            pass
+
+    try:
+        context.route("**/*", handle)
+    except Exception:
+        pass
+
+
 def open_x_context(browser, auth_token: str):
     context = browser.new_context(
         viewport={"width": 1280, "height": NORMAL_VIEWPORT_HEIGHT},
@@ -3354,6 +3379,7 @@ def open_x_context(browser, auth_token: str):
     context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
+    block_media(context)
     if auth_token:
         context.add_cookies([{
             "name": "auth_token",
@@ -3519,6 +3545,7 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
     context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
+    block_media(context)
     if auth_token:
         context.add_cookies([{
             "name": "auth_token",
