@@ -4601,7 +4601,22 @@ def read_status_gate(page) -> str:
     return state if state in {"tweet", "gone", "wait"} else "wait"
 
 
-def open_status_page(page, url: str) -> tuple[str | None, str]:
+QUICK_ACTIONS_ON_JS = r"""
+({statusId, names}) => {
+  if (!statusId) return false;
+  const card = [...document.querySelectorAll('article[data-testid="tweet"]')].find((article) =>
+    [...article.querySelectorAll('a[href*="/status/"]')].some((node) => (node.getAttribute("href") || "").includes("/status/" + statusId)));
+  if (!card) return false;
+  const on = {repost: "unretweet", like: "unlike", bookmark: "removeBookmark"};
+  return names.length > 0 && names.every((name) => on[name] && card.querySelector('[data-testid="' + on[name] + '"]'));
+}
+"""
+
+
+def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tuple[str | None, str]:
+    """Open a tweet. With skip_if_on, return (path, "already_on") the moment the
+    tweet's buttons show every listed action already on, without waiting for the
+    rest of the page to load."""
     match = re.search(r"status/(\d{6,25})", url or "")
     status_id = match.group(1) if match else ""
     canonical = normalize_status_path(url) or ""
@@ -4611,13 +4626,22 @@ def open_status_page(page, url: str) -> tuple[str | None, str]:
         target = "https://x.com" + canonical
     else:
         return None, "fail"
+    quick = [name for name in (skip_if_on or []) if name in ACTION_CONTROLS]
+    if skip_if_on and len(quick) != len(skip_if_on):
+        quick = []
     try:
-        page.goto(target, wait_until="domcontentloaded", timeout=20_000)
+        page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
     except Exception:
         return None, "fail"
     revealed = False
-    deadline = time.monotonic() + 8
+    deadline = time.monotonic() + (12 if quick else 8)
     while time.monotonic() < deadline:
+        if quick and status_id:
+            try:
+                if page.evaluate(QUICK_ACTIONS_ON_JS, {"statusId": status_id, "names": quick}):
+                    return canonical or f"/i/web/status/{status_id}", "already_on"
+            except Exception:
+                pass
         state = read_status_gate(page)
         if state == "gone":
             return None, "gone"
@@ -4680,9 +4704,9 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             break
         result = {"url": item.get("url", ""), "text": item.get("text", ""), "actions": {}}
         try:
-            opened, reason = open_status_page(page, str(item.get("url") or ""))
+            opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
             if not opened and reason != "gone":
-                opened, reason = open_status_page(page, str(item.get("url") or ""))
+                opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
         except Exception as exc:
             if browser_closed_error(exc):
                 if on_snapshot and results:
@@ -4700,7 +4724,7 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             continue
         result["url"] = "https://x.com" + opened
         try:
-            already_on = all_actions_already_on(page, opened, actions)
+            already_on = reason == "already_on" or all_actions_already_on(page, opened, actions)
         except Exception as exc:
             if browser_closed_error(exc):
                 raise BrowserClosed() from exc
