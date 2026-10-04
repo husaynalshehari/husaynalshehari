@@ -71,7 +71,7 @@ saved_gemini = {"api_key": "", "model": "gemini-3.5-flash"}
 JOB_FIELDS = (
     "owner", "client_id", "created_at", "updated_at", "status", "phase", "kind",
     "collected", "done", "requested", "message", "success", "preview_id",
-    "username", "actions", "items", "results", "key_hash",
+    "username", "actions", "items", "results", "key_hash", "shot",
 )
 logging.getLogger("werkzeug").disabled = True
 
@@ -455,6 +455,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .task-card h3 { margin: 0; font-size: 13px; font-weight: 600; }
     .task-card p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
     .task-card .meter { margin-top: 8px; }
+    .task-card .task-buttons { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+    .task-card .task-shot { display: block; width: 100%; margin-top: 8px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--line); }
     .progress-top h2 { margin: 0; font-size: 16px; font-weight: 600; text-wrap: balance; }
     .progress-top p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
     .progress-figure { text-align: end; flex: 0 0 auto; }
@@ -979,14 +981,41 @@ EMBEDDED_PAGE = r'''<!doctype html>
     taskBoard.hidden = false;
     const card = document.createElement("article");
     card.className = "task-card";
-    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><button class="btn btn-ghost" type="button">إيقاف هذه المهمة</button>';
+    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><div class="task-buttons"><button class="btn btn-ghost task-stop" type="button">إيقاف هذه المهمة</button><button class="btn btn-ghost task-shot-btn" type="button" hidden>عرض الصورة</button></div><img class="task-shot" alt="صورة القروب عند بدء التمرير" hidden>';
     card.querySelector("h3").textContent = task.title || "مهمة";
-    card.querySelector("button").addEventListener("click", async () => {
-      card.querySelector("button").disabled = true;
+    const stopTask = card.querySelector(".task-stop");
+    stopTask.addEventListener("click", async () => {
+      stopTask.disabled = true;
       try {
         await postJson("/stop", {job_id: task.id, job_key: task.key});
       } catch (_) {
-        card.querySelector("button").disabled = false;
+        stopTask.disabled = false;
+      }
+    });
+    const shotButton = card.querySelector(".task-shot-btn");
+    const shotImage = card.querySelector(".task-shot");
+    shotButton.addEventListener("click", async () => {
+      if (!shotImage.hidden) {
+        shotImage.hidden = true;
+        shotButton.textContent = "عرض الصورة";
+        return;
+      }
+      shotButton.disabled = true;
+      try {
+        const response = await fetch(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "/shot", {
+          headers: {"X-CSRF-Token": csrf, "X-Job-Key": task.key, "X-Client-Id": clientId()},
+          cache: "no-store"
+        });
+        if (!response.ok) throw new Error("no shot");
+        const blob = await response.blob();
+        if (shotImage.src) URL.revokeObjectURL(shotImage.src);
+        shotImage.src = URL.createObjectURL(blob);
+        shotImage.hidden = false;
+        shotButton.textContent = "إخفاء الصورة";
+      } catch (_) {
+        showNotice("تعذّر عرض الصورة.", false);
+      } finally {
+        shotButton.disabled = false;
       }
     });
     taskList.prepend(card);
@@ -1002,7 +1031,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
       const indeterminate = data.status === "running" && (phase === "login" || !total);
       meter.classList.toggle("is-indeterminate", indeterminate);
       card.querySelector(".task-bar").style.width = indeterminate ? "" : Math.max(0, Math.min(100, total ? Math.round((current / total) * 100) : 100)) + "%";
-      card.querySelector("button").hidden = data.status !== "running";
+      stopTask.hidden = data.status !== "running";
+      shotButton.hidden = !data.shot;
     };
     (async () => {
       try {
@@ -4899,6 +4929,28 @@ def job_cancelled(job_id: str) -> bool:
 
 
 DEFAULT_GROUP_WAIT_SECONDS = 8
+SHOTS_DIR = DATA_DIR / "shots"
+MAX_SAVED_SHOTS = 30
+
+
+def shot_path(job_id: str) -> Path:
+    return SHOTS_DIR / (re.sub(r"[^A-Za-z0-9_-]", "", job_id)[:60] + ".jpg")
+
+
+def save_job_shot(page, job_id: str) -> bool:
+    """Picture of the group at the moment scrolling starts, shown on the task card."""
+    try:
+        SHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(shot_path(job_id)), type="jpeg", quality=55, timeout=20_000)
+        old = sorted(SHOTS_DIR.glob("*.jpg"), key=lambda item: item.stat().st_mtime, reverse=True)
+        for extra in old[MAX_SAVED_SHOTS:]:
+            try:
+                extra.unlink()
+            except OSError:
+                pass
+        return True
+    except Exception:
+        return False
 
 
 def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS) -> None:
@@ -4945,6 +4997,8 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if group_wait_s > 0:
                     publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع…")
                     page.wait_for_timeout(int(group_wait_s) * 1000)
+                if save_job_shot(page, job_id):
+                    publish_job(job_id, shot=True)
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
                 items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
                 set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
@@ -5101,7 +5155,7 @@ def secure_response(response):
     response.headers["Pragma"] = "no-cache"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'"
     return response
 
 
@@ -5426,6 +5480,7 @@ def public_job(job: dict) -> dict:
         "actions": job.get("actions") or [],
         "items": job.get("items") or [],
         "results": job.get("results") or [],
+        "shot": bool(job.get("shot")),
     }
     if job["status"] != "running":
         preview_id = job.get("preview_id")
@@ -5947,6 +6002,27 @@ def job_status(access_path: str, job_id: str):
         if not owner_ok:
             return jsonify(success=False, message="لا توجد عملية بهذا المعرّف."), 404
         return jsonify(public_job(job))
+
+
+@app.get("/<access_path>/jobs/<job_id>/shot")
+def job_shot(access_path: str, job_id: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            abort(404)
+        allowed = job_key_matches(job, request.headers.get("X-Job-Key", ""))
+        if not allowed and csrf_matches(request.headers.get("X-CSRF-Token", "")):
+            allowed = bool(job.get("owner")) and job.get("owner") == session.get("csrf_token", "")
+    if not allowed:
+        abort(404)
+    path = shot_path(job_id)
+    if not path.is_file():
+        abort(404)
+    response = make_response(path.read_bytes())
+    response.headers["Content-Type"] = "image/jpeg"
+    return response
 
 
 @app.get("/<access_path>/sessions")
