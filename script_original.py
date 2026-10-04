@@ -1978,17 +1978,53 @@ READ_GROUPS_JS = r"""
     return "";
   };
   if (wanted) {
-    const target = clean(wanted);
-    for (const row of rows) {
-      if (nameOf(row) !== target) continue;
+    const target = clean(typeof wanted === "object" ? (wanted.name || "") : wanted);
+    const wantedId = typeof wanted === "object" ? String(wanted.testid || "") : "";
+    const open = (row, how) => {
       const link = row.querySelector('a[href*="/i/chat/"], a[href*="/messages/"]');
       if (link) link.click();
       else row.click();
-      return {clicked: true, groups: [], rows: rows.length, loading: false};
+      return {clicked: true, how, matched: nameOf(row), groups: [], rows: rows.length, loading: false};
+    };
+    // 1) The group's own id: stays the same when the group is renamed.
+    if (wantedId) {
+      for (const row of rows) if ((row.getAttribute("data-testid") || "") === wantedId) return open(row, "id");
     }
+    // 2) The exact name.
+    for (const row of rows) if (nameOf(row) === target) return open(row, "name");
+    // 3) A very similar name: only a few characters changed (usually near the end).
+    const chars = (text) => Array.from(text || "");
+    const distance = (a, b) => {
+      let prev = Array.from({length: b.length + 1}, (_, j) => j);
+      for (let i = 1; i <= a.length; i++) {
+        const cur = [i];
+        for (let j = 1; j <= b.length; j++) {
+          cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        }
+        prev = cur;
+      }
+      return prev[b.length];
+    };
+    const shared = (a, b) => { let n = 0; while (n < a.length && n < b.length && a[n] === b[n]) n++; return n; };
+    const targetChars = chars(target);
+    const allowed = Math.min(6, Math.max(2, Math.floor(targetChars.length * 0.35)));
+    let best = null, bestDistance = Infinity, tie = false;
+    for (const row of rows) {
+      const id = row.getAttribute("data-testid") || "";
+      const desc = row.getAttribute("aria-description") || "";
+      if (!(/dm-conversation-item-g\d/.test(id) || /جماعية|group chat/i.test(desc))) continue;
+      const nameChars = chars(nameOf(row));
+      if (shared(targetChars, nameChars) < Math.min(4, targetChars.length)) continue;
+      const d = distance(targetChars, nameChars);
+      if (d > allowed) continue;
+      if (d < bestDistance) { best = row; bestDistance = d; tie = false; }
+      else if (d === bestDistance) tie = true;
+    }
+    if (best && !tie) return open(best, "similar");
     return {clicked: false, groups: [], rows: rows.length, loading: false};
   }
   const groups = [];
+  const ids = [];
   const seen = new Set();
   for (const row of rows) {
     const id = row.getAttribute("data-testid") || "";
@@ -1999,12 +2035,13 @@ READ_GROUPS_JS = r"""
     if (!name || seen.has(name)) continue;
     seen.add(name);
     groups.push(name);
+    ids.push(id);
   }
   const loading = queryAll('[data-testid="dm-conversation-list-loading-footer"]').some((el) => {
     const rect = el.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   });
-  return {clicked: false, groups, rows: rows.length, loading};
+  return {clicked: false, groups, ids, rows: rows.length, loading};
 }
 """
 
@@ -4024,6 +4061,31 @@ def prepare_chat(auth_token: str, pin: str) -> dict:
         return {"ok": False, "message": "تعذّر فتح المتصفح.", "groups": []}
 
 
+GROUP_IDS_PATH = DATA_DIR / "group_ids.json"
+group_ids_lock = threading.Lock()
+group_ids: dict[str, str] = {}
+
+
+def load_group_ids() -> None:
+    loaded = read_private_json(GROUP_IDS_PATH) or {}
+    rows = loaded.get("groups")
+    if isinstance(rows, dict):
+        with group_ids_lock:
+            group_ids.update({str(k): str(v) for k, v in rows.items() if k and v})
+
+
+def remember_group_id(name: str, testid: str) -> None:
+    """Remember each group's id (it does not change when the group is renamed)."""
+    with group_ids_lock:
+        if group_ids.get(name) == testid:
+            return
+        group_ids[name] = testid
+        try:
+            write_private_json(GROUP_IDS_PATH, {"version": 1, "groups": dict(group_ids)})
+        except Exception:
+            pass
+
+
 def collect_groups(page) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
@@ -4034,12 +4096,15 @@ def collect_groups(page) -> list[str]:
         except Exception:
             payload = {}
         added = 0
-        for name in payload.get("groups") or []:
+        ids = payload.get("ids") or []
+        for index, name in enumerate(payload.get("groups") or []):
             clean = re.sub(r"\s+", " ", str(name)).strip()
             if not clean or clean in seen:
                 continue
             seen.add(clean)
             found.append(clean)
+            if index < len(ids) and ids[index]:
+                remember_group_id(clean, str(ids[index]))
             added += 1
         try:
             page.evaluate(SCROLL_INBOX_JS)
@@ -4065,19 +4130,29 @@ def collect_groups(page) -> list[str]:
     return found
 
 
-def open_named_group(page, name: str) -> None:
+def open_named_group(page, name: str) -> str:
     """Find the group in the inbox (waiting up to 10 seconds for it), click it once,
-    then wait for its messages. No retries: on failure the task stops with a message."""
+    then wait for its messages. No retries: on failure the task stops with a message.
+
+    The group is matched by its saved id first (renaming does not change it), then by
+    exact name, then by a name that starts the same and differs only in the last few
+    characters. Returns the name the group has now."""
     wanted = re.sub(r"\s+", " ", name).strip()
+    with group_ids_lock:
+        saved_id = group_ids.get(wanted, "")
     started = time.monotonic()
     clicked = False
+    current_name = wanted
     while time.monotonic() - started < 10:
         try:
-            payload = page.evaluate(READ_GROUPS_JS, wanted) or {}
+            payload = page.evaluate(READ_GROUPS_JS, {"name": wanted, "testid": saved_id}) or {}
         except Exception:
             payload = {}
         if payload.get("clicked"):
             clicked = True
+            current_name = re.sub(r"\s+", " ", str(payload.get("matched") or wanted)).strip() or wanted
+            if os.environ.get("COLLECT_DEBUG"):
+                print(f"group opened by {payload.get('how')}: wanted={wanted!r} now={current_name!r}", flush=True)
             break
         if time.monotonic() - started > 3:
             try:
@@ -4095,7 +4170,7 @@ def open_named_group(page, name: str) -> None:
             state = {}
         if state.get("hasList") and state.get("messages"):
             page.wait_for_timeout(800)
-            return
+            return current_name
         page.wait_for_timeout(300)
     raise RuntimeError("فُتح القروب لكن رسائله لم تظهر. توقفت المهمة.")
 
@@ -4963,7 +5038,9 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     return
                 show_groups_only(page)
                 publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
-                open_named_group(page, group_name)
+                opened_name = open_named_group(page, group_name)
+                if opened_name != group_name:
+                    publish_job(job_id, phase="login", message=f"تغيّر اسم القروب إلى «{opened_name}» وفُتح.")
                 if group_wait_s > 0:
                     publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع…")
                     page.wait_for_timeout(int(group_wait_s) * 1000)
@@ -6068,6 +6145,7 @@ def cancel_preview_endpoint(access_path: str):
 
 
 load_sessions()
+load_group_ids()
 load_gemini()
 load_jobs()
 load_screen()
