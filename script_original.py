@@ -4126,7 +4126,8 @@ def focus_group_scroller(page) -> None:
     except Exception:
         box = None
     if box and box.get("height", 0) >= 40:
-        page.mouse.move(box["x"] + box["width"] * 0.45, box["y"] + min(box["height"] * 0.42, 640))
+        # Point at the top part of the group's message area, where older messages load.
+        page.mouse.move(box["x"] + box["width"] * 0.45, box["y"] + min(box["height"] * 0.1, 120))
 
 
 NUDGE_OLDER_JS = r"""
@@ -5050,12 +5051,12 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     publish_job(job_id, shot=True)
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
                 items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
+                if stop_id and not reached and save_job_shot(page, job_id, "end"):
+                    publish_job(job_id, shot_end=True)
                 set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
                 if job_cancelled(job_id):
                     raise JobStopped
                 if stop_id and not reached:
-                    if save_job_shot(page, job_id, "end"):
-                        publish_job(job_id, shot_end=True)
                     stats = getattr(page, "_seek_stats", "")
                     publish_job(job_id, status="done", success=False, collected=len(items), message=(f"[{stats}] " if stats else "") + "وصلت نهاية السجل ولم تظهر التغريدة المحددة. لم يُنفَّذ شيء.")
                     return
