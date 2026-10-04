@@ -348,7 +348,17 @@ EMBEDDED_PAGE = r'''<!doctype html>
       font-size: 12px;
       font-weight: 600;
     }
-    .wait-groups input { width: 15px; height: 15px; accent-color: var(--pine); }
+    .wait-groups input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--pine); }
+    .wait-groups input.wait-sec {
+      width: 52px;
+      min-height: 28px;
+      height: 28px;
+      padding: 0 4px;
+      text-align: center;
+      direction: ltr;
+      font-size: 14px;
+    }
+    .group-wait-row { display: flex; align-items: center; gap: 6px; margin: 4px 0 8px; }
     .btn-wide { width: 100%; margin-top: 8px; min-height: 34px; height: 34px; }
     .target-row { display: grid; grid-template-columns: minmax(0, 1fr) 76px; gap: 6px; align-items: center; }
     .target-row .prefix-field { min-width: 0; }
@@ -677,12 +687,22 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <button id="groups-button" class="btn btn-ghost" type="button">عرض القروبات</button>
             <label class="wait-groups" for="wait-groups">
               <input id="wait-groups" type="checkbox">
-              انتظار ١٠ ثوانٍ
+              انتظار
+              <input id="wait-groups-sec" class="wait-sec" type="number" min="1" max="120" step="1" value="10" inputmode="numeric" aria-label="ثواني الانتظار قبل التقاط القروبات">
+              ث
             </label>
           </div>
           <div id="group-box" class="saved-sessions" hidden>
             <p class="field-label">اختر قروبًا</p>
             <ul id="group-list" class="saved-list"></ul>
+          </div>
+          <div class="group-wait-row">
+            <label class="wait-groups" for="group-wait-on">
+              <input id="group-wait-on" type="checkbox">
+              انتظار داخل القروب قبل التمرير
+              <input id="group-wait-sec" class="wait-sec" type="number" min="0" max="300" step="1" value="8" inputmode="numeric" aria-label="ثواني الانتظار داخل القروب">
+              ث
+            </label>
           </div>
           <div class="mode-switch" role="group" aria-label="طريقة التوقف">
             <button id="mode-count" class="preset is-on" type="button">عدد</button>
@@ -829,6 +849,32 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const reloadButton = document.getElementById("reload-button");
   const groupsButton = document.getElementById("groups-button");
   const waitGroups = document.getElementById("wait-groups");
+  const waitGroupsSec = document.getElementById("wait-groups-sec");
+  const groupWaitOn = document.getElementById("group-wait-on");
+  const groupWaitSec = document.getElementById("group-wait-sec");
+  function rememberWaits() {
+    try {
+      localStorage.setItem("x_wait_settings", JSON.stringify({
+        groupsOn: waitGroups.checked, groupsSec: waitGroupsSec.value,
+        groupOn: groupWaitOn.checked, groupSec: groupWaitSec.value
+      }));
+    } catch (_) {}
+  }
+  try {
+    const savedWaits = JSON.parse(localStorage.getItem("x_wait_settings") || "null");
+    if (savedWaits) {
+      waitGroups.checked = !!savedWaits.groupsOn;
+      if (savedWaits.groupsSec) waitGroupsSec.value = savedWaits.groupsSec;
+      groupWaitOn.checked = !!savedWaits.groupOn;
+      if (savedWaits.groupSec !== undefined && savedWaits.groupSec !== "") groupWaitSec.value = savedWaits.groupSec;
+    }
+  } catch (_) {}
+  [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec].forEach((node) => node.addEventListener("change", rememberWaits));
+  function secondsFrom(field, min, max, fallback) {
+    const value = Number.parseInt(field.value, 10);
+    if (!Number.isInteger(value)) return fallback;
+    return Math.max(min, Math.min(max, value));
+  }
   const groupBox = document.getElementById("group-box");
   const groupList = document.getElementById("group-list");
   const commentToggle = document.getElementById("action-comment");
@@ -1481,9 +1527,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
     groupsButton.disabled = true;
     prepareButton.disabled = true;
     const settle = !!waitGroups.checked;
-    showNotice(settle ? "جارٍ فتح الدردشة ثم الانتظار ١٠ ثوانٍ قبل التقاط القروبات…" : "جارٍ فتح الدردشة وعرض القروبات…", true);
+    const settleSeconds = secondsFrom(waitGroupsSec, 1, 120, 10);
+    showNotice(settle ? "جارٍ فتح الدردشة ثم الانتظار " + settleSeconds + " ث قبل التقاط القروبات…" : "جارٍ فتح الدردشة وعرض القروبات…", true);
     try {
-      const data = await postJson("/groups", {auth_token: authToken, chat_pin: pin, wait: settle});
+      const data = await postJson("/groups", {auth_token: authToken, chat_pin: pin, wait: settle, wait_seconds: settleSeconds});
       if (!data.success) {
         showNotice(data.message || "تعذّر عرض القروبات.", false);
         return;
@@ -1556,7 +1603,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
         stop_tweet: stopRaw,
         actions,
         gemini_api_key: geminiKey.value.trim(),
-        gemini_model: geminiModel.value.trim()
+        gemini_model: geminiModel.value.trim(),
+        group_wait: groupWaitOn.checked ? secondsFrom(groupWaitSec, 0, 300, 8) : null
       });
       if (!started.success || !started.job_id || !started.job_key) {
         showNotice(started.message || "تعذّر بدء التنفيذ.", false);
@@ -4803,7 +4851,7 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
     return results
 
 
-def fetch_group_names(auth_token: str, pin: str, settle: bool = False) -> tuple[list[str], str | None]:
+def fetch_group_names(auth_token: str, pin: str, settle: bool = False, settle_seconds: int = 10) -> tuple[list[str], str | None]:
     def work(page):
         if not ensure_logged_in(page):
             return [], "الجلسة غير مسجّلة الدخول."
@@ -4815,7 +4863,7 @@ def fetch_group_names(auth_token: str, pin: str, settle: bool = False) -> tuple[
             return [], error
         show_groups_only(page)
         if settle:
-            page.wait_for_timeout(10_000)
+            page.wait_for_timeout(max(1, min(120, int(settle_seconds))) * 1000)
         names = collect_groups(page)
         if not names:
             return [], "فُتحت الدردشة لكن لم تظهر قروبات."
@@ -4850,7 +4898,10 @@ def job_cancelled(job_id: str) -> bool:
         return bool(job.get("cancel"))
 
 
-def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "") -> None:
+DEFAULT_GROUP_WAIT_SECONDS = 8
+
+
+def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS) -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
             raise JobStopped
@@ -4891,8 +4942,9 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 show_groups_only(page)
                 publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
                 open_named_group(page, group_name)
-                publish_job(job_id, phase="login", message="فُتح القروب. انتظار ٥ ثوانٍ قبل بدء التمرير والجمع…")
-                page.wait_for_timeout(8_000)
+                if group_wait_s > 0:
+                    publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع…")
+                    page.wait_for_timeout(int(group_wait_s) * 1000)
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
                 items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
                 set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
@@ -5682,8 +5734,10 @@ def groups_endpoint(access_path: str):
     if not valid_chat_pin(pin):
         return jsonify(success=False, message="رمز الدردشة يجب أن يكون من ٤ إلى ٨ أرقام."), 400
     settle = bool(data.get("wait"))
+    settle_seconds = parse_requested_count(data.get("wait_seconds")) or 10
+    settle_seconds = max(1, min(120, settle_seconds))
     try:
-        names, error = fetch_group_names(auth_token, pin, settle)
+        names, error = fetch_group_names(auth_token, pin, settle, settle_seconds)
     except Exception:
         app.logger.warning("group list failed")
         return jsonify(success=False, message="تعذّر فتح الدردشة."), 502
@@ -5726,6 +5780,12 @@ def group_run_endpoint(access_path: str):
         requested_count = 0
     if not isinstance(requested_actions, list) or not requested_actions or any(not isinstance(action, str) or action not in ALLOWED_ACTIONS for action in requested_actions):
         return jsonify(success=False, message="اختر إجراء واحدًا على الأقل."), 400
+    group_wait_raw = data.get("group_wait")
+    group_wait_s = DEFAULT_GROUP_WAIT_SECONDS
+    if group_wait_raw is not None:
+        parsed_wait = parse_requested_count(group_wait_raw)
+        if parsed_wait is not None:
+            group_wait_s = max(0, min(300, parsed_wait))
     requested_actions = list(dict.fromkeys(requested_actions))
     gemini_api_key = str(data.get("gemini_api_key") or "").strip()
     gemini_model = normalize_gemini_model(str(data.get("gemini_model") or ""))
@@ -5757,7 +5817,7 @@ def group_run_endpoint(access_path: str):
     )
     threading.Thread(
         target=run_group_job,
-        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id),
+        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s),
         daemon=True,
     ).start()
     return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأ التنفيذ.")
