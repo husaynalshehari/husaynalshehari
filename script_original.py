@@ -3959,30 +3959,38 @@ def collect_groups(page) -> list[str]:
 
 
 def open_named_group(page, name: str) -> None:
+    """Find the group in the inbox (waiting up to 10 seconds for it), click it once,
+    then wait for its messages. No retries: on failure the task stops with a message."""
     wanted = re.sub(r"\s+", " ", name).strip()
-    for _ in range(6):
+    started = time.monotonic()
+    clicked = False
+    while time.monotonic() - started < 10:
         try:
             payload = page.evaluate(READ_GROUPS_JS, wanted) or {}
         except Exception:
             payload = {}
         if payload.get("clicked"):
-            deadline = time.monotonic() + 12
-            while time.monotonic() < deadline:
-                try:
-                    state = page.evaluate(GROUP_CHAT_SCROLL_JS, "state") or {}
-                except Exception:
-                    state = {}
-                if state.get("hasList") and state.get("messages"):
-                    page.wait_for_timeout(800)
-                    return
-                page.wait_for_timeout(300)
+            clicked = True
+            break
+        if time.monotonic() - started > 3:
+            try:
+                page.evaluate(SCROLL_INBOX_JS)
+            except Exception:
+                pass
+        page.wait_for_timeout(700)
+    if not clicked:
+        raise RuntimeError(f"لم يظهر القروب «{wanted}» في الدردشة خلال ١٠ ثوانٍ. توقفت المهمة.")
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
         try:
-            page.evaluate(SCROLL_INBOX_JS)
+            state = page.evaluate(GROUP_CHAT_SCROLL_JS, "state") or {}
         except Exception:
-            pass
-        page.wait_for_timeout(400)
-    raise RuntimeError("تم البحث عن القروب لكن قائمة الرسائل لم تُفتح.")
-
+            state = {}
+        if state.get("hasList") and state.get("messages"):
+            page.wait_for_timeout(800)
+            return
+        page.wait_for_timeout(300)
+    raise RuntimeError("فُتح القروب لكن رسائله لم تظهر. توقفت المهمة.")
 
 def group_chat_state(page) -> dict:
     try:
@@ -4803,44 +4811,26 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             app.logger.warning("group run failed")
             publish_job(job_id, status="done", success=False, message=str(exc) or "تعذّر تنفيذ إجراءات القروب.")
             raise
-    restarts = 0
-    stalled = 0
-    last_done = -1
-    while restarts <= 40:
-        try:
-            run_on_fresh_browser(auth_token, work)
-            return
-        except BrowserClosed:
-            with jobs_lock:
-                job = jobs.get(job_id) or {}
-                if job.get("status") == "done":
-                    return
-                done_now = len(job.get("results") or [])
-            if done_now == last_done:
-                stalled += 1
-                note = "أُغلق المتصفح. تُعاد المحاولة…"
-            else:
-                stalled = 0
-                note = "تُستأنف المهمة بعد تحديث المتصفح…"
-            last_done = done_now
-            restarts += 1
-            if stalled >= 3 or restarts > 40:
-                publish_job(
-                    job_id, status="done", success=False,
-                    message="توقف التنفيذ لأن المتصفح أُغلق. ما اكتمل قبل الإغلاق ما زال ظاهرًا.",
-                )
-                return
-            publish_job(job_id, message=note)
-            time.sleep(1.5)
-        except Exception as exc:
-            with jobs_lock:
-                job = jobs.get(job_id) or {}
-                already_done = job.get("status") == "done"
-            if not already_done:
-                app.logger.warning("group run failed")
-                message = "أُغلق المتصفح أثناء العمل." if browser_closed_error(exc) else (str(exc) or "تعذّر تنفيذ إجراءات القروب.")
-                publish_job(job_id, status="done", success=False, message=message)
-
+    # One attempt only. If anything fails, the task stops with a message and is not retried.
+    try:
+        run_on_fresh_browser(auth_token, work)
+    except BrowserClosed:
+        with jobs_lock:
+            job = jobs.get(job_id) or {}
+            already_done = job.get("status") == "done"
+        if not already_done:
+            publish_job(
+                job_id, status="done", success=False,
+                message="توقف التنفيذ لأن المتصفح أُغلق. ما اكتمل قبل الإغلاق ما زال ظاهرًا.",
+            )
+    except Exception as exc:
+        with jobs_lock:
+            job = jobs.get(job_id) or {}
+            already_done = job.get("status") == "done"
+        if not already_done:
+            app.logger.warning("group run failed")
+            message = "أُغلق المتصفح أثناء العمل." if browser_closed_error(exc) else (str(exc) or "تعذّر تنفيذ إجراءات القروب.")
+            publish_job(job_id, status="done", success=False, message=message)
 
 def check_x_login_and_reposts(auth_token: str, username: str, requested_count: int, on_progress=None, source: str = "reposts") -> tuple[bool, list[dict], str | None]:
     """Verify the session, open reposts or replies, then collect links."""
