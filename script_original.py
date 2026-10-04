@@ -3641,6 +3641,44 @@ def profile_lock(key: str) -> threading.Lock:
         return lock
 
 
+# Login cookies X keeps for a session. A saved profile can hold an old or logged-out
+# copy of these (for example after X ended that browser's session), which makes the
+# account look logged out even though the token is still valid. They are cleared each
+# time a profile opens and the account's token is put back fresh. Chat data, device
+# data and other site storage in the profile are kept.
+LOGIN_COOKIE_NAMES = {"auth_token", "ct0", "twid", "kdt", "att", "_twitter_sess", "auth_multi"}
+
+
+def reset_login_cookies(context, auth_token: str) -> None:
+    try:
+        cookies = context.cookies()
+    except Exception:
+        cookies = []
+    keep = []
+    for cookie in cookies:
+        domain = str(cookie.get("domain") or "").lstrip(".").lower()
+        on_x = domain.endswith("x.com") or domain.endswith("twitter.com")
+        if on_x and cookie.get("name") in LOGIN_COOKIE_NAMES:
+            continue
+        keep.append(cookie)
+    try:
+        context.clear_cookies()
+        if keep:
+            context.add_cookies(keep)
+    except Exception:
+        pass
+    if auth_token:
+        context.add_cookies([{
+            "name": "auth_token",
+            "value": auth_token,
+            "domain": ".x.com",
+            "path": "/",
+            "httpOnly": True,
+            "secure": True,
+            "sameSite": "Lax",
+        }])
+
+
 def open_x_profile(playwright, auth_token: str, profile_dir: Path):
     """Open the account's permanent browser profile (created on first use)."""
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -3659,16 +3697,7 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
     block_media(context)
-    if auth_token:
-        context.add_cookies([{
-            "name": "auth_token",
-            "value": auth_token,
-            "domain": ".x.com",
-            "path": "/",
-            "httpOnly": True,
-            "secure": True,
-            "sameSite": "Lax",
-        }])
+    reset_login_cookies(context, auth_token)
     page = context.pages[0] if context.pages else context.new_page()
     for extra in context.pages[1:]:
         try:
