@@ -4649,6 +4649,27 @@ def open_status_page(page, url: str) -> tuple[str | None, str]:
     return None, "fail"
 
 
+def all_actions_already_on(page, path: str, actions: list[str], timeout_s: float = 1.5) -> bool:
+    """Read the tweet's buttons as soon as they appear. True only when every
+    requested action is already on, so the tweet can be skipped without waiting
+    for the rest of the page to load."""
+    if not actions or any(action not in ACTION_CONTROLS for action in actions):
+        return False
+    match = re.search(r"status/(\d{6,25})", path or "")
+    status_id = match.group(1) if match else ""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        state = read_action_state(page, status_id, actions) or {}
+        rows = [state.get(action) if isinstance(state.get(action), dict) else {} for action in actions]
+        if rows and all(row.get("on") for row in rows):
+            return True
+        if rows and all(row.get("on") or row.get("box") for row in rows):
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        page.wait_for_timeout(150)
+
+
 def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None) -> list[dict]:
     results: list[dict] = []
     total = len(items)
@@ -4678,6 +4699,20 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
                 on_progress(index + 1, total, "act")
             continue
         result["url"] = "https://x.com" + opened
+        try:
+            already_on = all_actions_already_on(page, opened, actions)
+        except Exception as exc:
+            if browser_closed_error(exc):
+                raise BrowserClosed() from exc
+            already_on = False
+        if already_on:
+            result["actions"] = {key: "مفعّل مسبقًا — تم التجاوز" for key in actions}
+            results.append(result)
+            if on_snapshot:
+                on_snapshot(list(results))
+            if on_progress:
+                on_progress(index + 1, total, "act")
+            continue
         page.wait_for_timeout(2000)
         close_popups(page)
         try:
