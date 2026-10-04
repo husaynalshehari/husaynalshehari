@@ -3253,6 +3253,7 @@ def resolve_comment_target(page, path: str, needs_parent: bool) -> tuple[str, ob
 
 
 def execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress=None, should_stop=None, on_snapshot=None) -> list[dict]:
+    allow_media(page)
     results: list[dict] = []
     plain = [action for action in actions if action != "comment"]
     total = len(items)
@@ -3350,11 +3351,13 @@ BLOCKED_RESOURCE_TYPES = {"image", "media"}
 def block_media(context) -> None:
     if not BLOCK_MEDIA:
         return
+    state = {"allow": False}
+    context._media_state = state
 
     def handle(route):
         request = route.request
         try:
-            if request.resource_type in BLOCKED_RESOURCE_TYPES or "video.twimg.com" in request.url:
+            if not state["allow"] and (request.resource_type in BLOCKED_RESOURCE_TYPES or "video.twimg.com" in request.url):
                 route.abort()
             else:
                 route.continue_()
@@ -3365,6 +3368,13 @@ def block_media(context) -> None:
         context.route("**/*", handle)
     except Exception:
         pass
+
+
+def allow_media(page) -> None:
+    """Let this browser load images and videos again (used for comments)."""
+    state = getattr(page.context, "_media_state", None)
+    if state is not None:
+        state["allow"] = True
 
 
 def open_x_context(browser, auth_token: str):
