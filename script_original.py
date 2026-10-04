@@ -3603,6 +3603,8 @@ PROFILES_DIR = DATA_DIR / "profiles"
 # Page height while opening the chat and collecting from the group, and for everything else.
 COLLECT_VIEWPORT_HEIGHT = 15000
 NORMAL_VIEWPORT_HEIGHT = 2000
+# If the group fits completely on the tall page, switch to this height so it can scroll.
+SCROLLABLE_VIEWPORT_HEIGHT = 3000
 profile_locks: dict[str, threading.Lock] = {}
 profile_locks_guard = threading.Lock()
 
@@ -4516,6 +4518,21 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             height = int(state.get("scrollHeight") or 0)
             moved = last_top >= 0 and abs(top_now - last_top) > 8
             grew = height > last_height + 24 or bool(oldest and last_oldest and oldest != last_oldest)
+            client_now = int(state.get("clientHeight") or 0)
+            page_height = int((page.viewport_size or {}).get("height") or 0)
+            if (not moved and not grew and height and client_now
+                    and height <= client_now + 120 and page_height > SCROLLABLE_VIEWPORT_HEIGHT):
+                # The whole loaded part of the group fits on the page, so there is
+                # nothing to scroll and X never loads the older part. Make the page
+                # shorter so the group becomes scrollable, then keep climbing.
+                if os.environ.get("COLLECT_DEBUG"):
+                    print(f"group fits the page (h={height}, client={client_now}); shrinking page to {SCROLLABLE_VIEWPORT_HEIGHT}", flush=True)
+                set_page_height(page, SCROLLABLE_VIEWPORT_HEIGHT)
+                page.wait_for_timeout(2000)
+                quiet = 0
+                last_top = -1
+                last_height = 0
+                continue
             if not moved and not grew and top_now <= 48:
                 # Stuck at the top: move down a little and come back up, so X sees a
                 # fresh scroll to the top and loads the older batch.
