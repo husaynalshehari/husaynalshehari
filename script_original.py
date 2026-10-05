@@ -4787,11 +4787,11 @@ def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tup
         page.on("response", on_response)
     try:
         try:
-            page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
+            page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=45_000)
         except Exception:
             return None, "fail"
         revealed = False
-        deadline = time.monotonic() + (12 if quick else 8)
+        deadline = time.monotonic() + (20 if quick else 15)
         while time.monotonic() < deadline:
             if quick and status_id:
                 while replies and api_flags is None:
@@ -4878,7 +4878,10 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
         result = {"url": item.get("url", ""), "text": item.get("text", ""), "actions": {}}
         try:
             opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
-            if not opened and reason != "gone":
+            for _retry in range(2):
+                if opened or reason == "gone":
+                    break
+                page.wait_for_timeout(3000)
                 opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
         except Exception as exc:
             if browser_closed_error(exc):
@@ -4976,6 +4979,22 @@ def job_cancelled(job_id: str) -> bool:
 DEFAULT_GROUP_WAIT_SECONDS = 8
 
 
+# Only one task at a time opens the chat with the very tall page and collects; that
+# step is heavy and slowed down every other running task. Other tasks wait for their
+# turn here, while tasks already clicking likes and reposts keep going.
+collect_turn = threading.Lock()
+
+
+def wait_for_collect_turn(job_id: str) -> None:
+    told = False
+    while not collect_turn.acquire(timeout=1):
+        if job_cancelled(job_id):
+            raise JobStopped
+        if not told:
+            publish_job(job_id, phase="login", message="بانتظار انتهاء تجميع مهمة أخرى قبل فتح الدردشة…")
+            told = True
+
+
 def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS) -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
@@ -5009,22 +5028,26 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if handle:
                     remember_session(auth_token, handle, pin)
                 publish_job(job_id, phase="login", message="إدخال رمز الدردشة…")
-                set_page_height(page, COLLECT_VIEWPORT_HEIGHT)
-                error = open_chat(page, pin)
-                if error:
-                    publish_job(job_id, status="done", success=False, message=error)
-                    return
-                show_groups_only(page)
-                publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
-                opened_name = open_named_group(page, group_name)
-                if opened_name != group_name:
-                    publish_job(job_id, phase="login", message=f"تغيّر اسم القروب إلى «{opened_name}» وفُتح.")
-                if group_wait_s > 0:
-                    publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع…")
-                    page.wait_for_timeout(int(group_wait_s) * 1000)
-                cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
-                items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
-                set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
+                wait_for_collect_turn(job_id)
+                try:
+                    set_page_height(page, COLLECT_VIEWPORT_HEIGHT)
+                    error = open_chat(page, pin)
+                    if error:
+                        publish_job(job_id, status="done", success=False, message=error)
+                        return
+                    show_groups_only(page)
+                    publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
+                    opened_name = open_named_group(page, group_name)
+                    if opened_name != group_name:
+                        publish_job(job_id, phase="login", message=f"تغيّر اسم القروب إلى «{opened_name}» وفُتح.")
+                    if group_wait_s > 0:
+                        publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع…")
+                        page.wait_for_timeout(int(group_wait_s) * 1000)
+                    cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
+                    items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
+                finally:
+                    set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
+                    collect_turn.release()
                 if job_cancelled(job_id):
                     raise JobStopped
                 if stop_id and not reached:
