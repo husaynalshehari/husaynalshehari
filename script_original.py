@@ -3662,25 +3662,7 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
     return context, page
 
 
-class AccountBusy(RuntimeError):
-    """The account's browser profile is in use by a running task."""
-
-
-class _held:
-    """Release an already-acquired lock when the block ends."""
-
-    def __init__(self, lock):
-        self.lock = lock
-
-    def __enter__(self):
-        return self.lock
-
-    def __exit__(self, *exc):
-        self.lock.release()
-        return False
-
-
-def run_on_fresh_browser(auth_token: str, work, wait: bool = True):
+def run_on_fresh_browser(auth_token: str, work):
     """Open the account's own permanent browser profile for one task, then close the browser.
 
     Each account has one profile folder under data/profiles, created the first time
@@ -3689,10 +3671,7 @@ def run_on_fresh_browser(auth_token: str, work, wait: bool = True):
     different accounts still run at the same time.
     """
     key = profile_key(auth_token)
-    lock = profile_lock(key)
-    if not lock.acquire(blocking=wait):
-        raise AccountBusy("هذا الحساب مشغول بمهمة تعمل الآن. انتظر انتهاءها أو أوقفها ثم حاول مجددًا.")
-    with _held(lock):
+    with profile_lock(key):
         playwright = sync_playwright().start()
         context = None
         try:
@@ -3732,9 +3711,7 @@ def delete_profile(auth_token: str) -> None:
 
 def run_on_browser(auth_token: str, work):
     """Every action gets its own browser, closed as soon as the action ends."""
-    # Quick actions (verify, show groups, prepare) do not wait behind a running task
-    # of the same account; they say the account is busy instead.
-    return run_on_fresh_browser(auth_token, work, wait=False)
+    return run_on_fresh_browser(auth_token, work)
 
 
 def ensure_logged_in(page) -> bool:
@@ -4058,8 +4035,6 @@ def prepare_chat(auth_token: str, pin: str) -> dict:
         }
     try:
         return run_on_browser(auth_token, work)
-    except AccountBusy as exc:
-        return {"ok": False, "message": str(exc), "groups": []}
     except Exception:
         return {"ok": False, "message": "تعذّر فتح المتصفح.", "groups": []}
 
@@ -4967,25 +4942,9 @@ def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None
             pass
 
 
-def fresh_tab(page):
-    """Replace a tab that stopped responding with a new one in the same browser."""
-    try:
-        new_page = page.context.new_page()
-        new_page.set_default_timeout(20_000)
-        new_page.set_default_navigation_timeout(60_000)
-    except Exception:
-        return page
-    try:
-        page.close()
-    except Exception:
-        pass
-    return new_page
-
-
 def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "") -> list[dict]:
     results: list[dict] = []
     total = len(items)
-    failed_in_row = 0
     if on_progress:
         on_progress(0, total, "act")
     for index, item in enumerate(items):
@@ -5016,30 +4975,11 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             note = "محذوفة — تم التخطي" if reason == "gone" else "تعذر فتح التغريدة"
             result["actions"] = {key: note for key in actions}
             results.append(result)
-            if reason != "gone":
-                failed_in_row += 1
-                if failed_in_row == 2:
-                    # Two in a row: the tab is probably stuck. Continue in a new tab.
-                    page = fresh_tab(page)
-                if failed_in_row >= 5:
-                    # Still failing: stop now instead of spending minutes on every
-                    # remaining tweet, so the account is free again right away.
-                    for rest in items[index + 1:]:
-                        results.append({
-                            "url": rest.get("url", ""), "text": rest.get("text", ""),
-                            "actions": {key: "لم يُنفّذ: توقفت المهمة بعد فشل فتح ٥ تغريدات متتالية" for key in actions},
-                        })
-                    if on_snapshot:
-                        on_snapshot(list(results))
-                    if on_progress:
-                        on_progress(total, total, "act")
-                    break
             if on_snapshot:
                 on_snapshot(list(results))
             if on_progress:
                 on_progress(index + 1, total, "act")
             continue
-        failed_in_row = 0
         result["url"] = "https://x.com" + opened
         try:
             already_on = reason == "already_on" or all_actions_already_on(page, opened, actions)
@@ -5092,8 +5032,6 @@ def fetch_group_names(auth_token: str, pin: str, settle: bool = False, settle_se
         return names, None
     try:
         return run_on_browser(auth_token, work)
-    except AccountBusy as exc:
-        return [], str(exc)
     except Exception:
         return [], "تعذّر فتح المتصفح."
 
@@ -5378,8 +5316,6 @@ def verify_login_endpoint(access_path: str):
         else:
             message = "فشل التحقق: لم يظهر الحساب مسجّل الدخول. قد يكون الرمز غير صالح أو منتهيًا."
         return jsonify(success=success, message=message, username=handle)
-    except AccountBusy as exc:
-        return jsonify(success=False, message=str(exc)), 409
     except Exception:
         app.logger.warning("X login verification failed (details suppressed)")
         return jsonify(success=False, message="تعذّر إكمال التحقق بسبب مشكلة في الاتصال أو تشغيل المتصفح."), 502
