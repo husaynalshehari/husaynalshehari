@@ -3605,26 +3605,8 @@ PROFILES_DIR = DATA_DIR / "profiles"
 # Page height while opening the chat and collecting from the group, and for everything else.
 COLLECT_VIEWPORT_HEIGHT = 50000
 NORMAL_VIEWPORT_HEIGHT = 2500
-# Browser profiles kept per account. Each profile can run one task at a time, so an
-# account can run this many tasks at the same time.
-PROFILES_PER_ACCOUNT = 3
 profile_locks: dict[str, threading.Lock] = {}
 profile_locks_guard = threading.Lock()
-
-
-def profile_slot_dir(key: str, slot: int) -> Path:
-    # Slot 1 keeps the original folder name so an existing profile is reused.
-    return PROFILES_DIR / (key if slot == 1 else f"{key}-{slot}")
-
-
-def acquire_profile_slot(key: str) -> tuple[int, threading.Lock]:
-    """Take the first free profile of this account, waiting if all are busy."""
-    while True:
-        for slot in range(1, PROFILES_PER_ACCOUNT + 1):
-            lock = profile_lock(f"{key}-{slot}")
-            if lock.acquire(blocking=False):
-                return slot, lock
-        time.sleep(0.5)
 
 
 def profile_key(auth_token: str) -> str:
@@ -3639,44 +3621,6 @@ def profile_lock(key: str) -> threading.Lock:
             lock = threading.Lock()
             profile_locks[key] = lock
         return lock
-
-
-# Login cookies X keeps for a session. A saved profile can hold an old or logged-out
-# copy of these (for example after X ended that browser's session), which makes the
-# account look logged out even though the token is still valid. They are cleared each
-# time a profile opens and the account's token is put back fresh. Chat data, device
-# data and other site storage in the profile are kept.
-LOGIN_COOKIE_NAMES = {"auth_token", "ct0", "twid", "kdt", "att", "_twitter_sess", "auth_multi"}
-
-
-def reset_login_cookies(context, auth_token: str) -> None:
-    try:
-        cookies = context.cookies()
-    except Exception:
-        cookies = []
-    keep = []
-    for cookie in cookies:
-        domain = str(cookie.get("domain") or "").lstrip(".").lower()
-        on_x = domain.endswith("x.com") or domain.endswith("twitter.com")
-        if on_x and cookie.get("name") in LOGIN_COOKIE_NAMES:
-            continue
-        keep.append(cookie)
-    try:
-        context.clear_cookies()
-        if keep:
-            context.add_cookies(keep)
-    except Exception:
-        pass
-    if auth_token:
-        context.add_cookies([{
-            "name": "auth_token",
-            "value": auth_token,
-            "domain": ".x.com",
-            "path": "/",
-            "httpOnly": True,
-            "secure": True,
-            "sameSite": "Lax",
-        }])
 
 
 def open_x_profile(playwright, auth_token: str, profile_dir: Path):
@@ -3697,7 +3641,16 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
     block_media(context)
-    reset_login_cookies(context, auth_token)
+    if auth_token:
+        context.add_cookies([{
+            "name": "auth_token",
+            "value": auth_token,
+            "domain": ".x.com",
+            "path": "/",
+            "httpOnly": True,
+            "secure": True,
+            "sameSite": "Lax",
+        }])
     page = context.pages[0] if context.pages else context.new_page()
     for extra in context.pages[1:]:
         try:
@@ -3712,18 +3665,17 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
 def run_on_fresh_browser(auth_token: str, work):
     """Open the account's own permanent browser profile for one task, then close the browser.
 
-    Each account has PROFILES_PER_ACCOUNT profile folders under data/profiles, each
-    created the first time it is needed. Cookies and chat data stay in them between
-    tasks. A task takes the first free profile of its account, so up to
-    PROFILES_PER_ACCOUNT tasks of one account run at the same time; more wait.
+    Each account has one profile folder under data/profiles, created the first time
+    the account is used. Cookies and chat data stay in it between tasks. Two tasks on
+    the same account take turns, because a profile can only be open once; tasks on
+    different accounts still run at the same time.
     """
     key = profile_key(auth_token)
-    slot, lock = acquire_profile_slot(key)
-    try:
+    with profile_lock(key):
         playwright = sync_playwright().start()
         context = None
         try:
-            context, page = open_x_profile(playwright, auth_token, profile_slot_dir(key, slot))
+            context, page = open_x_profile(playwright, auth_token, PROFILES_DIR / key)
             return work(page)
         finally:
             try:
@@ -3735,8 +3687,6 @@ def run_on_fresh_browser(auth_token: str, work):
                 playwright.stop()
             except Exception:
                 pass
-    finally:
-        lock.release()
 
 
 def set_page_height(page, height: int) -> None:
@@ -3749,14 +3699,13 @@ def set_page_height(page, height: int) -> None:
 
 def delete_profile(auth_token: str) -> None:
     key = profile_key(auth_token)
-    for slot in range(1, PROFILES_PER_ACCOUNT + 1):
-        lock = profile_lock(f"{key}-{slot}")
-        if not lock.acquire(timeout=5):
-            continue
-        try:
-            shutil.rmtree(profile_slot_dir(key, slot), ignore_errors=True)
-        finally:
-            lock.release()
+    lock = profile_lock(key)
+    if not lock.acquire(timeout=5):
+        return
+    try:
+        shutil.rmtree(PROFILES_DIR / key, ignore_errors=True)
+    finally:
+        lock.release()
 
 
 
