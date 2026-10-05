@@ -4942,32 +4942,6 @@ def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None
             pass
 
 
-# Everything the browser keeps for x.com except cookies (the session lives in cookies).
-CLEAR_STORAGE_TYPES = "appcache,file_systems,indexeddb,local_storage,shader_cache,websql,service_workers,cache_storage"
-
-
-def clear_browser_data_keep_cookies(page) -> None:
-    """Clear the cache and site storage without touching cookies, so the session stays logged in."""
-    session = None
-    try:
-        session = page.context.new_cdp_session(page)
-        session.send("Network.clearBrowserCache")
-        for origin in ("https://x.com", "https://twitter.com", "https://abs.twimg.com", "https://pbs.twimg.com"):
-            try:
-                session.send("Storage.clearDataForOrigin", {"origin": origin, "storageTypes": CLEAR_STORAGE_TYPES})
-            except Exception:
-                pass
-    except Exception as exc:
-        if browser_closed_error(exc):
-            raise
-    finally:
-        if session is not None:
-            try:
-                session.detach()
-            except Exception:
-                pass
-
-
 def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "") -> list[dict]:
     results: list[dict] = []
     total = len(items)
@@ -4990,8 +4964,6 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
         try:
             opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
             if not opened and reason != "gone":
-                # Opening failed: clear browser data (cookies kept) and try once more.
-                clear_browser_data_keep_cookies(page)
                 opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
         except Exception as exc:
             if browser_closed_error(exc):
