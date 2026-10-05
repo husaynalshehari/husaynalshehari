@@ -4867,7 +4867,82 @@ def all_actions_already_on(page, path: str, actions: list[str], timeout_s: float
         page.wait_for_timeout(150)
 
 
-def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None) -> list[dict]:
+DONE_HISTORY_PATH = DATA_DIR / "done_history.json"
+DONE_HISTORY_HOURS = 8
+done_history_lock = threading.Lock()
+done_history: dict[str, dict[str, dict[str, float]]] = {}
+
+
+def prune_done_history_unlocked() -> None:
+    cutoff = time.time() - DONE_HISTORY_HOURS * 3600
+    for account in list(done_history):
+        tweets = done_history[account]
+        for status_id in list(tweets):
+            kept = {action: stamp for action, stamp in tweets[status_id].items() if stamp >= cutoff}
+            if kept:
+                tweets[status_id] = kept
+            else:
+                del tweets[status_id]
+        if not tweets:
+            del done_history[account]
+
+
+def load_done_history() -> None:
+    loaded = read_private_json(DONE_HISTORY_PATH) or {}
+    rows = loaded.get("accounts")
+    if not isinstance(rows, dict):
+        return
+    with done_history_lock:
+        for account, tweets in rows.items():
+            if not isinstance(tweets, dict):
+                continue
+            clean: dict[str, dict[str, float]] = {}
+            for status_id, done in tweets.items():
+                if isinstance(done, dict):
+                    clean[str(status_id)] = {str(a): float(t) for a, t in done.items() if isinstance(t, (int, float))}
+            done_history[str(account)] = clean
+        prune_done_history_unlocked()
+
+
+def tweet_status_id(url: str) -> str:
+    match = re.search(r"status/(\d{6,25})", url or "")
+    return match.group(1) if match else ""
+
+
+def already_done_recently(account: str, status_id: str, actions: list[str]) -> bool:
+    """True when every requested action was done on this tweet by this account in the last 8 hours."""
+    if not account or not status_id or not actions:
+        return False
+    cutoff = time.time() - DONE_HISTORY_HOURS * 3600
+    with done_history_lock:
+        done = (done_history.get(account) or {}).get(status_id) or {}
+        return all(done.get(action, 0) >= cutoff for action in actions)
+
+
+def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None:
+    """Save the actions that are now on for this tweet (done now or already on)."""
+    if not account or not status_id:
+        return
+    now = time.time()
+    finished = [
+        action for action, note in (outcome or {}).items()
+        if action in ACTION_CONTROLS and (note == "تم التنفيذ" or "مفعّل مسبقًا" in str(note))
+    ]
+    if not finished:
+        return
+    with done_history_lock:
+        tweets = done_history.setdefault(account, {})
+        record = tweets.setdefault(status_id, {})
+        for action in finished:
+            record[action] = now
+        prune_done_history_unlocked()
+        try:
+            write_private_json(DONE_HISTORY_PATH, {"version": 1, "accounts": done_history})
+        except Exception:
+            pass
+
+
+def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "") -> list[dict]:
     results: list[dict] = []
     total = len(items)
     if on_progress:
@@ -4876,6 +4951,16 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
         if should_stop and should_stop():
             break
         result = {"url": item.get("url", ""), "text": item.get("text", ""), "actions": {}}
+        status_id = tweet_status_id(str(item.get("url") or ""))
+        if already_done_recently(account, status_id, actions):
+            # Done by this account in the last 8 hours: skip without opening the tweet.
+            result["actions"] = {key: "سبق التفاعل خلال ٨ ساعات — تم التخطي" for key in actions}
+            results.append(result)
+            if on_snapshot:
+                on_snapshot(list(results))
+            if on_progress:
+                on_progress(index + 1, total, "act")
+            continue
         try:
             opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
             if not opened and reason != "gone":
@@ -4904,6 +4989,7 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             already_on = False
         if already_on:
             result["actions"] = {key: "مفعّل مسبقًا — تم التجاوز" for key in actions}
+            remember_done(account, status_id or tweet_status_id(opened), result["actions"])
             results.append(result)
             if on_snapshot:
                 on_snapshot(list(results))
@@ -4918,6 +5004,7 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             if browser_closed_error(exc):
                 raise BrowserClosed() from exc
             result["actions"] = {key: "تعذر تنفيذ الإجراء بعد فتح التغريدة" for key in actions}
+        remember_done(account, status_id or tweet_status_id(opened), result["actions"])
         results.append(result)
         if on_snapshot:
             on_snapshot(list(results))
@@ -5061,7 +5148,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                         lambda: job_cancelled(job_id), snapshot,
                     )
                 else:
-                    fresh = visit_and_apply(page, pending, actions, on_act, snapshot, lambda: job_cancelled(job_id))
+                    fresh = visit_and_apply(page, pending, actions, on_act, snapshot, lambda: job_cancelled(job_id), profile_key(auth_token))
                 results = prefix + fresh
             if job_cancelled(job_id):
                 publish_job(
@@ -6124,6 +6211,7 @@ def cancel_preview_endpoint(access_path: str):
 
 load_sessions()
 load_group_ids()
+load_done_history()
 load_gemini()
 load_jobs()
 load_screen()
