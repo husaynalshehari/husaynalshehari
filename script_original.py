@@ -3430,7 +3430,7 @@ def launch_x_browser(playwright, auth_token: str):
 
 # Do not download images, videos or audio in the automation browser.
 BLOCK_MEDIA = True
-BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
+BLOCKED_RESOURCE_TYPES = {"image", "media"}
 
 
 def block_media(context) -> None:
@@ -3603,8 +3603,8 @@ MAX_PARALLEL_JOBS = 4
 
 PROFILES_DIR = DATA_DIR / "profiles"
 # Page height while opening the chat and collecting from the group, and for everything else.
-COLLECT_VIEWPORT_HEIGHT = 50000
-NORMAL_VIEWPORT_HEIGHT = 2500
+COLLECT_VIEWPORT_HEIGHT = 30000
+NORMAL_VIEWPORT_HEIGHT = 1800
 profile_locks: dict[str, threading.Lock] = {}
 profile_locks_guard = threading.Lock()
 
@@ -3623,55 +3623,23 @@ def profile_lock(key: str) -> threading.Lock:
         return lock
 
 
-# Chrome switches that cut CPU use on a server without a screen: no GPU emulation,
-# no background services the script never needs.
-LOW_CPU_ARGS = [
-    "--disable-gpu",
-    "--disable-software-rasterizer",
-    "--disable-extensions",
-    "--disable-background-networking",
-    "--disable-component-update",
-    "--disable-default-apps",
-    "--disable-sync",
-    "--mute-audio",
-    "--no-first-run",
-    "--disable-features=Translate,MediaRouter,OptimizationHints,BackForwardCache",
-]
-# Stop page animations and transitions; they keep redrawing the page for nothing.
-NO_ANIMATION_JS = r"""
-(() => {
-  const add = () => {
-    if (!document.head || document.getElementById("__no_anim")) return;
-    const style = document.createElement("style");
-    style.id = "__no_anim";
-    style.textContent = "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:auto!important}";
-    document.head.appendChild(style);
-  };
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", add);
-  else add();
-})();
-"""
-
-
 def open_x_profile(playwright, auth_token: str, profile_dir: Path):
     """Open the account's permanent browser profile (created on first use)."""
     profile_dir.mkdir(parents=True, exist_ok=True)
     context = playwright.chromium.launch_persistent_context(
         str(profile_dir),
         headless=True,
-        args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox", *LOW_CPU_ARGS],
+        args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"],
         viewport={"width": 1280, "height": NORMAL_VIEWPORT_HEIGHT},
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         ),
         locale="en-US",
-        reduced_motion="reduce",
     )
     context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
-    context.add_init_script(NO_ANIMATION_JS)
     block_media(context)
     if auth_token:
         context.add_cookies([{
@@ -4819,11 +4787,11 @@ def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tup
         page.on("response", on_response)
     try:
         try:
-            page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=45_000)
+            page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
         except Exception:
             return None, "fail"
         revealed = False
-        deadline = time.monotonic() + (20 if quick else 15)
+        deadline = time.monotonic() + (12 if quick else 8)
         while time.monotonic() < deadline:
             if quick and status_id:
                 while replies and api_flags is None:
@@ -4910,10 +4878,7 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
         result = {"url": item.get("url", ""), "text": item.get("text", ""), "actions": {}}
         try:
             opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
-            for _retry in range(2):
-                if opened or reason == "gone":
-                    break
-                page.wait_for_timeout(3000)
+            if not opened and reason != "gone":
                 opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
         except Exception as exc:
             if browser_closed_error(exc):
@@ -5011,22 +4976,6 @@ def job_cancelled(job_id: str) -> bool:
 DEFAULT_GROUP_WAIT_SECONDS = 8
 
 
-# Only one task at a time opens the chat with the very tall page and collects; that
-# step is heavy and slowed down every other running task. Other tasks wait for their
-# turn here, while tasks already clicking likes and reposts keep going.
-collect_turn = threading.Lock()
-
-
-def wait_for_collect_turn(job_id: str) -> None:
-    told = False
-    while not collect_turn.acquire(timeout=1):
-        if job_cancelled(job_id):
-            raise JobStopped
-        if not told:
-            publish_job(job_id, phase="login", message="بانتظار انتهاء تجميع مهمة أخرى قبل فتح الدردشة…")
-            told = True
-
-
 def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS) -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
@@ -5060,26 +5009,22 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if handle:
                     remember_session(auth_token, handle, pin)
                 publish_job(job_id, phase="login", message="إدخال رمز الدردشة…")
-                wait_for_collect_turn(job_id)
-                try:
-                    set_page_height(page, COLLECT_VIEWPORT_HEIGHT)
-                    error = open_chat(page, pin)
-                    if error:
-                        publish_job(job_id, status="done", success=False, message=error)
-                        return
-                    show_groups_only(page)
-                    publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
-                    opened_name = open_named_group(page, group_name)
-                    if opened_name != group_name:
-                        publish_job(job_id, phase="login", message=f"تغيّر اسم القروب إلى «{opened_name}» وفُتح.")
-                    if group_wait_s > 0:
-                        publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع…")
-                        page.wait_for_timeout(int(group_wait_s) * 1000)
-                    cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
-                    items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
-                finally:
-                    set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
-                    collect_turn.release()
+                set_page_height(page, COLLECT_VIEWPORT_HEIGHT)
+                error = open_chat(page, pin)
+                if error:
+                    publish_job(job_id, status="done", success=False, message=error)
+                    return
+                show_groups_only(page)
+                publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
+                opened_name = open_named_group(page, group_name)
+                if opened_name != group_name:
+                    publish_job(job_id, phase="login", message=f"تغيّر اسم القروب إلى «{opened_name}» وفُتح.")
+                if group_wait_s > 0:
+                    publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع…")
+                    page.wait_for_timeout(int(group_wait_s) * 1000)
+                cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
+                items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
+                set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
                 if job_cancelled(job_id):
                     raise JobStopped
                 if stop_id and not reached:
