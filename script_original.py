@@ -3662,6 +3662,15 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
     return context, page
 
 
+# The running task's "close and reopen the browser" function (one per worker thread).
+browser_restart = threading.local()
+
+
+def restart_browser():
+    fn = getattr(browser_restart, "fn", None)
+    return fn() if fn else None
+
+
 def run_on_fresh_browser(auth_token: str, work):
     """Open the account's own permanent browser profile for one task, then close the browser.
 
@@ -3673,14 +3682,38 @@ def run_on_fresh_browser(auth_token: str, work):
     key = profile_key(auth_token)
     with profile_lock(key):
         playwright = sync_playwright().start()
-        context = None
+        state = {"context": None}
+
+        def restart():
+            """Close the profile's browser, reopen it on Google, then go to X. Returns the new page."""
+            try:
+                if state["context"] is not None:
+                    state["context"].close()
+            except Exception:
+                pass
+            state["context"] = None
+            state["context"], new_page = open_x_profile(playwright, auth_token, PROFILES_DIR / key)
+            try:
+                new_page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=60_000)
+                new_page.wait_for_timeout(2000)
+            except Exception:
+                pass
+            try:
+                new_page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=60_000)
+                session_is_logged_in(new_page)
+            except Exception:
+                pass
+            return new_page
+
+        browser_restart.fn = restart
         try:
-            context, page = open_x_profile(playwright, auth_token, PROFILES_DIR / key)
+            state["context"], page = open_x_profile(playwright, auth_token, PROFILES_DIR / key)
             return work(page)
         finally:
+            browser_restart.fn = None
             try:
-                if context is not None:
-                    context.close()
+                if state["context"] is not None:
+                    state["context"].close()
             except Exception:
                 pass
             try:
@@ -4965,6 +4998,12 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
             if not opened and reason != "gone":
                 opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
+            if not opened and reason != "gone":
+                # Still failing: close the browser profile, reopen it on Google, go to X, try again.
+                new_page = restart_browser()
+                if new_page is not None:
+                    page = new_page
+                    opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
         except Exception as exc:
             if browser_closed_error(exc):
                 if on_snapshot and results:
