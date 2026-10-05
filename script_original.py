@@ -979,14 +979,40 @@ EMBEDDED_PAGE = r'''<!doctype html>
     taskBoard.hidden = false;
     const card = document.createElement("article");
     card.className = "task-card";
-    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><button class="btn btn-ghost" type="button">إيقاف هذه المهمة</button>';
+    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><button class="btn btn-ghost task-stop" type="button">إيقاف هذه المهمة</button><button class="btn task-retry" type="button" hidden>إعادة المحاولة</button>';
     card.querySelector("h3").textContent = task.title || "مهمة";
-    card.querySelector("button").addEventListener("click", async () => {
-      card.querySelector("button").disabled = true;
+    const stopButton = card.querySelector(".task-stop");
+    const retryButton = card.querySelector(".task-retry");
+    stopButton.addEventListener("click", async () => {
+      stopButton.disabled = true;
       try {
         await postJson("/stop", {job_id: task.id, job_key: task.key});
       } catch (_) {
-        card.querySelector("button").disabled = false;
+        stopButton.disabled = false;
+      }
+    });
+    retryButton.addEventListener("click", async () => {
+      retryButton.disabled = true;
+      try {
+        const data = await postJson("/retry", {job_id: task.id, job_key: task.key});
+        if (!data.success) {
+          showNotice(data.message || "تعذّرت إعادة المحاولة.", false);
+          retryButton.disabled = false;
+          return;
+        }
+        retryButton.hidden = true;
+        stopButton.disabled = false;
+        showNotice((task.title ? task.title + ": " : "") + (data.message || "بدأت إعادة المحاولة."), true);
+        if (!liveTasks.has(task.id)) {
+          liveTasks.set(task.id, true);
+          const rows = readTasks().filter((row) => row.id !== task.id);
+          rows.unshift(task);
+          writeTasks(rows);
+          watch();
+        }
+      } catch (_) {
+        showNotice("تعذّر الاتصال أثناء إعادة المحاولة.", false);
+        retryButton.disabled = false;
       }
     });
     taskList.prepend(card);
@@ -1002,9 +1028,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
       const indeterminate = data.status === "running" && (phase === "login" || !total);
       meter.classList.toggle("is-indeterminate", indeterminate);
       card.querySelector(".task-bar").style.width = indeterminate ? "" : Math.max(0, Math.min(100, total ? Math.round((current / total) * 100) : 100)) + "%";
-      card.querySelector("button").hidden = data.status !== "running";
+      stopButton.hidden = data.status !== "running";
+      retryButton.hidden = !(data.status !== "running" && data.resumable);
+      retryButton.disabled = false;
     };
-    (async () => {
+    const watch = async () => {
       try {
         for (;;) {
           const response = await fetch(apiRoot + "/jobs/" + encodeURIComponent(task.id), {
@@ -1027,7 +1055,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
       } finally {
         liveTasks.delete(task.id);
       }
-    })();
+    };
+    watch();
   }
 
   function showAccount(text) {
@@ -4978,6 +5007,7 @@ def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None
 def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "") -> list[dict]:
     results: list[dict] = []
     total = len(items)
+    restarts_used = 0
     if on_progress:
         on_progress(0, total, "act")
     for index, item in enumerate(items):
@@ -4998,12 +5028,19 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
             if not opened and reason != "gone":
                 opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
-            if not opened and reason != "gone":
+            while not opened and reason != "gone" and restarts_used < MAX_BROWSER_RESTARTS:
                 # Still failing: close the browser profile, reopen it on Google, go to X, try again.
                 new_page = restart_browser()
-                if new_page is not None:
-                    page = new_page
-                    opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
+                if new_page is None:
+                    break
+                restarts_used += 1
+                page = new_page
+                opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
+            if not opened and reason != "gone":
+                # Both browser restarts used and the tweet still won't open: stop the task here.
+                raise TweetOpenStuck(index)
+        except TweetOpenStuck:
+            raise
         except Exception as exc:
             if browser_closed_error(exc):
                 if on_snapshot and results:
@@ -5079,6 +5116,16 @@ class JobStopped(Exception):
     pass
 
 
+class TweetOpenStuck(Exception):
+    """A tweet still failed to open after both browser restarts; the task stops and can be retried."""
+
+
+# How many times one task may close and reopen the browser when tweets fail to open.
+MAX_BROWSER_RESTARTS = 2
+# Arguments of each group task, kept in memory so the retry button can continue it.
+job_run_args: dict[str, tuple] = {}
+
+
 class BrowserClosed(Exception):
     """Chromium died or the tab was closed. The job can reopen and continue."""
 
@@ -5117,6 +5164,8 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             publish_job(job_id, phase="act", done=done, collected=done, requested=requested, message=f"تنفيذ {done} من {requested}.")
         else:
             publish_job(job_id, phase=phase, message="فتح الدردشة والقروب…")
+
+    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s)
 
     def work(page):
         try:
@@ -5203,6 +5252,14 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             )
         except JobStopped:
             publish_job(job_id, status="done", success=False, message="تم إيقاف التنفيذ.")
+            return
+        except TweetOpenStuck:
+            with jobs_lock:
+                done_count = len((jobs.get(job_id) or {}).get("results") or [])
+            publish_job(
+                job_id, status="done", success=False, resumable=True, phase="act", done=done_count,
+                message=f"توقفت المهمة: تعذّر فتح التغريدة {done_count + 1} بعد إغلاق المتصفح وفتحه مرتين. اضغط «إعادة المحاولة» للمتابعة من حيث توقفت.",
+            )
             return
         except BrowserClosed:
             raise
@@ -5629,6 +5686,7 @@ def public_job(job: dict) -> dict:
         "actions": job.get("actions") or [],
         "items": job.get("items") or [],
         "results": job.get("results") or [],
+        "resumable": bool(job.get("resumable")) and job.get("status") == "done",
     }
     if job["status"] != "running":
         preview_id = job.get("preview_id")
@@ -6024,6 +6082,42 @@ def group_run_endpoint(access_path: str):
         daemon=True,
     ).start()
     return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأ التنفيذ.")
+
+
+@app.post("/<access_path>/retry")
+def retry_job_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    job_id = str(data.get("job_id") or "").strip()
+    job_key = str(data.get("job_key") or "").strip()
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return jsonify(success=False, message="لم يعد سجل هذه المهمة متاحًا."), 404
+        key_ok = job_key_matches(job, job_key)
+        owner_ok = bool(job.get("owner")) and job.get("owner") == session.get("csrf_token", "")
+        if not key_ok and not owner_ok:
+            return jsonify(success=False, message="لم يعد سجل هذه المهمة متاحًا."), 404
+        if job.get("status") == "running":
+            return jsonify(success=True, message="المهمة تعمل الآن.")
+        args = job_run_args.get(job_id)
+        if not job.get("resumable") or not args:
+            return jsonify(success=False, message="لا يمكن إعادة هذه المهمة. ابدأ مهمة جديدة."), 400
+        running = [row for row in jobs.values() if row.get("status") == "running" and row.get("kind") == "execute"]
+        if len(running) >= MAX_PARALLEL_JOBS:
+            return jsonify(success=False, message=f"أقصى عدد للمهام المتزامنة هو {MAX_PARALLEL_JOBS}. أوقف مهمة أو انتظر انتهائها."), 429
+        job["status"] = "running"
+        job["success"] = None
+        job["resumable"] = False
+        job["cancel"] = False
+        job["message"] = f"إعادة المحاولة من التغريدة {len(job.get('results') or []) + 1}…"
+        job["updated_at"] = time.time()
+        persist_jobs_unlocked()
+    threading.Thread(target=run_group_job, args=(job_id, *args), daemon=True).start()
+    return jsonify(success=True, message="بدأت إعادة المحاولة.")
 
 
 @app.post("/<access_path>/stop")
