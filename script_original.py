@@ -704,6 +704,13 @@ EMBEDDED_PAGE = r'''<!doctype html>
               ث
             </label>
           </div>
+          <div class="group-wait-row">
+            <label class="wait-groups" for="account-profiles-on">
+              <input id="account-profiles-on" type="checkbox">
+              عدد المهام في نفس الوقت لكل حساب
+              <input id="account-profiles" class="wait-sec" type="number" min="1" max="5" step="1" value="2" inputmode="numeric" aria-label="عدد المهام لكل حساب">
+            </label>
+          </div>
           <div class="mode-switch" role="group" aria-label="طريقة التوقف">
             <button id="mode-count" class="preset is-on" type="button">عدد</button>
             <button id="mode-tweet" class="preset" type="button">تغريدة</button>
@@ -852,11 +859,14 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const waitGroupsSec = document.getElementById("wait-groups-sec");
   const groupWaitOn = document.getElementById("group-wait-on");
   const groupWaitSec = document.getElementById("group-wait-sec");
+  const accountProfilesOn = document.getElementById("account-profiles-on");
+  const accountProfiles = document.getElementById("account-profiles");
   function rememberWaits() {
     try {
       localStorage.setItem("x_wait_settings", JSON.stringify({
         groupsOn: waitGroups.checked, groupsSec: waitGroupsSec.value,
-        groupOn: groupWaitOn.checked, groupSec: groupWaitSec.value
+        groupOn: groupWaitOn.checked, groupSec: groupWaitSec.value,
+        profilesOn: accountProfilesOn.checked, profiles: accountProfiles.value
       }));
     } catch (_) {}
   }
@@ -867,9 +877,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (savedWaits.groupsSec) waitGroupsSec.value = savedWaits.groupsSec;
       groupWaitOn.checked = !!savedWaits.groupOn;
       if (savedWaits.groupSec !== undefined && savedWaits.groupSec !== "") groupWaitSec.value = savedWaits.groupSec;
+      accountProfilesOn.checked = !!savedWaits.profilesOn;
+      if (savedWaits.profiles) accountProfiles.value = savedWaits.profiles;
     }
   } catch (_) {}
-  [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec].forEach((node) => node.addEventListener("change", rememberWaits));
+  [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec, accountProfilesOn, accountProfiles].forEach((node) => node.addEventListener("change", rememberWaits));
   function secondsFrom(field, min, max, fallback) {
     const value = Number.parseInt(field.value, 10);
     if (!Number.isInteger(value)) return fallback;
@@ -1633,7 +1645,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
         actions,
         gemini_api_key: geminiKey.value.trim(),
         gemini_model: geminiModel.value.trim(),
-        group_wait: groupWaitOn.checked ? secondsFrom(groupWaitSec, 0, 300, 8) : null
+        group_wait: groupWaitOn.checked ? secondsFrom(groupWaitSec, 0, 300, 8) : null,
+        account_profiles: accountProfilesOn.checked ? secondsFrom(accountProfiles, 1, 5, 2) : 1
       });
       if (!started.success || !started.job_id || !started.job_key) {
         showNotice(started.message || "تعذّر بدء التنفيذ.", false);
@@ -3700,16 +3713,39 @@ def restart_browser():
     return fn() if fn else None
 
 
-def run_on_fresh_browser(auth_token: str, work):
-    """Open the account's own permanent browser profile for one task, then close the browser.
+# Highest number of profiles (parallel tasks) one account may use.
+MAX_PROFILES_PER_ACCOUNT = 5
 
-    Each account has one profile folder under data/profiles, created the first time
-    the account is used. Cookies and chat data stay in it between tasks. Two tasks on
-    the same account take turns, because a profile can only be open once; tasks on
-    different accounts still run at the same time.
+
+def acquire_profile_slot(key: str, slots: int) -> str:
+    """Take a free profile of the account and return its folder name.
+
+    Profile 1 is the account's original folder (data/profiles/<key>); profiles 2, 3, ...
+    are data/profiles/<key>-2, <key>-3, ... and are created on first use. When all of
+    them are busy, wait until one is free.
+    """
+    slots = max(1, min(MAX_PROFILES_PER_ACCOUNT, int(slots or 1)))
+    if slots == 1:
+        profile_lock(key).acquire()
+        return key
+    names = [key] + [f"{key}-{number}" for number in range(2, slots + 1)]
+    while True:
+        for name in names:
+            if profile_lock(name).acquire(blocking=False):
+                return name
+        time.sleep(1)
+
+
+def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
+    """Open one of the account's permanent browser profiles for one task, then close the browser.
+
+    By default each account has one profile folder under data/profiles, so two tasks
+    on the same account take turns. With slots > 1 the account gets that many profile
+    folders and that many of its tasks run at the same time.
     """
     key = profile_key(auth_token)
-    with profile_lock(key):
+    slot_name = acquire_profile_slot(key, slots)
+    try:
         playwright = sync_playwright().start()
         state = {"context": None}
 
@@ -3721,7 +3757,7 @@ def run_on_fresh_browser(auth_token: str, work):
             except Exception:
                 pass
             state["context"] = None
-            state["context"], new_page = open_x_profile(playwright, auth_token, PROFILES_DIR / key)
+            state["context"], new_page = open_x_profile(playwright, auth_token, PROFILES_DIR / slot_name)
             try:
                 new_page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=60_000)
                 new_page.wait_for_timeout(2000)
@@ -3736,7 +3772,7 @@ def run_on_fresh_browser(auth_token: str, work):
 
         browser_restart.fn = restart
         try:
-            state["context"], page = open_x_profile(playwright, auth_token, PROFILES_DIR / key)
+            state["context"], page = open_x_profile(playwright, auth_token, PROFILES_DIR / slot_name)
             return work(page)
         finally:
             browser_restart.fn = None
@@ -3749,6 +3785,8 @@ def run_on_fresh_browser(auth_token: str, work):
                 playwright.stop()
             except Exception:
                 pass
+    finally:
+        profile_lock(slot_name).release()
 
 
 def set_page_height(page, height: int) -> None:
@@ -3766,6 +3804,8 @@ def delete_profile(auth_token: str) -> None:
         return
     try:
         shutil.rmtree(PROFILES_DIR / key, ignore_errors=True)
+        for extra in PROFILES_DIR.glob(f"{key}-*"):
+            shutil.rmtree(extra, ignore_errors=True)
     finally:
         lock.release()
 
@@ -5149,7 +5189,7 @@ def job_cancelled(job_id: str) -> bool:
 DEFAULT_GROUP_WAIT_SECONDS = 8
 
 
-def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS) -> None:
+def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1) -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
             raise JobStopped
@@ -5165,7 +5205,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
         else:
             publish_job(job_id, phase=phase, message="فتح الدردشة والقروب…")
 
-    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s)
+    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account)
 
     def work(page):
         try:
@@ -5271,7 +5311,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             raise
     # One attempt only. If anything fails, the task stops with a message and is not retried.
     try:
-        run_on_fresh_browser(auth_token, work)
+        run_on_fresh_browser(auth_token, work, profiles_per_account)
     except BrowserClosed:
         with jobs_lock:
             job = jobs.get(job_id) or {}
@@ -6047,6 +6087,8 @@ def group_run_endpoint(access_path: str):
         parsed_wait = parse_requested_count(group_wait_raw)
         if parsed_wait is not None:
             group_wait_s = max(0, min(300, parsed_wait))
+    profiles_per_account = parse_requested_count(data.get("account_profiles")) or 1
+    profiles_per_account = max(1, min(MAX_PROFILES_PER_ACCOUNT, profiles_per_account))
     requested_actions = list(dict.fromkeys(requested_actions))
     gemini_api_key = str(data.get("gemini_api_key") or "").strip()
     gemini_model = normalize_gemini_model(str(data.get("gemini_model") or ""))
@@ -6078,7 +6120,7 @@ def group_run_endpoint(access_path: str):
     )
     threading.Thread(
         target=run_group_job,
-        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s),
+        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account),
         daemon=True,
     ).start()
     return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأ التنفيذ.")
