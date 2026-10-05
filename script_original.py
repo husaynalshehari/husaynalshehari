@@ -3430,7 +3430,7 @@ def launch_x_browser(playwright, auth_token: str):
 
 # Do not download images, videos or audio in the automation browser.
 BLOCK_MEDIA = True
-BLOCKED_RESOURCE_TYPES = {"image", "media"}
+BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 
 
 def block_media(context) -> None:
@@ -3623,23 +3623,55 @@ def profile_lock(key: str) -> threading.Lock:
         return lock
 
 
+# Chrome switches that cut CPU use on a server without a screen: no GPU emulation,
+# no background services the script never needs.
+LOW_CPU_ARGS = [
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--mute-audio",
+    "--no-first-run",
+    "--disable-features=Translate,MediaRouter,OptimizationHints,BackForwardCache",
+]
+# Stop page animations and transitions; they keep redrawing the page for nothing.
+NO_ANIMATION_JS = r"""
+(() => {
+  const add = () => {
+    if (!document.head || document.getElementById("__no_anim")) return;
+    const style = document.createElement("style");
+    style.id = "__no_anim";
+    style.textContent = "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:auto!important}";
+    document.head.appendChild(style);
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", add);
+  else add();
+})();
+"""
+
+
 def open_x_profile(playwright, auth_token: str, profile_dir: Path):
     """Open the account's permanent browser profile (created on first use)."""
     profile_dir.mkdir(parents=True, exist_ok=True)
     context = playwright.chromium.launch_persistent_context(
         str(profile_dir),
         headless=True,
-        args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"],
+        args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox", *LOW_CPU_ARGS],
         viewport={"width": 1280, "height": NORMAL_VIEWPORT_HEIGHT},
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         ),
         locale="en-US",
+        reduced_motion="reduce",
     )
     context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
+    context.add_init_script(NO_ANIMATION_JS)
     block_media(context)
     if auth_token:
         context.add_cookies([{
