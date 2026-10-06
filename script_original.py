@@ -3386,6 +3386,7 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
     results: list[dict] = []
     plain = [action for action in actions if action != "comment"]
     total = len(items)
+    restarts_used = 0
     if on_progress:
         on_progress(0, total, "act")
     for index, item in enumerate(items):
@@ -3399,11 +3400,32 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
             if on_progress:
                 on_progress(index + 1, total, "act")
             continue
-        opened, reason = open_status_page(page, str(item.get("url") or ""))
-        if not opened and reason != "gone":
+        try:
             opened, reason = open_status_page(page, str(item.get("url") or ""))
+            if not opened and reason != "gone":
+                opened, reason = open_status_page(page, str(item.get("url") or ""))
+            while not opened and reason != "gone" and restarts_used < MAX_BROWSER_RESTARTS:
+                # Still failing: close the browser profile, reopen it on Google, go to X, try again.
+                new_page = restart_browser()
+                if new_page is None:
+                    break
+                restarts_used += 1
+                page = new_page
+                allow_media(page)
+                opened, reason = open_status_page(page, str(item.get("url") or ""))
+        except Exception as exc:
+            if browser_closed_error(exc):
+                if on_snapshot and results:
+                    on_snapshot(list(results))
+                raise BrowserClosed() from exc
+            raise
+        if not opened and reason != "gone":
+            # Both browser restarts used and the tweet still won't open: stop the task here.
+            if on_snapshot:
+                on_snapshot(list(results))
+            raise TweetOpenStuck(index)
         if not opened:
-            note = "محذوفة — تم التخطي" if reason == "gone" else "تعذر فتح التغريدة"
+            note = "محذوفة — تم التخطي"
             result["actions"] = {key: note for key in actions}
             results.append(result)
             if on_progress:
