@@ -1052,12 +1052,14 @@ EMBEDDED_PAGE = r'''<!doctype html>
             cache: "no-store"
           });
           const data = await response.json();
+          if (response.status === 404) writeTasks(readTasks().filter((row) => row.id !== task.id));
           if (!response.ok) throw new Error(data.message || "تعذّر متابعة المهمة.");
           paint(data);
           if (data.status !== "running") {
             showNotice((task.title ? task.title + ": " : "") + (data.message || ""), Boolean(data.success));
             if (Array.isArray(data.results) && data.results.length) renderResults(data);
-            writeTasks(readTasks().filter((row) => row.id !== task.id));
+            // A task stopped with a retry button stays in the saved task list so it is still there after a reload.
+            if (!data.resumable) writeTasks(readTasks().filter((row) => row.id !== task.id));
             break;
           }
           await new Promise((resolve) => setTimeout(resolve, 700));
