@@ -1583,6 +1583,103 @@ def run_members_job(job_id: str, auth_token: str, pin: str, group_name: str, sto
         publish(job_id, status="done", success=False, message=str(exc)[:300] or "حدث خطأ.")
 
 
+READ_USER_CELLS_JS = r"""
+() => {
+  const reserved = new Set(["home", "explore", "messages", "notifications", "i", "settings", "search", "compose"]);
+  const handles = [];
+  document.querySelectorAll('[data-testid="cellInnerDiv"] [data-testid="UserCell"], [data-testid="UserCell"]').forEach((cell) => {
+    for (const link of cell.querySelectorAll('a[href^="/"]')) {
+      const match = (link.getAttribute("href") || "").match(/^\/([A-Za-z0-9_]{1,15})\/?$/);
+      if (match && !reserved.has(match[1].toLowerCase())) { handles.push(match[1]); break; }
+    }
+  });
+  const empty = !!document.querySelector('[data-testid="emptyState"]');
+  return {handles, empty, height: document.documentElement.scrollHeight, y: Math.round(window.scrollY)};
+}
+"""
+
+
+def likes_url(value: str) -> str:
+    value = (value or "").strip()
+    match = re.search(r"(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/status/(\d{6,25})", value)
+    if match and match.group(1).lower() != "i":
+        return f"https://x.com/{match.group(1)}/status/{match.group(2)}/likes"
+    status_id = extract_status_id(value)
+    return f"https://x.com/i/status/{status_id}/likes" if status_id else ""
+
+
+def collect_likers(page, url: str, on_progress=None, should_stop=None) -> list[str]:
+    """Open the tweet's likes list and scroll it to the end. Returns the likers' handles."""
+    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    try:
+        page.locator('[data-testid="UserCell"], [data-testid="emptyState"]').first.wait_for(state="visible", timeout=20_000)
+    except PlaywrightTimeoutError:
+        return []
+    likers: list[str] = []
+    seen: set[str] = set()
+    idle = 0
+    while idle < 6:
+        if should_stop and should_stop():
+            raise JobStopped
+        try:
+            payload = page.evaluate(READ_USER_CELLS_JS) or {}
+        except Exception:
+            payload = {}
+        added = 0
+        for handle in payload.get("handles") or []:
+            key = str(handle).lower()
+            if key not in seen:
+                seen.add(key)
+                likers.append(str(handle))
+                added += 1
+        if on_progress:
+            on_progress(len(likers))
+        if payload.get("empty") and not likers:
+            break
+        idle = 0 if added else idle + 1
+        try:
+            page.mouse.move(640, 500)
+            page.mouse.wheel(0, 900)
+        except Exception:
+            pass
+        page.wait_for_timeout(1200)
+    return likers
+
+
+def run_verify_job(job_id: str, auth_token: str, tweet: str, handles: list[str]) -> None:
+    url = likes_url(tweet)
+
+    def work(page):
+        publish(job_id, message="التحقق من الجلسة…")
+        if not ensure_logged_in(page):
+            return publish(job_id, status="done", success=False, message="الجلسة غير مسجّلة الدخول.")
+        publish(job_id, message="فتح قائمة إعجابات التغريدة…")
+        likers = collect_likers(
+            page, url,
+            lambda count: publish(job_id, message=f"قراءة المعجبين… {count} حتى الآن"),
+            lambda: bool((jobs.get(job_id) or {}).get("cancel")),
+        )
+        if not likers:
+            return publish(
+                job_id, status="done", success=False,
+                message="لم تظهر قائمة الإعجابات. X يُظهر من أعجب بالتغريدة لصاحبها فقط، فاستخدم جلسة الحساب صاحب التغريدة.",
+            )
+        liked = {handle.lower() for handle in likers}
+        checks = {handle: handle.lower() in liked for handle in handles}
+        yes = sum(1 for value in checks.values() if value)
+        publish(
+            job_id, status="done", success=True, kind="verify", checks=checks, likers=len(likers),
+            message=f"أعجب {yes} من {len(handles)} عضو. (عدد المعجبين الكلي: {len(likers)})",
+        )
+
+    try:
+        run_on_browser(auth_token, work)
+    except JobStopped:
+        publish(job_id, status="done", success=False, message="تم الإيقاف.")
+    except Exception as exc:
+        publish(job_id, status="done", success=False, message=str(exc)[:300] or "حدث خطأ.")
+
+
 def fetch_groups(auth_token: str, pin: str) -> tuple[list[str], str | None]:
     def work(page):
         if not ensure_logged_in(page):
@@ -1627,7 +1724,9 @@ PAGE = r"""<!doctype html>
   #groups button { background:#0c0e12; border:1px solid var(--line); color:var(--text); font-weight:500; }
   #groups button.on { border-color:var(--accent); background:#10273a; }
   #status { color:var(--muted); min-height:1.6em; }
-  #status.bad { color:var(--bad); } #status.good { color:var(--good); }
+  #status, #verify-status { color:var(--muted); min-height:1.6em; }
+  #status.bad, #verify-status.bad { color:var(--bad); } #status.good, #verify-status.good { color:var(--good); }
+  .yes { color:var(--good); font-weight:700; } .no { color:var(--bad); font-weight:700; }
   table { width:100%; border-collapse:collapse; }
   th, td { text-align:right; padding:8px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
   th { color:var(--muted); font-weight:500; font-size:13px; }
@@ -1659,13 +1758,19 @@ PAGE = r"""<!doctype html>
     </div>
     <p id="status"></p>
   </div>
+  <div class="card" id="verify-card" hidden>
+    <label for="verify-tweet">رابط التغريدة للتحقق من الإعجابات</label>
+    <input id="verify-tweet" type="text" dir="ltr" spellcheck="false" placeholder="https://x.com/user/status/123...">
+    <div class="row" style="margin-top:12px"><button id="verify" type="button">تحقق</button></div>
+    <p id="verify-status"></p>
+  </div>
   <div class="card" id="result" hidden>
     <div class="row" style="justify-content:space-between">
       <b id="summary"></b>
       <button id="copy" class="ghost" type="button">نسخ الأعضاء</button>
     </div>
     <table>
-      <thead><tr><th>#</th><th>العضو</th><th>عدد التغريدات</th></tr></thead>
+      <thead><tr><th>#</th><th>العضو</th><th>عدد التغريدات</th><th id="liked-head" hidden>أعجب؟</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
@@ -1716,8 +1821,14 @@ PAGE = r"""<!doctype html>
     } catch (_) { say("تعذّر الاتصال.", "bad"); }
     finally { $("show-groups").disabled = false; }
   });
+  let checks = null;
+  let tweetsTotal = 0;
+  const sayVerify = (text, kind) => { $("verify-status").textContent = text || ""; $("verify-status").className = kind || ""; };
   const renderMembers = (data) => {
     members = data.members || [];
+    tweetsTotal = data.tweets || 0;
+    try { localStorage.setItem("members_last", JSON.stringify({members, tweets: data.tweets || 0})); } catch (_) {}
+    $("verify-card").hidden = !members.length;
     $("result").hidden = false;
     $("summary").textContent = members.length + " عضو · " + (data.tweets || 0) + " تغريدة";
     $("rows").replaceChildren();
@@ -1749,9 +1860,52 @@ PAGE = r"""<!doctype html>
       const count = document.createElement("td");
       count.textContent = String(member.count);
       tr.append(num, who, count);
+      if (checks) {
+        const cell = document.createElement("td");
+        if (member.handle in checks) {
+          cell.textContent = checks[member.handle] ? "✓ نعم" : "✗ لا";
+          cell.className = checks[member.handle] ? "yes" : "no";
+        } else {
+          cell.textContent = "—";
+        }
+        tr.appendChild(cell);
+      }
       $("rows").appendChild(tr);
     });
   };
+  try {
+    const last = JSON.parse(localStorage.getItem("members_last") || "null");
+    if (last && Array.isArray(last.members) && last.members.length) renderMembers(last);
+  } catch (_) {}
+  $("verify-tweet").value = localStorage.getItem("members_verify_tweet") || "";
+  $("verify-tweet").addEventListener("input", () => { try { localStorage.setItem("members_verify_tweet", $("verify-tweet").value); } catch (_) {} });
+  $("verify").addEventListener("click", async () => {
+    const handles = members.map((member) => member.handle).filter((handle) => /^[A-Za-z0-9_]{1,15}$/.test(handle));
+    if (!handles.length) { sayVerify("لا يوجد أعضاء للتحقق.", "bad"); return; }
+    $("verify").disabled = true;
+    sayVerify("بدء التحقق…");
+    try {
+      const started = await post("/verify", {auth_token: $("token").value.trim(), tweet: $("verify-tweet").value.trim(), handles});
+      if (!started.success) { sayVerify(started.message || "تعذّر البدء.", "bad"); return; }
+      for (;;) {
+        const response = await fetch(api + "/job/" + encodeURIComponent(started.job_id), {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
+        const data = await response.json();
+        if (!response.ok) { sayVerify(data.message || "انقطعت المتابعة.", "bad"); break; }
+        if (data.status === "done") {
+          sayVerify(data.message, data.success ? "good" : "bad");
+          if (data.success) {
+            checks = data.checks || {};
+            $("liked-head").hidden = false;
+            renderMembers({members, tweets: tweetsTotal});
+          }
+          break;
+        }
+        sayVerify(data.message);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    } catch (_) { sayVerify("تعذّر الاتصال.", "bad"); }
+    finally { $("verify").disabled = false; }
+  });
   const poll = async () => {
     for (;;) {
       const response = await fetch(api + "/job/" + encodeURIComponent(jobId), {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
@@ -1759,7 +1913,7 @@ PAGE = r"""<!doctype html>
       if (!response.ok) { say(data.message || "انقطعت المتابعة.", "bad"); break; }
       if (data.status === "done") {
         say(data.message, data.success ? "good" : "bad");
-        if (data.members) renderMembers(data);
+        if (data.members) { checks = null; $("liked-head").hidden = true; renderMembers(data); }
         break;
       }
       say(data.message);
@@ -1874,6 +2028,28 @@ def job_endpoint(access_path: str, job_id: str):
     job.pop("owner", None)
     job.pop("cancel", None)
     return jsonify(job)
+
+
+@app.post("/<access_path>/verify")
+def verify_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH) or not csrf_ok():
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    token = str(data.get("auth_token") or "").strip()
+    tweet = str(data.get("tweet") or "").strip()
+    raw = data.get("handles")
+    handles = [str(h) for h in raw if isinstance(h, str) and re.fullmatch(r"[A-Za-z0-9_]{1,15}", h)] if isinstance(raw, list) else []
+    if not valid_auth_token(token):
+        return jsonify(success=False, message="أدخل auth_token صالحًا.")
+    if not likes_url(tweet):
+        return jsonify(success=False, message="الصق رابط التغريدة أو رقمها.")
+    if not handles:
+        return jsonify(success=False, message="اجمع الأعضاء أولًا.")
+    job_id = secrets.token_urlsafe(12)
+    with jobs_lock:
+        jobs[job_id] = {"status": "running", "message": "بدء التحقق…", "owner": session.get("csrf")}
+    threading.Thread(target=run_verify_job, args=(job_id, token, tweet, handles[:2000]), daemon=True).start()
+    return jsonify(success=True, job_id=job_id)
 
 
 @app.post("/<access_path>/stop")
