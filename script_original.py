@@ -3669,7 +3669,7 @@ MAX_PARALLEL_JOBS = 4
 
 PROFILES_DIR = DATA_DIR / "profiles"
 # Page height while opening the chat and collecting from the group, and for everything else.
-COLLECT_VIEWPORT_HEIGHT = 30000
+COLLECT_VIEWPORT_HEIGHT = 20000
 NORMAL_VIEWPORT_HEIGHT = 1800
 profile_locks: dict[str, threading.Lock] = {}
 profile_locks_guard = threading.Lock()
