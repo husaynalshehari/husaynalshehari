@@ -3669,7 +3669,7 @@ MAX_PARALLEL_JOBS = 4
 
 PROFILES_DIR = DATA_DIR / "profiles"
 # Page height while opening the chat and collecting from the group, and for everything else.
-COLLECT_VIEWPORT_HEIGHT = 20000
+COLLECT_VIEWPORT_HEIGHT = 25000
 NORMAL_VIEWPORT_HEIGHT = 1800
 profile_locks: dict[str, threading.Lock] = {}
 profile_locks_guard = threading.Lock()
@@ -4900,17 +4900,19 @@ def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tup
     if skip_if_on and len(quick) != len(skip_if_on):
         quick = []
     # X's page asks its API for the tweet before drawing it. Listening to that reply
-    # gives the button states before they appear on screen.
+    # gives the button states before they appear on screen. Only replies that have
+    # finished downloading are read: reading one that is still arriving waits with no
+    # time limit, so a reply that stalls halfway would freeze the task on this tweet.
     replies: list = []
     api_flags: dict | None = None
 
-    def on_response(response):
-        address = response.url
+    def on_finished(request):
+        address = request.url
         if "/graphql/" in address and ("TweetDetail" in address or "TweetResultByRestId" in address):
-            replies.append(response)
+            replies.append(request)
 
     if quick and status_id:
-        page.on("response", on_response)
+        page.on("requestfinished", on_finished)
     try:
         try:
             page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
@@ -4921,9 +4923,10 @@ def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tup
         while time.monotonic() < deadline:
             if quick and status_id:
                 while replies and api_flags is None:
-                    response = replies.pop(0)
+                    request = replies.pop(0)
                     try:
-                        api_flags = tweet_flags_from_api(response.json(), status_id)
+                        response = request.response()
+                        api_flags = tweet_flags_from_api(response.json(), status_id) if response else None
                     except Exception:
                         api_flags = None
                     if api_flags is not None and os.environ.get("COLLECT_DEBUG"):
@@ -4967,7 +4970,7 @@ def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tup
     finally:
         if quick and status_id:
             try:
-                page.remove_listener("response", on_response)
+                page.remove_listener("requestfinished", on_finished)
             except Exception:
                 pass
 
