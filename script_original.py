@@ -3381,7 +3381,7 @@ def resolve_comment_target(page, path: str, needs_parent: bool) -> tuple[str, ob
     return path, page.locator('article[data-testid="tweet"]').first
 
 
-def execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress=None, should_stop=None, on_snapshot=None) -> list[dict]:
+def execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress=None, should_stop=None, on_snapshot=None, account: str = "") -> list[dict]:
     allow_media(page)
     results: list[dict] = []
     plain = [action for action in actions if action != "comment"]
@@ -3400,6 +3400,18 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
             if on_progress:
                 on_progress(index + 1, total, "act")
             continue
+        status_id = tweet_status_id(str(item.get("url") or ""))
+        if already_done_recently(account, status_id, actions):
+            # Everything asked was done on this tweet by this account in the last 8 hours: skip without opening it.
+            result["actions"] = {key: "سبق التفاعل خلال ٨ ساعات — تم التخطي" for key in actions}
+            results.append(result)
+            if on_snapshot:
+                on_snapshot(list(results))
+            if on_progress:
+                on_progress(index + 1, total, "act")
+            continue
+        # This account already replied to this tweet in the last 8 hours: never reply to it again.
+        replied_before = "comment" in actions and already_done_recently(account, status_id, ["comment"])
         try:
             opened, reason = open_status_page(page, str(item.get("url") or ""))
             if not opened and reason != "gone":
@@ -3450,7 +3462,9 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
                     image = None
             if plain:
                 result["actions"].update(apply_actions_on_path(page, target_path, plain))
-            if "comment" in actions:
+            if replied_before or ("comment" in actions and already_done_recently(account, tweet_status_id(target_path), ["comment"])):
+                result["actions"]["comment"] = "سبق الرد خلال ٨ ساعات — تم التخطي"
+            elif "comment" in actions:
                 comment = gemini_comment(api_key, model, image, str(item.get("text") or ""))
                 if len(comment.split()) < 4:
                     comment = gemini_comment(api_key, model, image, str(item.get("text") or ""))
@@ -3473,6 +3487,9 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
                 result["actions"]["comment"] = "تعذر نشر التعليق: " + comment_failure_text(exc)
             for action in plain:
                 result["actions"].setdefault(action, "تعذر التنفيذ")
+        # Save what was done, for the tweet in the group and for the tweet actually replied to.
+        for done_id in {status_id, tweet_status_id(result["url"])}:
+            remember_done(account, done_id, result["actions"])
         results.append(result)
         if on_snapshot:
             on_snapshot(list(results))
@@ -5055,7 +5072,8 @@ def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None
     now = time.time()
     finished = [
         action for action, note in (outcome or {}).items()
-        if action in ACTION_CONTROLS and (note == "تم التنفيذ" or "مفعّل مسبقًا" in str(note))
+        if (action in ACTION_CONTROLS and (note == "تم التنفيذ" or "مفعّل مسبقًا" in str(note)))
+        or (action == "comment" and (note == "تم التنفيذ" or str(note).startswith("أُرسل الطلب")))
     ]
     if not finished:
         return
@@ -5300,7 +5318,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if "comment" in actions:
                     fresh = execute_comment_actions(
                         page, pending, actions, gemini_api_key, gemini_model, on_act,
-                        lambda: job_cancelled(job_id), snapshot,
+                        lambda: job_cancelled(job_id), snapshot, profile_key(auth_token),
                     )
                 else:
                     fresh = visit_and_apply(page, pending, actions, on_act, snapshot, lambda: job_cancelled(job_id), profile_key(auth_token))
@@ -5385,7 +5403,7 @@ def execute_x_actions(auth_token: str, username: str, items: list[dict], actions
         if handle:
             remember_session(auth_token, handle)
         if "comment" in actions:
-            return True, execute_comment_actions(page, items, actions, gemini_api_key, gemini_model, on_progress), None
+            return True, execute_comment_actions(page, items, actions, gemini_api_key, gemini_model, on_progress, account=profile_key(auth_token)), None
         issue = open_reposts_tab(page, username, "reposts")
         if issue:
             return True, [], issue
