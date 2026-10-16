@@ -58,15 +58,18 @@ READ_GROUPS_JS = r"""
     return "";
   };
   if (wanted) {
-    const target = clean(wanted);
-    for (const row of rows) {
-      if (nameOf(row) !== target) continue;
-      const link = row.querySelector('a[href*="/i/chat/"], a[href*="/messages/"]');
-      if (link) link.click();
-      else row.click();
-      return {clicked: true, groups: [], rows: rows.length, loading: false};
-    }
-    return {clicked: false, groups: [], rows: rows.length, loading: false};
+    // A group is found by its id (the row's data-testid), which stays the same when the
+    // group is renamed. The name is only used for groups saved before ids were kept.
+    const wantedId = typeof wanted === "object" ? String(wanted.id || "") : "";
+    const target = clean(typeof wanted === "object" ? wanted.name : wanted);
+    const match = wantedId
+      ? rows.find((row) => (row.getAttribute("data-testid") || "") === wantedId)
+      : rows.find((row) => target && nameOf(row) === target);
+    if (!match) return {clicked: false, groups: [], rows: rows.length, loading: false};
+    const link = match.querySelector('a[href*="/i/chat/"], a[href*="/messages/"]');
+    if (link) link.click();
+    else match.click();
+    return {clicked: true, name: nameOf(match), groups: [], rows: rows.length, loading: false};
   }
   const groups = [];
   const seen = new Set();
@@ -76,9 +79,9 @@ READ_GROUPS_JS = r"""
     const isGroup = /dm-conversation-item-g\d/.test(id) || /جماعية|group chat/i.test(desc);
     if (!isGroup) continue;
     const name = nameOf(row);
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-    groups.push(name);
+    if (!id || !name || seen.has(id)) continue;
+    seen.add(id);
+    groups.push({id, name});
   }
   const loading = queryAll('[data-testid="dm-conversation-list-loading-footer"]').some((el) => {
     const rect = el.getBoundingClientRect();
@@ -530,8 +533,9 @@ def show_all_inbox(page) -> None:
     choose_inbox_filter(page, "dm-inbox-dropdown-all", r"^all$|الكل|all conversations|كل الرسائل")
 
 
-def collect_groups(page) -> list[str]:
-    found: list[str] = []
+def collect_groups(page) -> list[dict]:
+    """Every group in the inbox as {"id": ..., "name": ...}. The id does not change when a group is renamed."""
+    found: list[dict] = []
     seen: set[str] = set()
     idle = 0
     for _ in range(18):
@@ -540,12 +544,15 @@ def collect_groups(page) -> list[str]:
         except Exception:
             payload = {}
         added = 0
-        for name in payload.get("groups") or []:
-            clean = re.sub(r"\s+", " ", str(name)).strip()
-            if not clean or clean in seen:
+        for row in payload.get("groups") or []:
+            if not isinstance(row, dict):
                 continue
-            seen.add(clean)
-            found.append(clean)
+            group_id = str(row.get("id") or "").strip()
+            name = re.sub(r"\s+", " ", str(row.get("name") or "")).strip()
+            if not valid_group_id(group_id) or not name or group_id in seen:
+                continue
+            seen.add(group_id)
+            found.append({"id": group_id, "name": name})
             added += 1
         try:
             page.evaluate(SCROLL_INBOX_JS)
@@ -571,14 +578,21 @@ def collect_groups(page) -> list[str]:
     return found
 
 
-def open_named_group(page, name: str) -> None:
-    wanted = re.sub(r"\s+", " ", name).strip()
+def valid_group_id(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9:_\-]{1,160}", value or ""))
+
+
+def open_group(page, group_id: str, name: str) -> str:
+    """Open the group by its saved id, so it still opens after a rename.
+    Returns the name the group has now."""
+    wanted = {"id": group_id or "", "name": re.sub(r"\s+", " ", name or "").strip()}
     for _ in range(6):
         try:
             payload = page.evaluate(READ_GROUPS_JS, wanted) or {}
         except Exception:
             payload = {}
         if payload.get("clicked"):
+            current = re.sub(r"\s+", " ", str(payload.get("name") or "")).strip() or wanted["name"]
             deadline = time.monotonic() + 12
             while time.monotonic() < deadline:
                 try:
@@ -587,7 +601,7 @@ def open_named_group(page, name: str) -> None:
                     state = {}
                 if state.get("hasList") and state.get("messages"):
                     page.wait_for_timeout(800)
-                    return
+                    return current
                 page.wait_for_timeout(300)
         try:
             page.evaluate(SCROLL_INBOX_JS)
@@ -625,6 +639,27 @@ def parse_wait_minutes(value) -> float | None:
     return minutes
 
 
+MAX_GROUPS_WAIT_SECONDS = 300
+
+
+def parse_groups_wait(value) -> int | None:
+    """Seconds to wait on the groups list before reading it; empty means 0, None means invalid."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+    else:
+        text = str(value or "").strip().translate(WAIT_DIGITS).replace(",", ".")
+        if not text:
+            return 0
+        if not re.fullmatch(r"\d+(?:\.\d+)?", text):
+            return None
+        seconds = float(text)
+    if not 0 <= seconds <= MAX_GROUPS_WAIT_SECONDS:
+        return None
+    return int(round(seconds))
+
+
 def format_wait(seconds: float) -> str:
     total = max(0, math.ceil(seconds))
     hours, rest = divmod(total, 3600)
@@ -645,6 +680,8 @@ state: dict = {
     "chat_pin": "",
     "groups": [],
     "group": "",
+    "group_id": "",
+    "groups_wait": 0,
     "watching": False,
     "message": "اختر قروبًا لتبدأ المراقبة.",
     "ok": True,
@@ -946,6 +983,9 @@ def load_state() -> None:
         state["auth_token"] = str(loaded.get("auth_token") or "")
         state["chat_pin"] = str(loaded.get("chat_pin") or "")
         state["group"] = str(loaded.get("group") or "")
+        group_id = str(loaded.get("group_id") or "")
+        state["group_id"] = group_id if valid_group_id(group_id) else ""
+        state["groups_wait"] = parse_groups_wait(loaded.get("groups_wait")) or 0
         state["groups"] = []
         state["wait_minutes"] = parse_wait_minutes(loaded.get("wait_minutes")) or 0.0
         items = loaded.get("items")
@@ -960,6 +1000,8 @@ def save_state() -> None:
             "auth_token": state["auth_token"],
             "chat_pin": state["chat_pin"],
             "group": state["group"],
+            "group_id": state["group_id"],
+            "groups_wait": state["groups_wait"],
             "groups": list(state["groups"]),
             "wait_minutes": state["wait_minutes"],
             "items": list(state["items"])[-MAX_ITEMS:],
@@ -977,6 +1019,8 @@ def public_state() -> dict:
             "chat_pin": state["chat_pin"],
             "groups": list(state["groups"]),
             "group": state["group"],
+            "group_id": state["group_id"],
+            "groups_wait": state["groups_wait"],
             "watching": state["watching"],
             "message": state["message"],
             "rev": int(state.get("rev") or 0),
@@ -1254,9 +1298,19 @@ def captured_status_ids(run_id: str) -> list[str]:
         ]
 
 
-def watch_loop(auth_token: str, pin: str, group_name: str, wait_seconds: float = 0.0) -> None:
+def watch_loop(auth_token: str, pin: str, group_id: str, group_name: str, wait_seconds: float = 0.0) -> None:
     run_id = secrets.token_hex(4)
     anchor_ids: set[str] = set()
+    current = {"name": group_name}
+
+    def open_watched_group(page) -> None:
+        """Open the group by its id. If it was renamed, keep and show the new name."""
+        name = open_group(page, group_id, current["name"])
+        if name and name != current["name"]:
+            current["name"] = name
+            with state_lock:
+                state["group"] = name
+            save_state()
 
     def work(page):
         holder = {"page": page}
@@ -1274,7 +1328,7 @@ def watch_loop(auth_token: str, pin: str, group_name: str, wait_seconds: float =
                     if err:
                         raise RuntimeError(err)
                     show_groups_only(fresh)
-                    open_named_group(fresh, group_name)
+                    open_watched_group(fresh)
                     holder["page"] = fresh
                     return fresh
                 except Exception:
@@ -1307,13 +1361,13 @@ def watch_loop(auth_token: str, pin: str, group_name: str, wait_seconds: float =
             return
         show_groups_only(page)
         try:
-            open_named_group(page, group_name)
+            open_watched_group(page)
         except Exception as exc:
             if not browser_failure(exc) and page_alive(page):
                 set_status("تعذر فتح القروب.", False, False)
                 return
             page = reopen()
-            open_named_group(page, group_name)
+            open_watched_group(page)
         if wait_seconds > 0:
             deadline = time.monotonic() + wait_seconds
             shown = ""
@@ -1384,7 +1438,7 @@ def watch_loop(auth_token: str, pin: str, group_name: str, wait_seconds: float =
             anchor_ids.update(str(item) for item in anchor if item)
             page.evaluate("() => window.__watchArm && window.__watchArm()")
             remember_watch(page, saved)
-        set_status(f"يراقب «{group_name}» ويلتقط التغريدات الجديدة.", True, True)
+        set_status(f"يراقب «{current['name']}» ويلتقط التغريدات الجديدة.", True, True)
         missed = 0
         while not stop_flag.is_set() and not abort_flag.is_set():
             page = holder["page"]
@@ -1572,6 +1626,8 @@ PAGE = r"""<!DOCTYPE html>
         <input id="pin" type="password" inputmode="numeric" maxlength="8" autocomplete="off" placeholder="٤ أرقام">
         <button id="load" class="ghost" type="button">عرض القروبات</button>
       </div>
+      <label for="groups-wait">الانتظار قبل التقاط القروبات (بالثواني)</label>
+      <input id="groups-wait" type="text" inputmode="decimal" maxlength="5" autocomplete="off" spellcheck="false" placeholder="0 = يلتقط فورًا">
       <button id="stop" class="ghost" type="button" style="width:100%;margin-top:8px" disabled>إيقاف المراقبة</button>
       <button id="abort" class="ghost" type="button" style="width:100%;margin-top:8px" disabled>إيقاف المهمة</button>
       <div id="box" hidden>
@@ -1613,6 +1669,7 @@ PAGE = r"""<!DOCTYPE html>
     const abortTask = document.getElementById("abort");
     const watch = document.getElementById("watch");
     const wait = document.getElementById("wait");
+    const groupsWait = document.getElementById("groups-wait");
     const box = document.getElementById("box");
     const groups = document.getElementById("groups");
     const notice = document.getElementById("notice");
@@ -1627,6 +1684,8 @@ PAGE = r"""<!DOCTYPE html>
     let busy = false;
     let groupsReady = false;
     let waitLoaded = false;
+    let groupsWaitLoaded = false;
+    let groupList = [];
     let seenRev = -1;
     let noticeHold = 0;
 
@@ -1683,6 +1742,17 @@ PAGE = r"""<!DOCTYPE html>
       pop.hidden = false;
     }
 
+    function readGroupsWait() {
+      const text = groupsWait.value.trim()
+        .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x660))
+        .replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 0x6F0))
+        .replace(/[٫,]/g, ".");
+      if (!text) return 0;
+      if (!/^\d+(\.\d+)?$/.test(text)) return null;
+      const seconds = Number(text);
+      return seconds <= 300 ? Math.round(seconds) : null;
+    }
+
     function readWait() {
       const text = wait.value.trim()
         .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x660))
@@ -1703,25 +1773,30 @@ PAGE = r"""<!DOCTYPE html>
         waitLoaded = true;
       }
       wait.disabled = busy;
-      if (picked && !(data.groups || []).includes(picked) && groupsReady) picked = "";
-      if (!picked && data.group) picked = data.group;
-      const names = groupsReady ? (data.groups || []) : [];
-      box.hidden = names.length === 0;
+      if (!groupsWaitLoaded) {
+        groupsWait.value = data.groups_wait ? String(data.groups_wait) : "";
+        groupsWaitLoaded = true;
+      }
+      // Groups are picked by id, so a renamed group is still the same group.
+      groupList = groupsReady ? (data.groups || []).filter((group) => group && group.id && group.name) : [];
+      if (picked && groupsReady && !groupList.some((group) => group.id === picked)) picked = "";
+      if (!picked && data.group_id && groupList.some((group) => group.id === data.group_id)) picked = data.group_id;
+      box.hidden = groupList.length === 0;
       groups.replaceChildren();
-      names.forEach((name) => {
+      groupList.forEach((group) => {
         const button = document.createElement("button");
         button.type = "button";
-        button.textContent = name;
+        button.textContent = group.name;
         button.disabled = busy;
-        if (name === picked) button.className = "on";
+        if (group.id === picked) button.className = "on";
         button.addEventListener("click", () => {
           if (busy || starting) { show("المهمة تعمل الآن. انتظر حتى تنتهي.", false); return; }
-          picked = name;
+          picked = group.id;
           groups.querySelectorAll("button").forEach((item) => item.classList.toggle("on", item === button));
         });
         groups.appendChild(button);
       });
-      if (watch) watch.disabled = busy || !names.length;
+      if (watch) watch.disabled = busy || !groupList.length;
       count.textContent = String(data.count || 0);
       const bySender = new Map();
       (data.items || []).forEach((item) => {
@@ -1802,7 +1877,7 @@ PAGE = r"""<!DOCTYPE html>
       } catch (_) {}
     }
 
-    async function start(name) {
+    async function start(groupId) {
       if (busy || starting) {
         show("المهمة تعمل الآن. انتظر حتى تنتهي.", false);
         return;
@@ -1811,15 +1886,17 @@ PAGE = r"""<!DOCTYPE html>
       const chat = pin.value.trim();
       if (!auth) { show("أدخل رمز الجلسة.", false); token.focus(); return; }
       if (!/^\d{4,8}$/.test(chat)) { show("أدخل رمز الدردشة.", false); pin.focus(); return; }
-      if (!name) { show("حدد القروب ثم اضغط مراقبة.", false); return; }
+      const group = groupList.find((item) => item.id === groupId);
+      if (!group) { show("حدد القروب ثم اضغط مراقبة.", false); return; }
+      const name = group.name;
       const minutes = readWait();
       if (minutes === null) { show("وقت الانتظار بالدقائق من 0 إلى 1440.", false); wait.focus(); return; }
       starting = true;
-      picked = name;
+      picked = group.id;
       noticeHold += 1;
       show("جارٍ فتح " + name + "…", true);
       try {
-        const data = await post("/watch/start", {auth_token: auth, chat_pin: chat, group: name, wait_minutes: minutes});
+        const data = await post("/watch/start", {auth_token: auth, chat_pin: chat, group: name, group_id: group.id, wait_minutes: minutes});
         show(data.message || "بدأت المراقبة.", !!data.success);
       } catch (_) {
         show("تعذر بدء المراقبة.", false);
@@ -1835,11 +1912,13 @@ PAGE = r"""<!DOCTYPE html>
       const chat = pin.value.trim();
       if (!auth) { show("أدخل رمز الجلسة.", false); return; }
       if (!/^\d{4,8}$/.test(chat)) { show("أدخل رمز الدردشة.", false); return; }
+      const seconds = readGroupsWait();
+      if (seconds === null) { show("الانتظار قبل التقاط القروبات بالثواني من 0 إلى 300.", false); groupsWait.focus(); return; }
       load.disabled = true;
       noticeHold += 1;
-      show("جارٍ عرض القروبات…", true);
+      show(seconds ? "جارٍ عرض القروبات… سينتظر " + seconds + " ث قبل التقاطها." : "جارٍ عرض القروبات…", true);
       try {
-        const data = await post("/groups", {auth_token: auth, chat_pin: chat});
+        const data = await post("/groups", {auth_token: auth, chat_pin: chat, groups_wait: seconds});
         if (data.success) groupsReady = true;
         show(data.message || (data.success ? "اختر قروبًا." : "تعذر العرض."), !!data.success);
       } catch (_) {
@@ -1902,6 +1981,12 @@ def groups_endpoint():
         return jsonify(success=False, message="رمز الجلسة غير صالح."), 400
     if not valid_chat_pin(pin):
         return jsonify(success=False, message="رمز الدردشة ٤ إلى ٨ أرقام."), 400
+    groups_wait = parse_groups_wait(data.get("groups_wait"))
+    if groups_wait is None:
+        return jsonify(success=False, message=f"الانتظار قبل التقاط القروبات بالثواني من 0 إلى {MAX_GROUPS_WAIT_SECONDS}."), 400
+    with state_lock:
+        state["groups_wait"] = groups_wait
+    save_state()
     set_status("جارٍ عرض القروبات…", True)
 
     def work(page):
@@ -1911,6 +1996,9 @@ def groups_endpoint():
         if error:
             return None, error
         show_groups_only(page)
+        if groups_wait:
+            set_status(f"ينتظر {groups_wait} ث قبل التقاط القروبات…", True)
+            page.wait_for_timeout(groups_wait * 1000)
         names = collect_groups(page)
         return names, None
 
@@ -1946,11 +2034,12 @@ def watch_start():
     token = str(data.get("auth_token") or "").strip()
     pin = str(data.get("chat_pin") or "").strip()
     group_name = re.sub(r"\s+", " ", str(data.get("group") or "")).strip()
+    group_id = str(data.get("group_id") or "").strip()
     if not valid_auth_token(token):
         return jsonify(success=False, message="رمز الجلسة غير صالح."), 400
     if not valid_chat_pin(pin):
         return jsonify(success=False, message="رمز الدردشة ٤ إلى ٨ أرقام."), 400
-    if not group_name:
+    if not group_name or not valid_group_id(group_id):
         return jsonify(success=False, message="اختر قروبًا."), 400
     wait_minutes = parse_wait_minutes(data.get("wait_minutes"))
     if wait_minutes is None:
@@ -1966,6 +2055,7 @@ def watch_start():
         state["auth_token"] = token
         state["chat_pin"] = pin
         state["group"] = group_name
+        state["group_id"] = group_id
         state["wait_minutes"] = wait_minutes
         state["watching"] = True
         state["waiting"] = False
@@ -1974,7 +2064,7 @@ def watch_start():
         write_message(f"جارٍ فتح «{group_name}»…", True)
     save_state()
     stop_flag.clear()
-    watch_thread = threading.Thread(target=watch_loop, args=(token, pin, group_name, wait_minutes * 60), daemon=True)
+    watch_thread = threading.Thread(target=watch_loop, args=(token, pin, group_id, group_name, wait_minutes * 60), daemon=True)
     watch_thread.start()
     if wait_minutes:
         return jsonify(success=True, message=f"بدأت مراقبة «{group_name}». سينتظر {format_wait(wait_minutes * 60)} بعد فتح القروب.")
