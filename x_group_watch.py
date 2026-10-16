@@ -616,34 +616,16 @@ def valid_auth_token(value: str) -> bool:
     return 20 <= len(value) <= 512
 
 
-MAX_WAIT_MINUTES = 24 * 60
+# Both waits are typed in seconds: before reading the groups list, and after entering
+# the group before the start mark is taken.
+MAX_GROUPS_WAIT_SECONDS = 300
+MAX_WATCH_WAIT_SECONDS = 24 * 60 * 60
 WAIT_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 STOPPED_DURING_WAIT = "توقفت المراقبة أثناء الانتظار قبل حفظ البداية. لم يُلتقط شيء."
 
 
-def parse_wait_minutes(value) -> float | None:
-    """Minutes to wait after the group opens; empty means 0, None means invalid."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        minutes = float(value)
-    else:
-        text = str(value or "").strip().translate(WAIT_DIGITS).replace(",", ".")
-        if not text:
-            return 0.0
-        if not re.fullmatch(r"\d+(?:\.\d+)?", text):
-            return None
-        minutes = float(text)
-    if not 0 <= minutes <= MAX_WAIT_MINUTES:
-        return None
-    return minutes
-
-
-MAX_GROUPS_WAIT_SECONDS = 300
-
-
-def parse_groups_wait(value) -> int | None:
-    """Seconds to wait on the groups list before reading it; empty means 0, None means invalid."""
+def parse_seconds(value, limit: int) -> int | None:
+    """Seconds typed in a wait box (Arabic digits allowed); empty means 0, None means invalid."""
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -655,16 +637,9 @@ def parse_groups_wait(value) -> int | None:
         if not re.fullmatch(r"\d+(?:\.\d+)?", text):
             return None
         seconds = float(text)
-    if not 0 <= seconds <= MAX_GROUPS_WAIT_SECONDS:
+    if not 0 <= seconds <= limit:
         return None
     return int(round(seconds))
-
-
-def format_wait(seconds: float) -> str:
-    total = max(0, math.ceil(seconds))
-    hours, rest = divmod(total, 3600)
-    minutes, secs = divmod(rest, 60)
-    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
 
 
 DATA_DIR = Path(__file__).resolve().with_name("data")
@@ -687,7 +662,7 @@ state: dict = {
     "ok": True,
     "checking": False,
     "waiting": False,
-    "wait_minutes": 0.0,
+    "wait_seconds": 0,
     "items": [],
     "rev": 0,
 }
@@ -985,9 +960,17 @@ def load_state() -> None:
         state["group"] = str(loaded.get("group") or "")
         group_id = str(loaded.get("group_id") or "")
         state["group_id"] = group_id if valid_group_id(group_id) else ""
-        state["groups_wait"] = parse_groups_wait(loaded.get("groups_wait")) or 0
+        state["groups_wait"] = parse_seconds(loaded.get("groups_wait"), MAX_GROUPS_WAIT_SECONDS) or 0
         state["groups"] = []
-        state["wait_minutes"] = parse_wait_minutes(loaded.get("wait_minutes")) or 0.0
+        if "wait_seconds" in loaded:
+            state["wait_seconds"] = parse_seconds(loaded.get("wait_seconds"), MAX_WATCH_WAIT_SECONDS) or 0
+        else:
+            # Saved by the older version, which kept this wait in minutes.
+            try:
+                minutes = float(loaded.get("wait_minutes") or 0)
+            except (TypeError, ValueError):
+                minutes = 0.0
+            state["wait_seconds"] = int(min(MAX_WATCH_WAIT_SECONDS, max(0.0, minutes * 60)))
         items = loaded.get("items")
         if isinstance(items, list):
             state["items"] = [item for item in items if isinstance(item, dict)][-MAX_ITEMS:]
@@ -1003,7 +986,7 @@ def save_state() -> None:
             "group_id": state["group_id"],
             "groups_wait": state["groups_wait"],
             "groups": list(state["groups"]),
-            "wait_minutes": state["wait_minutes"],
+            "wait_seconds": state["wait_seconds"],
             "items": list(state["items"])[-MAX_ITEMS:],
         }
     temporary = WATCH_PATH.with_suffix(".json.tmp")
@@ -1027,7 +1010,7 @@ def public_state() -> dict:
             "ok": state["ok"],
             "checking": state.get("checking") or False,
             "waiting": bool(state.get("waiting")),
-            "wait_minutes": state["wait_minutes"],
+            "wait_seconds": state["wait_seconds"],
             "count": len(state["items"]),
             "items": list(reversed(state["items"][-200:])),
         }
@@ -1378,10 +1361,10 @@ def watch_loop(auth_token: str, pin: str, group_id: str, group_name: str, wait_s
                     left = deadline - time.monotonic()
                     if left <= 0:
                         break
-                    label = format_wait(left)
+                    label = str(math.ceil(left))
                     if label != shown:
                         shown = label
-                        set_status(f"تم فتح القروب. ينتظر {label} ثم يحفظ البداية…", True, True)
+                        set_status(f"تم فتح القروب. ينتظر {label} ث قبل التقاط البداية…", True, True)
                     try:
                         page.wait_for_timeout(max(50, (left % 1 or 1.0) * 1000))
                     except Exception:
@@ -1633,8 +1616,8 @@ PAGE = r"""<!DOCTYPE html>
       <div id="box" hidden>
         <div class="meta">حدد القروب، ثم اضغط مراقبة</div>
         <div id="groups"></div>
-        <label for="wait">وقت الانتظار بعد فتح القروب (بالدقائق)</label>
-        <input id="wait" type="text" inputmode="decimal" maxlength="8" autocomplete="off" spellcheck="false" placeholder="0 = يبدأ فورًا">
+        <label for="wait">الانتظار بعد دخول القروب قبل التقاط البداية (بالثواني)</label>
+        <input id="wait" type="text" inputmode="decimal" maxlength="5" autocomplete="off" spellcheck="false" placeholder="0 = يلتقط فورًا">
         <div class="actions">
           <button id="watch" type="button">مراقبة</button>
         </div>
@@ -1742,26 +1725,16 @@ PAGE = r"""<!DOCTYPE html>
       pop.hidden = false;
     }
 
-    function readGroupsWait() {
-      const text = groupsWait.value.trim()
+    // Both wait boxes take seconds: empty = 0, Arabic digits allowed, null = not a valid number.
+    function readSeconds(field, max) {
+      const text = field.value.trim()
         .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x660))
         .replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 0x6F0))
         .replace(/[٫,]/g, ".");
       if (!text) return 0;
       if (!/^\d+(\.\d+)?$/.test(text)) return null;
       const seconds = Number(text);
-      return seconds <= 300 ? Math.round(seconds) : null;
-    }
-
-    function readWait() {
-      const text = wait.value.trim()
-        .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x660))
-        .replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 0x6F0))
-        .replace(/[٫,]/g, ".");
-      if (!text) return 0;
-      if (!/^\d+(\.\d+)?$/.test(text)) return null;
-      const minutes = Number(text);
-      return minutes <= 1440 ? minutes : null;
+      return seconds <= max ? Math.round(seconds) : null;
     }
 
     function render(data) {
@@ -1769,7 +1742,7 @@ PAGE = r"""<!DOCTYPE html>
       if (document.activeElement !== token && data.auth_token && token.readOnly) token.value = data.auth_token;
       if (document.activeElement !== pin && data.chat_pin) pin.value = data.chat_pin;
       if (!waitLoaded) {
-        wait.value = data.wait_minutes ? String(data.wait_minutes) : "";
+        wait.value = data.wait_seconds ? String(data.wait_seconds) : "";
         waitLoaded = true;
       }
       wait.disabled = busy;
@@ -1889,14 +1862,14 @@ PAGE = r"""<!DOCTYPE html>
       const group = groupList.find((item) => item.id === groupId);
       if (!group) { show("حدد القروب ثم اضغط مراقبة.", false); return; }
       const name = group.name;
-      const minutes = readWait();
-      if (minutes === null) { show("وقت الانتظار بالدقائق من 0 إلى 1440.", false); wait.focus(); return; }
+      const waitSeconds = readSeconds(wait, 86400);
+      if (waitSeconds === null) { show("الانتظار بعد دخول القروب بالثواني من 0 إلى 86400.", false); wait.focus(); return; }
       starting = true;
       picked = group.id;
       noticeHold += 1;
       show("جارٍ فتح " + name + "…", true);
       try {
-        const data = await post("/watch/start", {auth_token: auth, chat_pin: chat, group: name, group_id: group.id, wait_minutes: minutes});
+        const data = await post("/watch/start", {auth_token: auth, chat_pin: chat, group: name, group_id: group.id, wait_seconds: waitSeconds});
         show(data.message || "بدأت المراقبة.", !!data.success);
       } catch (_) {
         show("تعذر بدء المراقبة.", false);
@@ -1912,7 +1885,7 @@ PAGE = r"""<!DOCTYPE html>
       const chat = pin.value.trim();
       if (!auth) { show("أدخل رمز الجلسة.", false); return; }
       if (!/^\d{4,8}$/.test(chat)) { show("أدخل رمز الدردشة.", false); return; }
-      const seconds = readGroupsWait();
+      const seconds = readSeconds(groupsWait, 300);
       if (seconds === null) { show("الانتظار قبل التقاط القروبات بالثواني من 0 إلى 300.", false); groupsWait.focus(); return; }
       load.disabled = true;
       noticeHold += 1;
@@ -1981,7 +1954,7 @@ def groups_endpoint():
         return jsonify(success=False, message="رمز الجلسة غير صالح."), 400
     if not valid_chat_pin(pin):
         return jsonify(success=False, message="رمز الدردشة ٤ إلى ٨ أرقام."), 400
-    groups_wait = parse_groups_wait(data.get("groups_wait"))
+    groups_wait = parse_seconds(data.get("groups_wait"), MAX_GROUPS_WAIT_SECONDS)
     if groups_wait is None:
         return jsonify(success=False, message=f"الانتظار قبل التقاط القروبات بالثواني من 0 إلى {MAX_GROUPS_WAIT_SECONDS}."), 400
     with state_lock:
@@ -2041,9 +2014,9 @@ def watch_start():
         return jsonify(success=False, message="رمز الدردشة ٤ إلى ٨ أرقام."), 400
     if not group_name or not valid_group_id(group_id):
         return jsonify(success=False, message="اختر قروبًا."), 400
-    wait_minutes = parse_wait_minutes(data.get("wait_minutes"))
-    if wait_minutes is None:
-        return jsonify(success=False, message=f"وقت الانتظار بالدقائق من 0 إلى {MAX_WAIT_MINUTES}."), 400
+    wait_seconds = parse_seconds(data.get("wait_seconds"), MAX_WATCH_WAIT_SECONDS)
+    if wait_seconds is None:
+        return jsonify(success=False, message=f"الانتظار بعد دخول القروب بالثواني من 0 إلى {MAX_WATCH_WAIT_SECONDS}."), 400
     thread = watch_thread
     with state_lock:
         running = bool(state["watching"] or state.get("checking"))
@@ -2056,7 +2029,7 @@ def watch_start():
         state["chat_pin"] = pin
         state["group"] = group_name
         state["group_id"] = group_id
-        state["wait_minutes"] = wait_minutes
+        state["wait_seconds"] = wait_seconds
         state["watching"] = True
         state["waiting"] = False
         state["ok"] = True
@@ -2064,10 +2037,10 @@ def watch_start():
         write_message(f"جارٍ فتح «{group_name}»…", True)
     save_state()
     stop_flag.clear()
-    watch_thread = threading.Thread(target=watch_loop, args=(token, pin, group_id, group_name, wait_minutes * 60), daemon=True)
+    watch_thread = threading.Thread(target=watch_loop, args=(token, pin, group_id, group_name, wait_seconds), daemon=True)
     watch_thread.start()
-    if wait_minutes:
-        return jsonify(success=True, message=f"بدأت مراقبة «{group_name}». سينتظر {format_wait(wait_minutes * 60)} بعد فتح القروب.")
+    if wait_seconds:
+        return jsonify(success=True, message=f"بدأت مراقبة «{group_name}». سينتظر {wait_seconds} ث بعد دخول القروب ثم يلتقط البداية.")
     return jsonify(success=True, message=f"بدأت مراقبة «{group_name}».")
 
 
