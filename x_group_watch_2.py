@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -600,6 +601,37 @@ def open_named_group(page, name: str) -> None:
 def valid_auth_token(value: str) -> bool:
     return 20 <= len(value) <= 512
 
+
+MAX_WAIT_MINUTES = 24 * 60
+WAIT_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
+STOPPED_DURING_WAIT = "توقفت المراقبة أثناء الانتظار قبل حفظ البداية. لم يُلتقط شيء."
+
+
+def parse_wait_minutes(value) -> float | None:
+    """Minutes to wait after the group opens; empty means 0, None means invalid."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        minutes = float(value)
+    else:
+        text = str(value or "").strip().translate(WAIT_DIGITS).replace(",", ".")
+        if not text:
+            return 0.0
+        if not re.fullmatch(r"\d+(?:\.\d+)?", text):
+            return None
+        minutes = float(text)
+    if not 0 <= minutes <= MAX_WAIT_MINUTES:
+        return None
+    return minutes
+
+
+def format_wait(seconds: float) -> str:
+    total = max(0, math.ceil(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
+
+
 DATA_DIR = Path(__file__).resolve().with_name("data")
 WATCH_PATH = DATA_DIR / "watch.json"
 MAX_ITEMS = 1000
@@ -617,6 +649,8 @@ state: dict = {
     "message": "اختر قروبًا لتبدأ المراقبة.",
     "ok": True,
     "checking": False,
+    "waiting": False,
+    "wait_minutes": 0.0,
     "items": [],
     "rev": 0,
 }
@@ -913,6 +947,7 @@ def load_state() -> None:
         state["chat_pin"] = str(loaded.get("chat_pin") or "")
         state["group"] = str(loaded.get("group") or "")
         state["groups"] = []
+        state["wait_minutes"] = parse_wait_minutes(loaded.get("wait_minutes")) or 0.0
         items = loaded.get("items")
         if isinstance(items, list):
             state["items"] = [item for item in items if isinstance(item, dict)][-MAX_ITEMS:]
@@ -926,6 +961,7 @@ def save_state() -> None:
             "chat_pin": state["chat_pin"],
             "group": state["group"],
             "groups": list(state["groups"]),
+            "wait_minutes": state["wait_minutes"],
             "items": list(state["items"])[-MAX_ITEMS:],
         }
     temporary = WATCH_PATH.with_suffix(".json.tmp")
@@ -946,6 +982,8 @@ def public_state() -> dict:
             "rev": int(state.get("rev") or 0),
             "ok": state["ok"],
             "checking": state.get("checking") or False,
+            "waiting": bool(state.get("waiting")),
+            "wait_minutes": state["wait_minutes"],
             "count": len(state["items"]),
             "items": list(reversed(state["items"][-200:])),
         }
@@ -1216,7 +1254,7 @@ def captured_status_ids(run_id: str) -> list[str]:
         ]
 
 
-def watch_loop(auth_token: str, pin: str, group_name: str) -> None:
+def watch_loop(auth_token: str, pin: str, group_name: str, wait_seconds: float = 0.0) -> None:
     run_id = secrets.token_hex(4)
     anchor_ids: set[str] = set()
 
@@ -1276,6 +1314,36 @@ def watch_loop(auth_token: str, pin: str, group_name: str) -> None:
                 return
             page = reopen()
             open_named_group(page, group_name)
+        if wait_seconds > 0:
+            deadline = time.monotonic() + wait_seconds
+            shown = ""
+            with state_lock:
+                state["waiting"] = True
+            try:
+                while not stop_flag.is_set() and not abort_flag.is_set():
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
+                    label = format_wait(left)
+                    if label != shown:
+                        shown = label
+                        set_status(f"تم فتح القروب. ينتظر {label} ثم يحفظ البداية…", True, True)
+                    try:
+                        page.wait_for_timeout(max(50, (left % 1 or 1.0) * 1000))
+                    except Exception:
+                        if abort_flag.is_set():
+                            break
+                        page = reopen()
+                        shown = ""
+            finally:
+                with state_lock:
+                    state["waiting"] = False
+            if abort_flag.is_set():
+                set_status("تم إيقاف المهمة.", True, False)
+                return
+            if stop_flag.is_set():
+                set_status(STOPPED_DURING_WAIT, True, False)
+                return
         try:
             page.evaluate(GROUP_CHAT_SCROLL_JS, "latest")
         except Exception:
@@ -1415,6 +1483,7 @@ def watch_loop(auth_token: str, pin: str, group_name: str) -> None:
         with state_lock:
             state["watching"] = False
             state["checking"] = False
+            state["waiting"] = False
 
 
 def stop_watch(timeout: float = 120.0) -> bool:
@@ -1456,6 +1525,7 @@ PAGE = r"""<!DOCTYPE html>
     #box { margin-top:10px; padding:8px 10px 10px; border-radius:14px; background:var(--paper); box-shadow:inset 0 0 0 1px var(--line); }
     #groups button { flex:0 0 auto; height:30px; border-radius:999px; background:var(--sheet); color:var(--ink); box-shadow:inset 0 0 0 1px var(--line); font-weight:600; white-space:nowrap; }
     #groups button.on { background:var(--ok); box-shadow:inset 0 0 0 1.5px var(--pine); }
+    #box input { background:var(--sheet); }
     .actions { display:flex; gap:8px; margin-top:8px; }
     .actions button { flex:1; height:36px; border:0; border-radius:10px; background:var(--ink); color:#fff; font:inherit; font-weight:700; }
     .actions button.ghost { background:var(--sheet); color:var(--ink); box-shadow:inset 0 0 0 1px var(--line); }
@@ -1507,6 +1577,8 @@ PAGE = r"""<!DOCTYPE html>
       <div id="box" hidden>
         <div class="meta">حدد القروب، ثم اضغط مراقبة</div>
         <div id="groups"></div>
+        <label for="wait">وقت الانتظار بعد فتح القروب (بالدقائق)</label>
+        <input id="wait" type="text" inputmode="decimal" maxlength="8" autocomplete="off" spellcheck="false" placeholder="0 = يبدأ فورًا">
         <div class="actions">
           <button id="watch" type="button">مراقبة</button>
         </div>
@@ -1540,6 +1612,7 @@ PAGE = r"""<!DOCTYPE html>
     const stop = document.getElementById("stop");
     const abortTask = document.getElementById("abort");
     const watch = document.getElementById("watch");
+    const wait = document.getElementById("wait");
     const box = document.getElementById("box");
     const groups = document.getElementById("groups");
     const notice = document.getElementById("notice");
@@ -1553,6 +1626,7 @@ PAGE = r"""<!DOCTYPE html>
     let starting = false;
     let busy = false;
     let groupsReady = false;
+    let waitLoaded = false;
     let seenRev = -1;
     let noticeHold = 0;
 
@@ -1609,10 +1683,26 @@ PAGE = r"""<!DOCTYPE html>
       pop.hidden = false;
     }
 
+    function readWait() {
+      const text = wait.value.trim()
+        .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x660))
+        .replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 0x6F0))
+        .replace(/[٫,]/g, ".");
+      if (!text) return 0;
+      if (!/^\d+(\.\d+)?$/.test(text)) return null;
+      const minutes = Number(text);
+      return minutes <= 1440 ? minutes : null;
+    }
+
     function render(data) {
       busy = !!(data.watching || data.checking);
       if (document.activeElement !== token && data.auth_token && token.readOnly) token.value = data.auth_token;
       if (document.activeElement !== pin && data.chat_pin) pin.value = data.chat_pin;
+      if (!waitLoaded) {
+        wait.value = data.wait_minutes ? String(data.wait_minutes) : "";
+        waitLoaded = true;
+      }
+      wait.disabled = busy;
       if (picked && !(data.groups || []).includes(picked) && groupsReady) picked = "";
       if (!picked && data.group) picked = data.group;
       const names = groupsReady ? (data.groups || []) : [];
@@ -1722,12 +1812,14 @@ PAGE = r"""<!DOCTYPE html>
       if (!auth) { show("أدخل رمز الجلسة.", false); token.focus(); return; }
       if (!/^\d{4,8}$/.test(chat)) { show("أدخل رمز الدردشة.", false); pin.focus(); return; }
       if (!name) { show("حدد القروب ثم اضغط مراقبة.", false); return; }
+      const minutes = readWait();
+      if (minutes === null) { show("وقت الانتظار بالدقائق من 0 إلى 1440.", false); wait.focus(); return; }
       starting = true;
       picked = name;
       noticeHold += 1;
       show("جارٍ فتح " + name + "…", true);
       try {
-        const data = await post("/watch/start", {auth_token: auth, chat_pin: chat, group: name});
+        const data = await post("/watch/start", {auth_token: auth, chat_pin: chat, group: name, wait_minutes: minutes});
         show(data.message || "بدأت المراقبة.", !!data.success);
       } catch (_) {
         show("تعذر بدء المراقبة.", false);
@@ -1860,6 +1952,9 @@ def watch_start():
         return jsonify(success=False, message="رمز الدردشة ٤ إلى ٨ أرقام."), 400
     if not group_name:
         return jsonify(success=False, message="اختر قروبًا."), 400
+    wait_minutes = parse_wait_minutes(data.get("wait_minutes"))
+    if wait_minutes is None:
+        return jsonify(success=False, message=f"وقت الانتظار بالدقائق من 0 إلى {MAX_WAIT_MINUTES}."), 400
     thread = watch_thread
     with state_lock:
         running = bool(state["watching"] or state.get("checking"))
@@ -1871,14 +1966,18 @@ def watch_start():
         state["auth_token"] = token
         state["chat_pin"] = pin
         state["group"] = group_name
+        state["wait_minutes"] = wait_minutes
         state["watching"] = True
+        state["waiting"] = False
         state["ok"] = True
         state["items"] = []
         write_message(f"جارٍ فتح «{group_name}»…", True)
     save_state()
     stop_flag.clear()
-    watch_thread = threading.Thread(target=watch_loop, args=(token, pin, group_name), daemon=True)
+    watch_thread = threading.Thread(target=watch_loop, args=(token, pin, group_name, wait_minutes * 60), daemon=True)
     watch_thread.start()
+    if wait_minutes:
+        return jsonify(success=True, message=f"بدأت مراقبة «{group_name}». سينتظر {format_wait(wait_minutes * 60)} بعد فتح القروب.")
     return jsonify(success=True, message=f"بدأت مراقبة «{group_name}».")
 
 
@@ -1889,11 +1988,16 @@ def watch_stop():
         return jsonify(success=False, message="أعد تحميل الصفحة."), 400
     if not state.get("watching"):
         return jsonify(success=False, message="لا توجد مراقبة تعمل الآن."), 409
-    stop_flag.set()
     with state_lock:
-        state["checking"] = True
-    set_status("توقفت المراقبة. يتم فحص التغريدات المحذوفة.", True, True)
-    return jsonify(success=True, message="توقفت المراقبة. يتم فحص التغريدات المحذوفة.")
+        waiting = bool(state.get("waiting"))
+        stop_flag.set()
+        if waiting:
+            message = STOPPED_DURING_WAIT
+        else:
+            message = "توقفت المراقبة. يتم فحص التغريدات المحذوفة."
+            state["checking"] = True
+        write_message(message, True)
+    return jsonify(success=True, message=message)
 
 
 @app.post("/watch/abort")
