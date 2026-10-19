@@ -2629,7 +2629,7 @@ def _mouse_start(page, target_x: float, target_y: float) -> tuple[float, float]:
     remembered = _mouse_at.get(id(page))
     if remembered:
         return remembered
-    size = page.viewport_size or {"width": 1280, "height": 900}
+    size = page.viewport_size or {"width": VIEWPORT_WIDTH, "height": 900}
     angle = random.uniform(0, math.tau)
     distance = random.uniform(140, 420)
     return (
@@ -2655,7 +2655,7 @@ def _human_path(start: tuple[float, float], end: tuple[float, float], viewport: 
         sx + dx * random.uniform(0.58, 0.86) + side_x * bend * random.uniform(-0.25, 0.85),
         sy + dy * random.uniform(0.58, 0.86) + side_y * bend * random.uniform(-0.25, 0.85),
     )
-    width = float(viewport.get("width") or 1280)
+    width = float(viewport.get("width") or VIEWPORT_WIDTH)
     height = float(viewport.get("height") or 900)
     sway = random.uniform(2, 6)
     phase = random.uniform(0, math.tau)
@@ -2681,7 +2681,7 @@ def _human_path(start: tuple[float, float], end: tuple[float, float], viewport: 
 
 
 def _move_like_a_hand(page, x: float, y: float) -> None:
-    viewport = page.viewport_size or {"width": 1280, "height": 900}
+    viewport = page.viewport_size or {"width": VIEWPORT_WIDTH, "height": 900}
     start = _mouse_start(page, x, y)
     for px, py in _human_path(start, (x, y), viewport):
         page.mouse.move(px, py)
@@ -3547,7 +3547,7 @@ def allow_media(page) -> None:
 
 def open_x_context(browser, auth_token: str):
     context = browser.new_context(
-        viewport={"width": 1280, "height": NORMAL_VIEWPORT_HEIGHT},
+        viewport={"width": VIEWPORT_WIDTH, "height": NORMAL_VIEWPORT_HEIGHT},
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -3688,6 +3688,9 @@ PROFILES_DIR = DATA_DIR / "profiles"
 # Page height while opening the chat and collecting from the group, and for everything else.
 COLLECT_VIEWPORT_HEIGHT = 25000
 NORMAL_VIEWPORT_HEIGHT = 1800
+# Width of the script's browser page (the height stays as set above). Narrower means less
+# to draw; 600 keeps X's normal layout (below 500 X switches to its phone layout).
+VIEWPORT_WIDTH = 600
 profile_locks: dict[str, threading.Lock] = {}
 profile_locks_guard = threading.Lock()
 
@@ -3713,7 +3716,7 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
         str(profile_dir),
         headless=True,
         args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"],
-        viewport={"width": 1280, "height": NORMAL_VIEWPORT_HEIGHT},
+        viewport={"width": VIEWPORT_WIDTH, "height": NORMAL_VIEWPORT_HEIGHT},
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -3832,7 +3835,7 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
 
 def set_page_height(page, height: int) -> None:
     try:
-        page.set_viewport_size({"width": 1280, "height": int(height)})
+        page.set_viewport_size({"width": VIEWPORT_WIDTH, "height": int(height)})
         page.wait_for_timeout(500)
     except Exception:
         pass
