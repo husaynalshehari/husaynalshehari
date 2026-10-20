@@ -4298,6 +4298,61 @@ def open_named_group(page, name: str) -> str:
         page.wait_for_timeout(300)
     raise RuntimeError("فُتح القروب لكن رسائله لم تظهر. توقفت المهمة.")
 
+
+def peek_named_group(page, name: str, wait_s: float = 10.0) -> bool:
+    """Open the group once (found the same way as open_named_group) and wait until its
+    messages show, at most wait_s. True when the group was opened, whether or not the
+    messages showed in time. Used before the real open, because X first opens a group at
+    the place this account last read up to, not at the newest messages."""
+    wanted = re.sub(r"\s+", " ", name).strip()
+    with group_ids_lock:
+        saved_id = group_ids.get(wanted, "")
+    started = time.monotonic()
+    clicked = False
+    while time.monotonic() - started < 10:
+        try:
+            payload = page.evaluate(READ_GROUPS_JS, {"name": wanted, "testid": saved_id}) or {}
+        except Exception:
+            payload = {}
+        if payload.get("clicked"):
+            clicked = True
+            break
+        if time.monotonic() - started > 3:
+            try:
+                page.evaluate(SCROLL_INBOX_JS)
+            except Exception:
+                pass
+        page.wait_for_timeout(700)
+    if not clicked:
+        return False
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            state = page.evaluate(GROUP_CHAT_SCROLL_JS, "state") or {}
+        except Exception:
+            state = {}
+        if state.get("hasList") and state.get("messages"):
+            page.wait_for_timeout(1000)
+            return True
+        page.wait_for_timeout(300)
+    return True
+
+
+def leave_group(page, pin: str) -> None:
+    """Go back from the open group to the chat list, like pressing back."""
+    try:
+        page.go_back(wait_until="domcontentloaded", timeout=15_000)
+    except Exception:
+        pass
+    page.wait_for_timeout(800)
+    still_inside = re.search(r"/(?:i/chat|messages)/[^/?#]+", page.url or "")
+    if still_inside or not chat_inbox_open(page):
+        # Back did not land on the chat list: open it directly (types the chat PIN if X asks).
+        page.goto(CHAT_URLS[0], wait_until="domcontentloaded", timeout=60_000)
+        error = open_chat(page, pin)
+        if error:
+            raise RuntimeError(error)
+
 def group_chat_state(page) -> dict:
     try:
         return page.evaluate(GROUP_CHAT_SCROLL_JS, "state") or {}
@@ -5279,6 +5334,12 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     return
                 show_groups_only(page)
                 publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
+                # X first opens a group at the place this account last read up to. Open it once
+                # (until its messages show, at most 10 s), leave, and open it again at the newest messages.
+                if peek_named_group(page, group_name, 10):
+                    publish_job(job_id, phase="login", message="فُتح القروب. الخروج منه والعودة إليه لتظهر أحدث الرسائل…")
+                    leave_group(page, pin)
+                    show_groups_only(page)
                 opened_name = open_named_group(page, group_name)
                 if opened_name != group_name:
                     publish_job(job_id, phase="login", message=f"تغيّر اسم القروب إلى «{opened_name}» وفُتح.")
