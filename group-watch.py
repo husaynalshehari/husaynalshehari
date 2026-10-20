@@ -2472,8 +2472,16 @@ def watch_loop(auth_token: str, pin: str, group_id: str, group_name: str, wait_s
                         set_status("تم إيقاف المهمة.", True, False)
                         return
 
+    def work_then_close(page):
+        try:
+            return work(page)
+        finally:
+            # The watch is over (finished, stopped, or failed): close the browser. Left open,
+            # it would stay inside the group and X would mark every new message as seen.
+            browser_hub._reset_driver()
+
     try:
-        run_on_browser(auth_token, work)
+        run_on_browser(auth_token, work_then_close)
     except Exception as exc:
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
