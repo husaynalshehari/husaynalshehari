@@ -2264,6 +2264,8 @@ def watch_loop(auth_token: str, pin: str, group_id: str, group_name: str, wait_s
 
     def open_watched_group(page) -> None:
         """Open the group by its id. If it was renamed, keep and show the new name."""
+        width = (page.viewport_size or {}).get("width") or 1280
+        page.set_viewport_size({"width": width, "height": WATCH_VIEWPORT_HEIGHT})
         name = open_group(page, group_id, current["name"])
         if name and name != current["name"]:
             current["name"] = name
@@ -3333,6 +3335,9 @@ def scroll_likes(page) -> dict:
 
 # Page height while the likes list is open, so most likers show without scrolling.
 LIKES_VIEWPORT_HEIGHT = 20000
+# Page height while a group is open for watching. More of the chat stays on the page, so a
+# burst of new tweets (or the catch-up after a reload) is read before it scrolls out of view.
+WATCH_VIEWPORT_HEIGHT = 3000
 
 
 def open_likes_page(page, status_id: str, handle: str = "") -> str | None:
