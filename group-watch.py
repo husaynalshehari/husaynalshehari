@@ -2319,18 +2319,20 @@ def watch_loop(auth_token: str, pin: str, group_id: str, group_name: str, wait_s
     anchor_ids: set[str] = set()
     current = {"name": group_name}
 
-    def open_watched_group(page) -> None:
+    def open_watched_group(page, first: bool = False) -> None:
         """Open the group by its id. If it was renamed, keep and show the new name.
 
-        X first opens a group at the place this account last read up to, with the newer
-        messages below it. So the group is opened once (until its messages show, at most
-        10 seconds), left, and opened again; the second time it opens at the newest messages."""
+        first: the watch is starting. X first opens a group at the place this account last
+        read up to, with the newer messages below it, so the group is opened once (until its
+        messages show, at most 10 seconds), left, and opened again at the newest messages.
+        After a disconnect the group is opened normally, so the watch goes on from where it stopped."""
         width = (page.viewport_size or {}).get("width") or 1280
         page.set_viewport_size({"width": width, "height": WATCH_VIEWPORT_HEIGHT})
-        set_status("يفتح القروب ثم يخرج ويعود إليه ليبدأ من آخر الرسائل…", True, True)
-        if peek_group(page, group_id, current["name"], 10):
-            leave_group(page, pin)
-            show_groups_only(page)
+        if first:
+            set_status("يفتح القروب ثم يخرج ويعود إليه ليبدأ من آخر الرسائل…", True, True)
+            if peek_group(page, group_id, current["name"], 10):
+                leave_group(page, pin)
+                show_groups_only(page)
         name = open_group(page, group_id, current["name"])
         if name and name != current["name"]:
             current["name"] = name
@@ -2387,13 +2389,13 @@ def watch_loop(auth_token: str, pin: str, group_id: str, group_name: str, wait_s
             return
         show_groups_only(page)
         try:
-            open_watched_group(page)
+            open_watched_group(page, first=True)
         except Exception as exc:
             if not browser_failure(exc) and page_alive(page):
                 set_status("تعذر فتح القروب.", False, False)
                 return
             page = reopen()
-            open_watched_group(page)
+            open_watched_group(page, first=True)
         if wait_seconds > 0:
             deadline = time.monotonic() + wait_seconds
             shown = ""
