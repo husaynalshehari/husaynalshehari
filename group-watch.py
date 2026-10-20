@@ -615,6 +615,56 @@ def open_group(page, group_id: str, name: str) -> str:
     raise RuntimeError("تم البحث عن القروب لكن قائمة الرسائل لم تُفتح.")
 
 
+def peek_group(page, group_id: str, name: str, wait_s: float = 10.0) -> bool:
+    """Open the group once and wait until its messages show (at most wait_s).
+    True when the group was opened, whether or not the messages showed in time. Used
+    before the real open, so X stops opening the group at the place this account last read up to."""
+    wanted = {"id": group_id or "", "name": re.sub(r"\s+", " ", name or "").strip()}
+    clicked = False
+    for _ in range(30):
+        try:
+            payload = page.evaluate(READ_GROUPS_JS, wanted) or {}
+        except Exception:
+            payload = {}
+        if payload.get("clicked"):
+            clicked = True
+            break
+        try:
+            page.evaluate(SCROLL_INBOX_JS)
+        except Exception:
+            pass
+        page.wait_for_timeout(600)
+    if not clicked:
+        return False
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            state = page.evaluate(GROUP_CHAT_SCROLL_JS, "state") or {}
+        except Exception:
+            state = {}
+        if state.get("hasList") and state.get("messages"):
+            page.wait_for_timeout(1000)
+            return True
+        page.wait_for_timeout(300)
+    return True
+
+
+def leave_group(page, pin: str) -> None:
+    """Go back from the open group to the chat list, like pressing back."""
+    try:
+        page.go_back(wait_until="domcontentloaded", timeout=15_000)
+    except Exception:
+        pass
+    page.wait_for_timeout(800)
+    still_inside = re.search(r"/(?:i/chat|messages)/[^/?#]+", page.url or "")
+    if still_inside or not chat_inbox_open(page):
+        # Back did not land on the chat list: open it directly (types the chat PIN if X asks).
+        page.goto(CHAT_URLS[0], wait_until="domcontentloaded", timeout=60_000)
+        error = open_chat(page, pin)
+        if error:
+            raise RuntimeError(error)
+
+
 
 def valid_auth_token(value: str) -> bool:
     return 20 <= len(value) <= 512
@@ -2270,9 +2320,17 @@ def watch_loop(auth_token: str, pin: str, group_id: str, group_name: str, wait_s
     current = {"name": group_name}
 
     def open_watched_group(page) -> None:
-        """Open the group by its id. If it was renamed, keep and show the new name."""
+        """Open the group by its id. If it was renamed, keep and show the new name.
+
+        X first opens a group at the place this account last read up to, with the newer
+        messages below it. So the group is opened once (until its messages show, at most
+        10 seconds), left, and opened again; the second time it opens at the newest messages."""
         width = (page.viewport_size or {}).get("width") or 1280
         page.set_viewport_size({"width": width, "height": WATCH_VIEWPORT_HEIGHT})
+        set_status("يفتح القروب ثم يخرج ويعود إليه ليبدأ من آخر الرسائل…", True, True)
+        if peek_group(page, group_id, current["name"], 10):
+            leave_group(page, pin)
+            show_groups_only(page)
         name = open_group(page, group_id, current["name"])
         if name and name != current["name"]:
             current["name"] = name
