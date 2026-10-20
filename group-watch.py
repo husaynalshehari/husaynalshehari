@@ -1782,6 +1782,14 @@ def status_id_of(value: str) -> str:
     return ""
 
 
+def tweet_handle_of(value: str) -> str:
+    """The account name in a tweet link (x.com/<user>/status/<id>), or "" when the link has none."""
+    match = re.search(r"(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/status/\d", str(value or ""), re.I)
+    if not match or match.group(1).lower() in {"i", "web"}:
+        return ""
+    return match.group(1)
+
+
 def norm_person_name(value: str) -> str:
     text = _ACK_MARKS.sub("", str(value or "")).replace("ـ", "")
     return re.sub(r"\s+", " ", text).strip().casefold()
@@ -3323,27 +3331,45 @@ def scroll_likes(page) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def open_likes_page(page, status_id: str) -> str | None:
+def open_likes_page(page, status_id: str, handle: str = "") -> str | None:
+    """Open the likes list directly at https://x.com/<user>/status/<id>/likes.
+    When the pasted link has no account name (only the number), the tweet is opened
+    once to learn it, then the likes list is opened the same way."""
     if not ensure_logged_in(page):
         return "الجلسة غير مسجّلة الدخول. تحقق من توكن الجلسة."
-    url = f"https://x.com/i/web/status/{status_id}"
-    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    if not handle:
+        page.goto(f"https://x.com/i/web/status/{status_id}", wait_until="domcontentloaded", timeout=60_000)
+        try:
+            page.locator('article[data-testid="tweet"]').first.wait_for(state="visible", timeout=20_000)
+        except PlaywrightTimeoutError:
+            if "login" in (page.url or "") or "/flow/" in (page.url or ""):
+                return "تعذر الدخول إلى الحساب. تحقق من توكن الجلسة."
+            return "تعذر فتح التغريدة."
+        handle = tweet_handle_of(page.url)
+        if not handle:
+            # The address did not change to /<user>/status/<id>: read the name from the tweet's own link.
+            try:
+                href = page.evaluate(
+                    """(id) => {
+                      const link = [...document.querySelectorAll('article[data-testid="tweet"] a[href*="/status/' + id + '"]')]
+                        .find((node) => /^\\/[A-Za-z0-9_]{1,15}\\/status\\//.test(node.getAttribute("href") || ""));
+                      return link ? link.getAttribute("href") : "";
+                    }""",
+                    status_id,
+                ) or ""
+            except Exception:
+                href = ""
+            handle = tweet_handle_of("https://x.com" + href) if href else ""
+        if not handle:
+            return "تعذر معرفة صاحب التغريدة. الصق رابط التغريدة كاملًا مع اسم الحساب."
+    page.goto(f"https://x.com/{handle}/status/{status_id}/likes", wait_until="domcontentloaded", timeout=60_000)
     try:
-        page.locator('article[data-testid="tweet"]').first.wait_for(state="visible", timeout=20_000)
+        # Wait for the likers list (or X's empty notice) so a slow page is not read as "nobody liked".
+        page.locator('[data-testid="UserCell"], [data-testid="emptyState"]').first.wait_for(state="visible", timeout=20_000)
     except PlaywrightTimeoutError:
         if "login" in (page.url or "") or "/flow/" in (page.url or ""):
             return "تعذر الدخول إلى الحساب. تحقق من توكن الجلسة."
-        return "تعذر فتح التغريدة."
-    opened = False
-    try:
-        link = page.locator(f'a[href*="/status/{status_id}/likes"]')
-        if link.count():
-            link.first.click(timeout=5_000)
-            opened = True
-    except Exception:
-        opened = False
-    if not opened:
-        page.goto(url + "/likes", wait_until="domcontentloaded", timeout=60_000)
+        return "تعذر فتح صفحة الإعجابات. تأكد أن الحساب المستخدم هو صاحب التغريدة."
     page.wait_for_timeout(900)
     return None
 
@@ -3398,7 +3424,7 @@ def close_quietly(obj) -> None:
         pass
 
 
-def likes_job(auth_token: str, status_id: str, members: list[dict]) -> None:
+def likes_job(auth_token: str, status_id: str, members: list[dict], tweet_handle: str = "") -> None:
     playwright = None
     browser = None
     context = None
@@ -3415,8 +3441,8 @@ def likes_job(auth_token: str, status_id: str, members: list[dict]) -> None:
             ],
         )
         context, page = open_x_context(browser, auth_token)
-        set_likes_message("جارٍ فتح التغريدة ثم الإعجابات…")
-        error = open_likes_page(page, status_id)
+        set_likes_message("جارٍ فتح صفحة إعجابات التغريدة…")
+        error = open_likes_page(page, status_id, tweet_handle)
         if error:
             set_likes_message(error, False)
             return
@@ -3499,7 +3525,7 @@ def likes_check():
         return jsonify(success=False, message="فحص الإعجابات يعمل الآن. تغريدة واحدة في كل مرة.", account_id=account_id), 409
     if not members:
         return jsonify(success=False, message="لا يوجد أعضاء أرسلوا تم أو f أو F بعد.", account_id=account_id), 400
-    threading.Thread(target=likes_job, args=(token, status_id, members), daemon=True).start()
+    threading.Thread(target=likes_job, args=(token, status_id, members, tweet_handle_of(tweet)), daemon=True).start()
     return jsonify(success=True, message="بدأ فحص الإعجابات. تحديث الصفحة يُظهر التقدّم من حيث هو.", account_id=account_id)
 
 
