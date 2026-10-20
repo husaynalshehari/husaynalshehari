@@ -652,6 +652,25 @@ MAX_ITEMS = 1000
 TEXT_WATCH_SECONDS = 30 * 60
 _ACK_MARKS = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]")
 _ACK_EDGE = " \t\r\n.。!！?؟،,…~～:：;؛\"'«»“”"
+# The send time and date X shows inside a message bubble, e.g. "10:21 PM", "١٠:٢١ م",
+# "Oct 20", "٢٠ أكتوبر ٢٠٢٦", "Yesterday". They are removed before checking for تم / f / F.
+_ACK_DIGIT = "[0-9\u0660-\u0669\u06F0-\u06F9]"
+_ACK_TIME = re.compile(
+    _ACK_DIGIT + r"{1,2}\s*[:：]\s*" + _ACK_DIGIT + r"{2}(?:\s*[:：]\s*" + _ACK_DIGIT + r"{2})?"
+    r"(?:\s*(?:[aApP]\.?\s?[mM]\.?|مساءً|مساء|صباحًا|صباحا|ص|م)(?![\u0621-\u064A]))?"
+)
+_ACK_DATE = re.compile(_ACK_DIGIT + r"{1,4}\s*[/\-.]\s*" + _ACK_DIGIT + r"{1,2}(?:\s*[/\-.]\s*" + _ACK_DIGIT + r"{2,4})?")
+_ACK_WORDS = re.compile(
+    r"(?<![A-Za-z])(?:today|yesterday|just now|now|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?"
+    r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|mon(?:day)?|tue(?:s(?:day)?)?"
+    r"|wed(?:nesday)?|thu(?:rs(?:day)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?![A-Za-z])"
+    r"|اليوم|أمس|امس|الآن|الان|يناير|فبراير|مارس|أبريل|إبريل|ابريل|مايو|يونيو|يوليو|أغسطس|اغسطس|سبتمبر|أكتوبر|اكتوبر"
+    r"|نوفمبر|ديسمبر|الأحد|الاحد|الاثنين|الإثنين|الثلاثاء|الأربعاء|الاربعاء|الخميس|الجمعة|السبت",
+    re.I,
+)
+_ACK_SEPARATORS = re.compile(r"[·•|،,✓✔\-–—]+")
+_ACK_NUMBER = re.compile(r"(?<!\S)" + _ACK_DIGIT + r"{1,4}(?!\S)")
+UNMATCHED_LOG = DATA_DIR / "replies_unmatched.log"
 
 state_lock = threading.Lock()
 watch_thread: threading.Thread | None = None
@@ -1082,14 +1101,26 @@ TEXT_SCAN_JS = r"""
   };
   const timeLike = /^(now|الآن|\d{1,2}:\d{2}(?:\s*[ap]m)?|\d+\s*[smhdw]|\d+\s*(?:د|دقائق|دقيقة|س|ساعة|ساعات|ي|يوم|أيام|ث|أسبوع|أسابيع))\.?$/i;
   const ackLine = (value) => /^(تم|f|F)[.。!！?؟]*$/.test(clean(value).replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, ""));
+  // The send time and date shown in the bubble ("10:21 PM", "١٠:٢١ م", "Oct 20", "أمس"), removed from a line.
+  const D = String.raw`[0-9\u0660-\u0669\u06F0-\u06F9]`;
+  const stamps = [
+    new RegExp(D + String.raw`{1,2}\s*[:：]\s*` + D + String.raw`{2}(?:\s*[:：]\s*` + D + String.raw`{2})?(?:\s*(?:[aApP]\.?\s?[mM]\.?|مساءً|مساء|صباحًا|صباحا|ص|م)(?![\u0621-\u064A]))?`, "g"),
+    new RegExp(D + String.raw`{1,4}\s*[/\-.]\s*` + D + String.raw`{1,2}(?:\s*[/\-.]\s*` + D + String.raw`{2,4})?`, "g"),
+    /(?<![A-Za-z])(?:today|yesterday|just now|now|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:rs(?:day)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?![A-Za-z])/gi,
+    /اليوم|أمس|امس|الآن|الان|يناير|فبراير|مارس|أبريل|إبريل|ابريل|مايو|يونيو|يوليو|أغسطس|اغسطس|سبتمبر|أكتوبر|اكتوبر|نوفمبر|ديسمبر|الأحد|الاحد|الاثنين|الإثنين|الثلاثاء|الأربعاء|الاربعاء|الخميس|الجمعة|السبت/g,
+    /[·•|،,✓✔\-–—]+/g,
+    new RegExp(String.raw`(^|\s)` + D + String.raw`{1,4}(?=\s|$)`, "g")
+  ];
+  const stripStamp = (value) => stamps.reduce((text, re) => text.replace(re, " "), String(value || ""));
   const textOf = (bubble) => {
     const nodes = [];
     collectDeep(bubble, '[data-testid^="message-text-"]', nodes);
     const fromNodes = clean(nodes.map((node) => node.innerText || "").join(" "));
     if (fromNodes) return fromNodes.slice(0, 240);
-    const lines = (bubble.innerText || "").split(/\n+/).map(clean).filter(Boolean).filter((line) => !timeLike.test(line));
-    const hit = lines.find((line) => ackLine(line));
-    if (hit && lines.length <= 4) return clean(hit).slice(0, 240);
+    const lines = (bubble.innerText || "").split(/\n+/).map(clean).filter(Boolean)
+      .filter((line) => !timeLike.test(line) && clean(stripStamp(line)));
+    const hit = lines.find((line) => ackLine(stripStamp(line)));
+    if (hit && lines.length <= 4) return clean(stripStamp(hit)).slice(0, 240);
     return clean(lines.join(" ")).slice(0, 240);
   };
   const attachment = (bubble) => {
@@ -1702,14 +1733,29 @@ def captured_status_ids(run_id: str) -> list[str]:
 
 
 def ack_token(value: str) -> str:
-    """Text-only reply: exactly تم or f or F, ignoring marks and one layer of edge punctuation."""
+    """Text-only reply: exactly تم or f or F, ignoring marks, one layer of edge punctuation,
+    and the send time/date that X shows in the same bubble (e.g. "تم ١٠:٢١ م", "f Oct 20, 10:21 PM")."""
     text = _ACK_MARKS.sub("", str(value or "")).replace("ـ", "")
+    for pattern in (_ACK_TIME, _ACK_DATE, _ACK_WORDS, _ACK_SEPARATORS, _ACK_NUMBER):
+        text = pattern.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip(_ACK_EDGE)
     if text == "تم":
         return "تم"
     if text in {"f", "F"}:
         return text
     return ""
+
+
+def note_unmatched(text: str) -> None:
+    """Save a short text message that was not read as تم / f / F (shown with any hidden characters)."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if UNMATCHED_LOG.exists() and UNMATCHED_LOG.stat().st_size > 100_000:
+            UNMATCHED_LOG.unlink()
+        with UNMATCHED_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(time.strftime("%Y-%m-%d %H:%M:%S ") + ascii(text) + "  " + text + "\n")
+    except OSError:
+        pass
 
 
 def member_key(item: dict) -> str:
@@ -1989,6 +2035,8 @@ def consider_replies(rows: list[dict], seen: set[str], pending: dict[str, float]
         pending.pop(mid, None)
         seen.add(mid)
         if not matched:
+            if row.get("textOnly") and len(text) <= 60:
+                note_unmatched(text)
             continue
         fresh.append({
             "key": mid,
