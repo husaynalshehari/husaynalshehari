@@ -3331,6 +3331,10 @@ def scroll_likes(page) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+# Page height while the likes list is open, so most likers show without scrolling.
+LIKES_VIEWPORT_HEIGHT = 20000
+
+
 def open_likes_page(page, status_id: str, handle: str = "") -> str | None:
     """Open the likes list directly at https://x.com/<user>/status/<id>/likes.
     When the pasted link has no account name (only the number), the tweet is opened
@@ -3362,6 +3366,8 @@ def open_likes_page(page, status_id: str, handle: str = "") -> str | None:
             handle = tweet_handle_of("https://x.com" + href) if href else ""
         if not handle:
             return "تعذر معرفة صاحب التغريدة. الصق رابط التغريدة كاملًا مع اسم الحساب."
+    width = (page.viewport_size or {}).get("width") or 1280
+    page.set_viewport_size({"width": width, "height": LIKES_VIEWPORT_HEIGHT})
     page.goto(f"https://x.com/{handle}/status/{status_id}/likes", wait_until="domcontentloaded", timeout=60_000)
     try:
         # Wait for the likers list (or X's empty notice) so a slow page is not read as "nobody liked".
