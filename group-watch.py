@@ -1100,7 +1100,8 @@ TEXT_SCAN_JS = r"""
     });
   };
   const timeLike = /^(now|الآن|\d{1,2}:\d{2}(?:\s*[ap]m)?|\d+\s*[smhdw]|\d+\s*(?:د|دقائق|دقيقة|س|ساعة|ساعات|ي|يوم|أيام|ث|أسبوع|أسابيع))\.?$/i;
-  const ackLine = (value) => /^(تم|f|F)[.。!！?؟]*$/.test(clean(value).replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, ""));
+  // تم / f / F, also with repeated letters (تتتممم, ff) and the short forms ت and تك.
+  const ackLine = (value) => /^(ت+م*|ت+ك+|f+|F+)[.。!！?؟]*$/.test(clean(value).replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF\u0640]/g, ""));
   // The send time and date shown in the bubble ("10:21 PM", "١٠:٢١ م", "Oct 20", "أمس"), removed from a line.
   const D = String.raw`[0-9\u0660-\u0669\u06F0-\u06F9]`;
   const stamps = [
@@ -1732,14 +1733,20 @@ def captured_status_ids(run_id: str) -> list[str]:
         ]
 
 
+# Short forms members send for تم: ت alone, and تك (ك sits next to م on the Arabic keyboard).
+_ACK_TAM_FORMS = {"تم", "ت", "تك"}
+
+
 def ack_token(value: str) -> str:
-    """Text-only reply: exactly تم or f or F, ignoring marks, one layer of edge punctuation,
-    and the send time/date that X shows in the same bubble (e.g. "تم ١٠:٢١ م", "f Oct 20, 10:21 PM")."""
+    """Text-only reply: تم or f or F, ignoring marks, one layer of edge punctuation,
+    and the send time/date that X shows in the same bubble (e.g. "تم ١٠:٢١ م", "f Oct 20, 10:21 PM").
+    Repeated letters count once (تتتممم = تم, ff = f), and ت / تك are read as تم."""
     text = _ACK_MARKS.sub("", str(value or "")).replace("ـ", "")
     for pattern in (_ACK_TIME, _ACK_DATE, _ACK_WORDS, _ACK_SEPARATORS, _ACK_NUMBER):
         text = pattern.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip(_ACK_EDGE)
-    if text == "تم":
+    text = re.sub(r"(.)\1+", r"\1", text)
+    if text in _ACK_TAM_FORMS:
         return "تم"
     if text in {"f", "F"}:
         return text
