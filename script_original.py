@@ -709,14 +709,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
               <input id="account-profiles" class="wait-sec" type="number" min="1" max="5" step="1" value="2" inputmode="numeric" aria-label="عدد المهام لكل حساب">
             </label>
           </div>
-          <div class="mode-switch" role="group" aria-label="طريقة التوقف">
-            <button id="mode-count" class="preset is-on" type="button">عدد</button>
-            <button id="mode-tweet" class="preset" type="button">تغريدة</button>
-          </div>
           <div class="stop-row">
-            <input id="repost-count" name="repost_count" type="number" min="1" max="1000" step="1" value="25" inputmode="numeric" aria-label="العدد المطلوب">
-            <input id="stop-tweet" name="stop_tweet" type="text" maxlength="300" autocomplete="off" spellcheck="false" hidden
-                   placeholder="رابط التغريدة" aria-label="تغريدة التوقف">
+            <input id="stop-tweet" name="stop_tweet" type="text" maxlength="300" autocomplete="off" spellcheck="false"
+                   placeholder="رابط التغريدة المحددة" aria-label="التغريدة المحددة">
           </div>
         </section>
 
@@ -844,11 +839,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     editToken.setAttribute("aria-pressed", locked ? "false" : "true");
   }
   lockToken(true);
-  const countField = document.getElementById("repost-count");
   const stopField = document.getElementById("stop-tweet");
-  const modeCount = document.getElementById("mode-count");
-  const modeTweet = document.getElementById("mode-tweet");
-  let targetMode = "count";
   const pinField = document.getElementById("chat-pin");
   const groupsButton = document.getElementById("groups-button");
   const waitGroups = document.getElementById("wait-groups");
@@ -1195,14 +1186,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     geminiFields.hidden = !commentToggle.checked;
   }
 
-  function setTargetMode(mode) {
-    targetMode = mode === "tweet" ? "tweet" : "count";
-    modeCount.classList.toggle("is-on", targetMode === "count");
-    modeTweet.classList.toggle("is-on", targetMode === "tweet");
-    countField.hidden = targetMode !== "count";
-    stopField.hidden = targetMode !== "tweet";
-  }
-
   function shortPath(url) {
     try { return new URL(url).pathname; } catch (_) { return url; }
   }
@@ -1432,9 +1415,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     pushScreen();
   });
 
-  modeCount.addEventListener("click", () => { setTargetMode("count"); pushScreen(); });
-  modeTweet.addEventListener("click", () => { setTargetMode("tweet"); stopField.focus(); pushScreen(); });
-  setTargetMode("count");
 
   commentToggle.addEventListener("change", syncGemini);
   const savedModel = localStorage.getItem("x_gemini_model");
@@ -1567,20 +1547,14 @@ EMBEDDED_PAGE = r'''<!doctype html>
     event.preventDefault();
     const authToken = tokenField.value.trim();
     const pin = pinField.value.trim();
-    const count = Number.parseInt(countField.value, 10);
-    const stopRaw = targetMode === "tweet" ? stopField.value.trim() : "";
+    const stopRaw = stopField.value.trim();
     const stopMatch = stopRaw.match(/status\/(\d{6,25})/);
     const stopId = stopMatch ? stopMatch[1] : (/^\d{15,25}$/.test(stopRaw) ? stopRaw : "");
     const actions = selectedActions();
     if (!authToken) { showNotice("أدخل الرمز أولًا.", false); tokenField.focus(); return; }
     if (!/^\d{4,8}$/.test(pin)) { showNotice("أدخل رمز الدردشة.", false); pinField.focus(); return; }
     if (!selectedGroup) { showNotice("اعرض القروبات ثم اختر واحدًا.", false); return; }
-    if (targetMode === "tweet" && !stopId) { showNotice("الصق رابط التغريدة أو رقمها.", false); stopField.focus(); return; }
-    if (targetMode === "count" && (!Number.isInteger(count) || count < 1 || count > 1000)) {
-      showNotice("أدخل عددًا من 1 إلى 1000.", false);
-      countField.focus();
-      return;
-    }
+    if (!stopId) { showNotice("الصق رابط التغريدة المحددة أو رقمها.", false); stopField.focus(); return; }
     if (!actions.length) { showNotice("اختر إجراءً واحدًا على الأقل.", false); return; }
     if (actions.includes("comment")) {
       if (!geminiKey.value.trim()) { lockGemini(false); showNotice("أدخل مفتاح Gemini.", false); geminiKey.focus(); return; }
@@ -1594,7 +1568,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
         auth_token: authToken,
         chat_pin: pin,
         group: selectedGroup,
-        count: stopId ? 0 : count,
         stop_tweet: stopRaw,
         actions,
         gemini_api_key: geminiKey.value.trim(),
@@ -1705,8 +1678,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
         auth_token: tokenField.value.trim(),
         chat_pin: pinField.value.trim(),
         group: selectedGroup,
-        count: Number.parseInt(countField.value, 10) || 25,
-        stop_tweet: targetMode === "tweet" ? stopField.value.trim() : "",
+        stop_tweet: stopField.value.trim(),
         actions: selectedActions()
       };
       if (groupNames.length) payload.groups = groupNames;
@@ -1719,9 +1691,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     if (data.auth_token) tokenField.value = data.auth_token;
     lockToken(true);
     if (data.chat_pin) pinField.value = data.chat_pin;
-    if (data.count) countField.value = String(data.count);
     if (typeof data.stop_tweet === "string") stopField.value = data.stop_tweet;
-    setTargetMode(data.stop_tweet ? "tweet" : "count");
     if (Array.isArray(data.actions) && data.actions.length) {
       ["repost", "like", "bookmark", "comment"].forEach((key) => {
         const box = document.getElementById("action-" + key);
@@ -1781,7 +1751,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     saveAccountPin();
     pushScreen();
   });
-  countField.addEventListener("change", pushScreen);
   stopField.addEventListener("change", pushScreen);
   document.querySelectorAll('#repost-form input[type="checkbox"]').forEach((box) => {
     box.addEventListener("change", pushScreen);
@@ -6136,10 +6105,9 @@ def group_run_endpoint(access_path: str):
         return jsonify(success=False, message="اختر قروبًا من القائمة."), 400
     if stop_raw and not stop_id:
         return jsonify(success=False, message="رابط التغريدة غير صالح. الصق رابطها أو رقمها."), 400
-    if not stop_id and (requested_count is None or not 1 <= requested_count <= MAX_REPOSTS_REQUEST):
-        return jsonify(success=False, message=f"أدخل عددًا من 1 إلى {MAX_REPOSTS_REQUEST}، أو رابط تغريدة للتوقف عندها."), 400
-    if stop_id:
-        requested_count = 0
+    if not stop_id:
+        return jsonify(success=False, message="الصق رابط التغريدة المحددة أو رقمها."), 400
+    requested_count = 0
     if not isinstance(requested_actions, list) or not requested_actions or any(not isinstance(action, str) or action not in ALLOWED_ACTIONS for action in requested_actions):
         return jsonify(success=False, message="اختر إجراء واحدًا على الأقل."), 400
     group_wait_raw = data.get("group_wait")
