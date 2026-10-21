@@ -682,8 +682,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <div class="token-row">
             <input id="chat-pin" name="chat_pin" type="password" inputmode="numeric" maxlength="8" required
                    autocomplete="off" spellcheck="false" placeholder="٤ أرقام" aria-label="رمز الدردشة">
-            <button id="prepare-button" class="btn btn-ghost" type="button">تهيئة</button>
-            <button id="reload-button" class="btn btn-ghost" type="button">تحديث الصفحة</button>
             <button id="groups-button" class="btn btn-ghost" type="button">عرض القروبات</button>
             <label class="wait-groups" for="wait-groups">
               <input id="wait-groups" type="checkbox">
@@ -852,8 +850,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const modeTweet = document.getElementById("mode-tweet");
   let targetMode = "count";
   const pinField = document.getElementById("chat-pin");
-  const prepareButton = document.getElementById("prepare-button");
-  const reloadButton = document.getElementById("reload-button");
   const groupsButton = document.getElementById("groups-button");
   const waitGroups = document.getElementById("wait-groups");
   const waitGroupsSec = document.getElementById("wait-groups-sec");
@@ -1520,55 +1516,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
     });
   }
 
-  reloadButton.addEventListener("click", async () => {
-    const authToken = tokenField.value.trim();
-    if (!authToken) { showNotice("أدخل رمز الجلسة أولًا.", false); tokenField.focus(); return; }
-    reloadButton.disabled = true;
-    showNotice("جارٍ تحديث صفحة متصفح السكربت…", true);
-    try {
-      const data = await postJson("/reload", {auth_token: authToken});
-      showNotice(data.message || (data.success ? "تم تحديث صفحة المتصفح." : "تعذّر التحديث."), !!data.success);
-    } catch (_) {
-      showNotice("تعذّر الاتصال أثناء تحديث المتصفح.", false);
-    } finally {
-      reloadButton.disabled = false;
-    }
-  });
-
-  prepareButton.addEventListener("click", async () => {
-    const authToken = tokenField.value.trim();
-    const pin = pinField.value.trim();
-    if (!authToken) { showNotice("أدخل رمز الجلسة أولًا.", false); tokenField.focus(); return; }
-    if (!/^\d{4,8}$/.test(pin)) { showNotice("رمز الدردشة ٤ إلى ٨ أرقام.", false); pinField.focus(); return; }
-    prepareButton.disabled = true;
-    groupsButton.disabled = true;
-    showNotice("جارٍ الدخول إلى الخاص وانتظار تجهيز القروبات والرسائل…", true);
-    try {
-      const data = await postJson("/prepare", {auth_token: authToken, chat_pin: pin});
-      if (!data.success) {
-        showNotice(data.message || "تعذّرت التهيئة.", false);
-        return;
-      }
-      groupNames = data.groups || [];
-      if (selectedGroup && groupNames.length && !groupNames.includes(selectedGroup)) selectedGroup = "";
-      renderGroups();
-      showNotice(data.message || "تمت التهيئة. الخاص مفتوح وينتظر المهمة.", true);
-      setStep(2);
-    } catch (_) {
-      showNotice("تعذّر الاتصال أثناء التهيئة.", false);
-    } finally {
-      prepareButton.disabled = false;
-      groupsButton.disabled = false;
-    }
-  });
-
   groupsButton.addEventListener("click", async () => {
     const authToken = tokenField.value.trim();
     const pin = pinField.value.trim();
     if (!authToken) { showNotice("أدخل رمز الجلسة أولًا.", false); tokenField.focus(); return; }
     if (!/^\d{4,8}$/.test(pin)) { showNotice("رمز الدردشة ٤ إلى ٨ أرقام.", false); pinField.focus(); return; }
     groupsButton.disabled = true;
-    prepareButton.disabled = true;
     const settle = !!waitGroups.checked;
     const settleSeconds = secondsFrom(waitGroupsSec, 1, 120, 10);
     showNotice(settle ? "جارٍ فتح الدردشة ثم الانتظار " + settleSeconds + " ث قبل التقاط القروبات…" : "جارٍ فتح الدردشة وعرض القروبات…", true);
@@ -1587,7 +1540,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       showNotice("تعذّر الاتصال أثناء جلب القروبات.", false);
     } finally {
       groupsButton.disabled = false;
-      prepareButton.disabled = false;
     }
   });
 
