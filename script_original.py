@@ -770,8 +770,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <p class="hint">يُحفظ المفتاح واسم النموذج على هذا الخادم بعد أول إدخال، ويظهران تلقائيًا حتى بعد إغلاق الصفحة أو إعادة تشغيل السكربت.</p>
           </div>
           <div id="gemini-usage" class="gemini-usage" aria-live="polite">
-            <b>استخدام Gemini للتعليقات</b>
-            <span id="gemini-usage-text">لا توجد طلبات بعد.</span>
+            <b>تعليقات النموذج</b>
+            <span id="gemini-usage-text">لم يُنشئ النموذج أي تعليق بعد.</span>
           </div>
           <button id="reposts-button" class="btn btn-pine btn-wide" type="submit">تنفيذ</button>
         </section>
@@ -1194,24 +1194,18 @@ EMBEDDED_PAGE = r'''<!doctype html>
     geminiFields.hidden = !commentToggle.checked;
   }
 
-  // Total Gemini requests, tokens and cost for the comments, read from the server.
+  // Total comments written by the model, and their price, read from the server.
   async function loadGeminiUsage() {
     try {
       const response = await fetch(apiRoot + "/gemini-usage", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
       const data = await response.json();
       if (!response.ok || !data.success) return;
-      if (!data.requests) { geminiUsageText.textContent = "لا توجد طلبات بعد."; return; }
-      const number = (value) => Number(value || 0).toLocaleString("en-US");
-      const cost = Number(data.cost || 0);
+      if (!data.comments) { geminiUsageText.textContent = "لم يُنشئ النموذج أي تعليق بعد."; return; }
       const lines = [
-        "الطلبات: " + number(data.requests) + " · الإدخال: " + number(data.input_tokens) + " توكن · الإخراج: " + number(data.output_tokens) + " توكن",
-        "التكلفة التقريبية: " + cost.toFixed(cost < 1 ? 4 : 2) + " دولار"
+        "إجمالي التعليقات التي أنشأها النموذج: " + Number(data.comments).toLocaleString("en-US"),
+        "إجمالي السعر: " + Number(data.total || 0).toFixed(3) + " دولار (" + data.price_per_comment + " لكل تعليق)"
           + (data.since ? " · منذ " + new Date(data.since * 1000).toLocaleDateString("ar") : "")
       ];
-      if (data.unpriced_requests) {
-        lines.push(number(data.unpriced_requests) + " طلب بنموذج سعره غير معروف ("
-          + (data.unpriced_models || []).join("، ") + ") لم تُحسب تكلفته");
-      }
       geminiUsageText.replaceChildren(...lines.map((line) => {
         const row = document.createElement("span");
         row.style.display = "block";
@@ -3046,83 +3040,31 @@ def gemini_is_busy(status: int, detail: str) -> bool:
 
 
 GEMINI_USAGE_PATH = DATA_DIR / "gemini_usage.json"
-# Standard (paid tier) prices in US dollars per 1 million tokens: (input, output). Output includes
-# thinking tokens. From https://ai.google.dev/gemini-api/docs/pricing (October 2026); Google may
-# change them. A model not listed is still counted, but its cost is shown as unknown: add it here.
-GEMINI_PRICES_PER_MILLION = {
-    "gemini-4-argon": (2.00, 10.00),
-    "gemini-3.8-flash": (0.75, 3.75),
-    "gemini-3.6-flash": (0.75, 3.75),
-    "gemini-3.5-flash-lite": (0.30, 2.50),
-    "gemini-3.1-pro-preview": (2.00, 12.00),
-    "gemini-3-flash-preview": (0.50, 3.00),
-    "gemini-2.5-pro": (1.25, 10.00),
-    "gemini-2.5-flash-lite": (0.10, 0.40),
-    "gemini-2.5-flash": (0.30, 2.50),
-}
+# Price counted for each comment the model writes (shown on the page as the running total).
+GEMINI_PRICE_PER_COMMENT = 0.007
 gemini_usage_lock = threading.Lock()
 gemini_usage: dict = {}
 
 
-def gemini_price(model: str) -> tuple[float, float] | None:
-    """Price of a model, matching its exact name or a dated version of it (gemini-2.5-flash-001)."""
-    name = (model or "").strip().lower()
-    for known in sorted(GEMINI_PRICES_PER_MILLION, key=len, reverse=True):
-        if name == known or name.startswith(known + "-"):
-            return GEMINI_PRICES_PER_MILLION[known]
-    return None
-
-
 def load_gemini_usage() -> None:
     loaded = read_private_json(GEMINI_USAGE_PATH) or {}
-    def number(key, kind):
-        try:
-            return kind(loaded.get(key) or 0)
-        except (TypeError, ValueError):
-            return kind(0)
-    models = loaded.get("unpriced_models")
+    try:
+        comments = max(0, int(loaded.get("comments") or 0))
+        since = float(loaded.get("since") or 0)
+    except (TypeError, ValueError):
+        comments, since = 0, 0.0
     with gemini_usage_lock:
         gemini_usage.clear()
-        gemini_usage.update({
-            "since": number("since", float),
-            "requests": number("requests", int),
-            "input_tokens": number("input_tokens", int),
-            "output_tokens": number("output_tokens", int),
-            "cost": number("cost", float),
-            "unpriced_requests": number("unpriced_requests", int),
-            "unpriced_models": [str(m)[:80] for m in models][:20] if isinstance(models, list) else [],
-        })
+        gemini_usage.update({"comments": comments, "since": since})
 
 
-def record_gemini_usage(model: str, payload) -> None:
-    """Add one Gemini reply's tokens and cost to the totals shown on the page."""
+def record_comment_generated() -> None:
+    """Count one comment written by the model."""
     try:
-        usage = payload.get("usageMetadata") if isinstance(payload, dict) else None
-        if not isinstance(usage, dict):
-            return
-        def count(key: str) -> int:
-            try:
-                return max(0, int(usage.get(key) or 0))
-            except (TypeError, ValueError):
-                return 0
-        input_tokens = count("promptTokenCount")
-        output_tokens = count("candidatesTokenCount") + count("thoughtsTokenCount")
-        price = gemini_price(model)
         with gemini_usage_lock:
             if not gemini_usage.get("since"):
                 gemini_usage["since"] = time.time()
-            gemini_usage["requests"] = int(gemini_usage.get("requests") or 0) + 1
-            gemini_usage["input_tokens"] = int(gemini_usage.get("input_tokens") or 0) + input_tokens
-            gemini_usage["output_tokens"] = int(gemini_usage.get("output_tokens") or 0) + output_tokens
-            if price:
-                cost = input_tokens / 1_000_000 * price[0] + output_tokens / 1_000_000 * price[1]
-                gemini_usage["cost"] = float(gemini_usage.get("cost") or 0) + cost
-            else:
-                gemini_usage["unpriced_requests"] = int(gemini_usage.get("unpriced_requests") or 0) + 1
-                models = list(gemini_usage.get("unpriced_models") or [])
-                if model and model not in models:
-                    models.append(model[:80])
-                gemini_usage["unpriced_models"] = models[:20]
+            gemini_usage["comments"] = int(gemini_usage.get("comments") or 0) + 1
             write_private_json(GEMINI_USAGE_PATH, dict(gemini_usage))
     except Exception:
         pass
@@ -3166,7 +3108,6 @@ def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
             try:
                 with urllib.request.urlopen(request, timeout=45) as response:
                     payload = json.loads(response.read().decode("utf-8"))
-                record_gemini_usage(model, payload)
                 break
             except urllib.error.HTTPError as exc:
                 detail = ""
@@ -3206,10 +3147,12 @@ def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
                 texts.append(str(part["text"]))
         text = clean_comment(" ".join(texts))
         if comment_is_complete(text):
+            record_comment_generated()
             return text
         if len(text) > len(best):
             best = text
     if comment_is_complete(best):
+        record_comment_generated()
         return best
     if saw_busy:
         raise RuntimeError("النموذج مشغول مؤقتًا بعد عدة محاولات. غيّر النموذج أو أعد التنفيذ بعد قليل.")
@@ -6459,16 +6402,14 @@ def gemini_usage_endpoint(access_path: str):
     if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
         return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
     with gemini_usage_lock:
-        usage = dict(gemini_usage)
+        comments = int(gemini_usage.get("comments") or 0)
+        since = gemini_usage.get("since") or 0
     return jsonify(
         success=True,
-        since=usage.get("since") or 0,
-        requests=usage.get("requests") or 0,
-        input_tokens=usage.get("input_tokens") or 0,
-        output_tokens=usage.get("output_tokens") or 0,
-        cost=round(float(usage.get("cost") or 0), 6),
-        unpriced_requests=usage.get("unpriced_requests") or 0,
-        unpriced_models=usage.get("unpriced_models") or [],
+        since=since,
+        comments=comments,
+        price_per_comment=GEMINI_PRICE_PER_COMMENT,
+        total=round(comments * GEMINI_PRICE_PER_COMMENT, 6),
     )
 
 
