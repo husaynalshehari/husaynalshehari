@@ -415,6 +415,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .task-card h3 { margin: 0; font-size: 13px; font-weight: 600; }
     .task-card p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
     .task-card .meter { margin-top: 8px; }
+    .task-actions { display: flex; flex-wrap: wrap; column-gap: 6px; }
+    .task-actions .btn { margin-top: 6px; }
     .progress-top h2 { margin: 0; font-size: 16px; font-weight: 600; text-wrap: balance; }
     .progress-top p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
     .progress-figure { text-align: end; flex: 0 0 auto; }
@@ -879,6 +881,29 @@ EMBEDDED_PAGE = r'''<!doctype html>
     localStorage.setItem("x_reposts_tasks", JSON.stringify(rows.slice(0, 12)));
   }
 
+  // Pages opened over plain http (a server IP) have no navigator.clipboard, so fall back to execCommand.
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_) {}
+    }
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.cssText = "position: fixed; top: 0; left: 0; opacity: 0; font-size: 16px;";
+    document.body.appendChild(area);
+    area.select();
+    area.setSelectionRange(0, text.length);
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch (_) {}
+    area.remove();
+    return copied;
+  }
+
   function followTask(task) {
     if (!task || !task.id || liveTasks.has(task.id)) return;
     task.key = task.key || "";
@@ -891,10 +916,40 @@ EMBEDDED_PAGE = r'''<!doctype html>
     taskBoard.hidden = false;
     const card = document.createElement("article");
     card.className = "task-card";
-    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><button class="btn btn-ghost task-stop" type="button">إيقاف هذه المهمة</button><button class="btn task-retry" type="button" hidden>إعادة المحاولة</button>';
+    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><div class="task-actions"><button class="btn btn-ghost task-stop" type="button">إيقاف هذه المهمة</button><button class="btn btn-ghost task-copy" type="button" hidden>نسخ التغريدات</button><button class="btn task-retry" type="button" hidden>إعادة المحاولة</button></div>';
     card.querySelector("h3").textContent = task.title || "مهمة";
     const stopButton = card.querySelector(".task-stop");
     const retryButton = card.querySelector(".task-retry");
+    const copyButton = card.querySelector(".task-copy");
+    let links = [];
+    let linksWanted = true;
+    copyButton.addEventListener("click", async () => {
+      if (!links.length) return;
+      const count = links.length;
+      if (await copyText(links.join("\n"))) {
+        copyButton.textContent = "نُسخت " + count + " تغريدة";
+        setTimeout(() => { copyButton.textContent = "نسخ التغريدات"; }, 1500);
+      } else {
+        showNotice("تعذّر النسخ من هذا المتصفح.", false);
+      }
+    });
+    // While the task runs the polls leave out the tweet list, so ask for its links once.
+    const loadLinks = async () => {
+      linksWanted = false;
+      try {
+        const response = await fetch(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "?light=1&links=1", {
+          headers: {"X-CSRF-Token": csrf, "X-Job-Key": task.key, "X-Client-Id": clientId()},
+          cache: "no-store"
+        });
+        const data = await response.json();
+        if (response.ok && Array.isArray(data.links) && data.links.length) {
+          links = data.links;
+          copyButton.hidden = false;
+          return;
+        }
+      } catch (_) {}
+      linksWanted = true;
+    };
     stopButton.addEventListener("click", async () => {
       stopButton.disabled = true;
       try {
@@ -943,6 +998,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
       stopButton.hidden = data.status !== "running";
       retryButton.hidden = !(data.status !== "running" && data.resumable);
       retryButton.disabled = false;
+      if (Array.isArray(data.items) && data.items.length) links = data.items.map((item) => item && item.url).filter(Boolean);
+      if (!links.length && linksWanted && phase === "act") loadLinks();
+      copyButton.hidden = !links.length;
     };
     const watch = async () => {
       try {
@@ -4705,9 +4763,10 @@ def job_key_matches(job: dict, presented: str) -> bool:
     return bool(expected) and hmac.compare_digest(digest, expected)
 
 
-def public_job(job: dict, light: bool = False) -> dict:
+def public_job(job: dict, light: bool = False, links: bool = False) -> dict:
     """light: while the task runs, leave out its tweet and result lists (the page only
-    needs the counts and message then; the full lists are sent once it finishes)."""
+    needs the counts and message then; the full lists are sent once it finishes).
+    links: add the extracted tweets' links (the task card's copy button asks once)."""
     payload = {
         "status": job["status"],
         "phase": job.get("phase") or "collect",
@@ -4727,6 +4786,8 @@ def public_job(job: dict, light: bool = False) -> dict:
     if light and job["status"] == "running":
         payload["items"] = []
         payload["results"] = []
+    if links:
+        payload["links"] = [item["url"] for item in job.get("items") or [] if isinstance(item, dict) and item.get("url")]
     return payload
 
 
@@ -5014,18 +5075,20 @@ def stop_job_endpoint(access_path: str):
 def job_status(access_path: str, job_id: str):
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
+    light = request.args.get("light") == "1"
+    links = request.args.get("links") == "1"
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
             return jsonify(success=False, message="لا توجد عملية بهذا المعرّف."), 404
         if job_key_matches(job, request.headers.get("X-Job-Key", "")):
-            return jsonify(public_job(job, light=request.args.get("light") == "1"))
+            return jsonify(public_job(job, light=light, links=links))
         if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
             return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
         owner_ok = bool(job.get("owner")) and job.get("owner") == session.get("csrf_token", "")
         if not owner_ok:
             return jsonify(success=False, message="لا توجد عملية بهذا المعرّف."), 404
-        return jsonify(public_job(job, light=request.args.get("light") == "1"))
+        return jsonify(public_job(job, light=light, links=links))
 
 
 @app.get("/<access_path>/sessions")
