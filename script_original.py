@@ -287,6 +287,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
       font-weight: 600;
     }
     .hint { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .gemini-usage { display: flex; flex-direction: column; gap: 2px; margin: 10px 0; padding: 8px 10px; border-radius: 10px;
+      background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .gemini-usage b { color: var(--ink); font-size: 12px; }
     input[type="password"], input[type="text"], input[type="number"] {
       width: 100%;
       min-height: 32px;
@@ -766,6 +769,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
             </div>
             <p class="hint">يُحفظ المفتاح واسم النموذج على هذا الخادم بعد أول إدخال، ويظهران تلقائيًا حتى بعد إغلاق الصفحة أو إعادة تشغيل السكربت.</p>
           </div>
+          <div id="gemini-usage" class="gemini-usage" aria-live="polite">
+            <b>استخدام Gemini للتعليقات</b>
+            <span id="gemini-usage-text">لا توجد طلبات بعد.</span>
+          </div>
           <button id="reposts-button" class="btn btn-pine btn-wide" type="submit">تنفيذ</button>
         </section>
       </div>
@@ -880,6 +887,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const geminiFields = document.getElementById("gemini-fields");
   const geminiKey = document.getElementById("gemini-key");
   const geminiModel = document.getElementById("gemini-model");
+  const geminiUsageText = document.getElementById("gemini-usage-text");
   const editGemini = document.getElementById("edit-gemini");
   function lockGemini(locked) {
     geminiKey.readOnly = locked;
@@ -1186,6 +1194,33 @@ EMBEDDED_PAGE = r'''<!doctype html>
     geminiFields.hidden = !commentToggle.checked;
   }
 
+  // Total Gemini requests, tokens and cost for the comments, read from the server.
+  async function loadGeminiUsage() {
+    try {
+      const response = await fetch(apiRoot + "/gemini-usage", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
+      const data = await response.json();
+      if (!response.ok || !data.success) return;
+      if (!data.requests) { geminiUsageText.textContent = "لا توجد طلبات بعد."; return; }
+      const number = (value) => Number(value || 0).toLocaleString("en-US");
+      const cost = Number(data.cost || 0);
+      const lines = [
+        "الطلبات: " + number(data.requests) + " · الإدخال: " + number(data.input_tokens) + " توكن · الإخراج: " + number(data.output_tokens) + " توكن",
+        "التكلفة التقريبية: " + cost.toFixed(cost < 1 ? 4 : 2) + " دولار"
+          + (data.since ? " · منذ " + new Date(data.since * 1000).toLocaleDateString("ar") : "")
+      ];
+      if (data.unpriced_requests) {
+        lines.push(number(data.unpriced_requests) + " طلب بنموذج سعره غير معروف ("
+          + (data.unpriced_models || []).join("، ") + ") لم تُحسب تكلفته");
+      }
+      geminiUsageText.replaceChildren(...lines.map((line) => {
+        const row = document.createElement("span");
+        row.style.display = "block";
+        row.textContent = line;
+        return row;
+      }));
+    } catch (_) {}
+  }
+
   function shortPath(url) {
     try { return new URL(url).pathname; } catch (_) { return url; }
   }
@@ -1448,6 +1483,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
     rememberGeminiLocal();
   });
   syncGemini();
+  loadGeminiUsage();
+  setInterval(loadGeminiUsage, 15000);
 
   loginButton.addEventListener("click", async () => {
     const authToken = tokenField.value.trim();
@@ -3008,6 +3045,89 @@ def gemini_is_busy(status: int, detail: str) -> bool:
     ))
 
 
+GEMINI_USAGE_PATH = DATA_DIR / "gemini_usage.json"
+# Standard (paid tier) prices in US dollars per 1 million tokens: (input, output). Output includes
+# thinking tokens. From https://ai.google.dev/gemini-api/docs/pricing (October 2026); Google may
+# change them. A model not listed is still counted, but its cost is shown as unknown: add it here.
+GEMINI_PRICES_PER_MILLION = {
+    "gemini-4-argon": (2.00, 10.00),
+    "gemini-3.8-flash": (0.75, 3.75),
+    "gemini-3.6-flash": (0.75, 3.75),
+    "gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini-3.1-pro-preview": (2.00, 12.00),
+    "gemini-3-flash-preview": (0.50, 3.00),
+    "gemini-2.5-pro": (1.25, 10.00),
+    "gemini-2.5-flash-lite": (0.10, 0.40),
+    "gemini-2.5-flash": (0.30, 2.50),
+}
+gemini_usage_lock = threading.Lock()
+gemini_usage: dict = {}
+
+
+def gemini_price(model: str) -> tuple[float, float] | None:
+    """Price of a model, matching its exact name or a dated version of it (gemini-2.5-flash-001)."""
+    name = (model or "").strip().lower()
+    for known in sorted(GEMINI_PRICES_PER_MILLION, key=len, reverse=True):
+        if name == known or name.startswith(known + "-"):
+            return GEMINI_PRICES_PER_MILLION[known]
+    return None
+
+
+def load_gemini_usage() -> None:
+    loaded = read_private_json(GEMINI_USAGE_PATH) or {}
+    def number(key, kind):
+        try:
+            return kind(loaded.get(key) or 0)
+        except (TypeError, ValueError):
+            return kind(0)
+    models = loaded.get("unpriced_models")
+    with gemini_usage_lock:
+        gemini_usage.clear()
+        gemini_usage.update({
+            "since": number("since", float),
+            "requests": number("requests", int),
+            "input_tokens": number("input_tokens", int),
+            "output_tokens": number("output_tokens", int),
+            "cost": number("cost", float),
+            "unpriced_requests": number("unpriced_requests", int),
+            "unpriced_models": [str(m)[:80] for m in models][:20] if isinstance(models, list) else [],
+        })
+
+
+def record_gemini_usage(model: str, payload) -> None:
+    """Add one Gemini reply's tokens and cost to the totals shown on the page."""
+    try:
+        usage = payload.get("usageMetadata") if isinstance(payload, dict) else None
+        if not isinstance(usage, dict):
+            return
+        def count(key: str) -> int:
+            try:
+                return max(0, int(usage.get(key) or 0))
+            except (TypeError, ValueError):
+                return 0
+        input_tokens = count("promptTokenCount")
+        output_tokens = count("candidatesTokenCount") + count("thoughtsTokenCount")
+        price = gemini_price(model)
+        with gemini_usage_lock:
+            if not gemini_usage.get("since"):
+                gemini_usage["since"] = time.time()
+            gemini_usage["requests"] = int(gemini_usage.get("requests") or 0) + 1
+            gemini_usage["input_tokens"] = int(gemini_usage.get("input_tokens") or 0) + input_tokens
+            gemini_usage["output_tokens"] = int(gemini_usage.get("output_tokens") or 0) + output_tokens
+            if price:
+                cost = input_tokens / 1_000_000 * price[0] + output_tokens / 1_000_000 * price[1]
+                gemini_usage["cost"] = float(gemini_usage.get("cost") or 0) + cost
+            else:
+                gemini_usage["unpriced_requests"] = int(gemini_usage.get("unpriced_requests") or 0) + 1
+                models = list(gemini_usage.get("unpriced_models") or [])
+                if model and model not in models:
+                    models.append(model[:80])
+                gemini_usage["unpriced_models"] = models[:20]
+            write_private_json(GEMINI_USAGE_PATH, dict(gemini_usage))
+    except Exception:
+        pass
+
+
 def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: str) -> str:
     prompt = (
         "Write one complete public reply of 10 to 20 words. "
@@ -3046,6 +3166,7 @@ def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
             try:
                 with urllib.request.urlopen(request, timeout=45) as response:
                     payload = json.loads(response.read().decode("utf-8"))
+                record_gemini_usage(model, payload)
                 break
             except urllib.error.HTTPError as exc:
                 detail = ""
@@ -6331,6 +6452,26 @@ def list_sessions_endpoint(access_path: str):
     return jsonify(success=True, sessions=rows, gemini_api_key=gemini_key, gemini_model=gemini_model)
 
 
+@app.get("/<access_path>/gemini-usage")
+def gemini_usage_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    with gemini_usage_lock:
+        usage = dict(gemini_usage)
+    return jsonify(
+        success=True,
+        since=usage.get("since") or 0,
+        requests=usage.get("requests") or 0,
+        input_tokens=usage.get("input_tokens") or 0,
+        output_tokens=usage.get("output_tokens") or 0,
+        cost=round(float(usage.get("cost") or 0), 6),
+        unpriced_requests=usage.get("unpriced_requests") or 0,
+        unpriced_models=usage.get("unpriced_models") or [],
+    )
+
+
 @app.post("/<access_path>/gemini")
 def save_gemini_endpoint(access_path: str):
     if not hmac.compare_digest(access_path, ACCESS_PATH):
@@ -6417,6 +6558,7 @@ load_sessions()
 load_group_ids()
 load_done_history()
 load_gemini()
+load_gemini_usage()
 load_jobs()
 load_screen()
 atexit.register(shutdown_jobs)
