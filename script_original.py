@@ -770,8 +770,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <p class="hint">يُحفظ المفتاح واسم النموذج على هذا الخادم بعد أول إدخال، ويظهران تلقائيًا حتى بعد إغلاق الصفحة أو إعادة تشغيل السكربت.</p>
           </div>
           <div id="gemini-usage" class="gemini-usage" aria-live="polite">
-            <b>تعليقات النموذج</b>
-            <span id="gemini-usage-text">لم يُنشئ النموذج أي تعليق بعد.</span>
+            <span id="gemini-usage-text">التعليقات (0) التكلفة (0.000)</span>
           </div>
           <button id="reposts-button" class="btn btn-pine btn-wide" type="submit">تنفيذ</button>
         </section>
@@ -1200,18 +1199,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
       const response = await fetch(apiRoot + "/gemini-usage", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
       const data = await response.json();
       if (!response.ok || !data.success) return;
-      if (!data.comments) { geminiUsageText.textContent = "لم يُنشئ النموذج أي تعليق بعد."; return; }
-      const lines = [
-        "إجمالي التعليقات التي أنشأها النموذج: " + Number(data.comments).toLocaleString("en-US"),
-        "إجمالي السعر: " + Number(data.total || 0).toFixed(3) + " دولار (" + data.price_per_comment + " لكل تعليق)"
-          + (data.since ? " · منذ " + new Date(data.since * 1000).toLocaleDateString("ar") : "")
-      ];
-      geminiUsageText.replaceChildren(...lines.map((line) => {
-        const row = document.createElement("span");
-        row.style.display = "block";
-        row.textContent = line;
-        return row;
-      }));
+      const comments = Number(data.comments || 0);
+      const total = Number(data.total || 0);
+      geminiUsageText.textContent = "التعليقات (" + comments.toLocaleString("en-US") + ") التكلفة (" + total.toFixed(3) + ")";
     } catch (_) {}
   }
 
