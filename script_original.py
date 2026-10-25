@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""One-file Flask page to verify an X session and list a profile's reposts.
+"""One-file Flask page to verify an X session and act on a chat group's tweets.
 
 Saved sessions (auth token + the account username) are written beside this
 script and survive a restart. Job progress is kept too, so leaving the browser
 and coming back shows whether the work is still running, where it stopped,
 or that it finished. The token is not returned except to this same page.
-
-The profile timeline is virtualized: X keeps roughly the first screen of posts
-in the DOM (often about 10) and unmounts the rest. Collection therefore scrolls
-the real timeline container and waits until new posts mount, so counts above
-10 — and above 100 — resolve to whatever the timeline actually contains.
 """
 from __future__ import annotations
 
@@ -21,7 +16,6 @@ import json
 import logging
 import math
 import os
-import queue
 import random
 import re
 import secrets
@@ -33,7 +27,7 @@ import urllib.error
 import urllib.request
 from collections import defaultdict, deque
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 from flask import Flask, abort, jsonify, make_response, redirect, render_template_string, request, session
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -52,12 +46,9 @@ ACCESS_PATH = os.getenv("X_ACCESS_PATH", "desk")
 ATTEMPT_WINDOW_SECONDS = 300
 MAX_ATTEMPTS_PER_CLIENT = 5
 MAX_REPOSTS_REQUEST = 1000
-PREVIEW_TTL_SECONDS = 1200
-pending_previews: dict[str, dict] = {}
 jobs: dict[str, dict] = {}
 attempts: dict[str, deque[float]] = defaultdict(deque)
 attempts_lock = threading.Lock()
-preview_lock = threading.Lock()
 jobs_lock = threading.Lock()
 sessions_lock = threading.Lock()
 gemini_lock = threading.Lock()
@@ -70,7 +61,7 @@ saved_sessions: list[dict] = []
 saved_gemini = {"api_key": "", "model": "gemini-3.5-flash"}
 JOB_FIELDS = (
     "owner", "client_id", "created_at", "updated_at", "status", "phase", "kind",
-    "collected", "done", "requested", "message", "success", "preview_id",
+    "collected", "done", "requested", "message", "success",
     "username", "actions", "items", "results", "key_hash",
 )
 logging.getLogger("werkzeug").disabled = True
@@ -303,21 +294,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
       font-size: 16px;
     }
     input:focus { outline: none; border-color: var(--pine); box-shadow: 0 0 0 3px rgba(15, 107, 80, 0.16); }
-    #auth_token, #username, #repost-count, #stop-tweet, #gemini-model { direction: ltr; text-align: start; }
+    #auth_token, #stop-tweet, #gemini-model { direction: ltr; text-align: start; }
     #auth_token[readonly], #gemini-key[readonly], #gemini-model[readonly] { color: var(--muted); }
-    .token-row, .prefix-field { display: flex; align-items: stretch; gap: 6px; }
-    .prefix-field span {
-      display: grid;
-      place-items: center;
-      min-width: 36px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      color: var(--muted);
-      font-weight: 600;
-      font-size: 14px;
-      background: var(--paper);
-    }
-    .prefix-field input { flex: 1; min-width: 0; }
+    .token-row { display: flex; align-items: stretch; gap: 6px; }
     .token-row input { flex: 1; min-width: 0; }
     .btn {
       min-height: 32px;
@@ -363,12 +342,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
     .group-wait-row { display: flex; align-items: center; gap: 6px; margin: 4px 0 8px; }
     .btn-wide { width: 100%; margin-top: 8px; min-height: 34px; height: 34px; }
-    .target-row { display: grid; grid-template-columns: minmax(0, 1fr) 76px; gap: 6px; align-items: center; }
-    .target-row .prefix-field { min-width: 0; }
-    #repost-count { text-align: center; padding-inline: 4px; }
     .stop-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; align-items: center; margin-top: 6px; }
-    .mode-switch { display: flex; gap: 6px; }
-    .mode-switch .preset { flex: 1; min-height: 32px; height: 32px; }
     #group-box {
       margin-top: 10px;
       margin-bottom: 14px;
@@ -397,23 +371,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       background: var(--sheet);
     }
     #group-list .pick .who { max-width: none; overflow: visible; }
-    .presets { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; margin-top: 4px; }
-    .preset {
-      min-height: 26px;
-      height: 26px;
-      min-width: 0;
-      padding: 0;
-      border: 0;
-      border-radius: 999px;
-      background: transparent;
-      color: var(--ink);
-      box-shadow: inset 0 0 0 1px var(--line);
-      font: inherit;
-      font-size: 12px;
-      font-weight: 500;
-      font-variant-numeric: tabular-nums;
-    }
-    .preset.is-on { background: var(--ink); color: var(--sheet); box-shadow: none; }
     .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 6px; }
     .gemini-fields {
       display: grid;
@@ -490,10 +447,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       50% { transform: scaleX(1); opacity: 1; }
     }
     .progress-note { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
-    #stop-job { margin-top: 12px; }
-    .summary-row { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
-    .summary-row h2 { margin: 0; font-size: 17px; font-weight: 600; text-wrap: balance; }
-    .summary-row p { margin: 0; color: var(--muted); font-size: 13px; }
     .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 12px; }
     .stat { padding: 10px 6px; border-radius: 12px; background: var(--paper); text-align: center; }
     .stat b {
@@ -551,8 +504,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .pill.is-will { color: var(--ok-ink); background: var(--ok-bg); }
     .pill.is-skip { color: var(--muted); background: var(--paper); }
     .pill.is-fail { color: var(--clay); background: var(--clay-bg); }
-    .row-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
-    .row-actions .btn { width: 100%; min-height: 40px; }
     .session-account { margin: 8px 0 0; font-weight: 600; font-size: 14px; color: var(--ok-ink); }
     .saved-sessions { margin-top: 12px; }
     .saved-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -620,7 +571,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       .sheet { border-radius: 18px; padding: 6px; }
       .sheet-inner { padding: 18px 18px 20px; }
       .choices { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .summary-row { flex-direction: row; justify-content: space-between; align-items: flex-start; }
       .figure { font-size: 40px; }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -800,25 +750,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <span id="meter-bar"></span>
         </div>
         <p id="progress-note" class="progress-note">لا يُنفَّذ أي إجراء خلال الجمع.</p>
-        <button id="stop-job" class="btn btn-ghost" type="button" hidden>إيقاف التنفيذ</button>
-      </div>
-    </section>
-
-    <section id="action-preview" class="sheet" hidden>
-      <div class="sheet-inner">
-        <div class="summary-row">
-          <div>
-            <h2>المراجعة</h2>
-            <p id="preview-summary"></p>
-          </div>
-          <button id="copy-links" class="btn btn-ghost" type="button">نسخ الروابط</button>
-        </div>
-        <div class="stats" id="preview-stats"></div>
-        <ol id="preview-list" class="post-list"></ol>
-        <div class="row-actions">
-          <button id="confirm-actions" class="btn btn-pine" type="button">تأكيد التنفيذ</button>
-          <button id="cancel-actions" class="btn btn-ghost" type="button">تجاهل المعاينة</button>
-        </div>
       </div>
     </section>
 
@@ -911,15 +842,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const progressNote = document.getElementById("progress-note");
   const meter = document.getElementById("meter");
   const meterBar = document.getElementById("meter-bar");
-  const actionPreview = document.getElementById("action-preview");
-  const previewSummary = document.getElementById("preview-summary");
-  const previewStats = document.getElementById("preview-stats");
-  const previewList = document.getElementById("preview-list");
-  const confirmButton = document.getElementById("confirm-actions");
-  const cancelButton = document.getElementById("cancel-actions");
-  const stopJobButton = document.getElementById("stop-job");
-  let stoppingJob = false;
-  const copyButton = document.getElementById("copy-links");
   const repostResults = document.getElementById("repost-results");
   const resultStats = document.getElementById("result-stats");
   const repostList = document.getElementById("repost-list");
@@ -927,8 +849,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const sessionAccount = document.getElementById("session-account");
   const savedSessions = document.getElementById("saved-sessions");
   const savedSessionList = document.getElementById("saved-session-list");
-  let currentPreviewId = null;
-  let pollGen = 0;
   let progressStarted = 0;
   let sessionRows = [];
   let groupNames = [];
@@ -944,20 +864,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       localStorage.setItem(key, id);
     }
     return id;
-  }
-
-  function readStoredJob() {
-    try {
-      const parsed = JSON.parse(localStorage.getItem("x_reposts_active_job") || "");
-      if (parsed && typeof parsed.id === "string" && typeof parsed.key === "string") return parsed;
-    } catch (_) {}
-    return null;
-  }
-
-  function rememberJob(id, key) {
-    const prev = readStoredJob();
-    const startedAt = prev && prev.id === id && prev.startedAt ? prev.startedAt : Date.now();
-    localStorage.setItem("x_reposts_active_job", JSON.stringify({id, key, startedAt}));
   }
 
   function readTasks() {
@@ -1263,37 +1169,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
     progressNote.textContent = phase === "act"
       ? "مضى " + clock + ". الحالات المفعّلة مسبقًا تُتجاوز."
       : "مضى " + clock + ". لا يُنفَّذ أي إجراء خلال هذه المرحلة.";
-    stopJobButton.hidden = data.status !== "running";
-    stopJobButton.disabled = stoppingJob;
     setStep(phase === "act" ? 4 : 2);
   }
 
-  async function pollJob(jobId, jobKey) {
-    const gen = ++pollGen;
-    for (;;) {
-      if (gen !== pollGen) return null;
-      const response = await fetch(apiRoot + "/jobs/" + encodeURIComponent(jobId), {
-        headers: {"X-CSRF-Token": csrf, "X-Job-Key": jobKey || "", "X-Client-Id": clientId()},
-        cache: "no-store"
-      });
-      const data = await response.json();
-      if (gen !== pollGen) return null;
-      if (response.status === 404) {
-        localStorage.removeItem("x_reposts_active_job");
-        throw new Error(data.message || "لم يعد سجل هذه العملية متاحًا.");
-      }
-      if (!response.ok) throw new Error(data.message || "تعذّر متابعة العملية.");
-      if (data.status === "running") {
-        renderProgress(data);
-        if (Array.isArray(data.results) && data.results.length) renderResults(data);
-      }
-      if (data.status !== "running") return data;
-      await new Promise((resolve) => setTimeout(resolve, 700));
-    }
-  }
-
   function finishTrackedJob(data) {
-    stoppingJob = false;
     if (!data || data.status === "running") return;
     showNotice(data.message || "", Boolean(data.success));
     renderProgress(data);
@@ -1301,74 +1180,13 @@ EMBEDDED_PAGE = r'''<!doctype html>
       progressNote.textContent = "آخر حالة قبل توقف السكربت. لن تُستكمل العملية تلقائيًا.";
     }
     const hasResults = Array.isArray(data.results) && data.results.length > 0;
-    const hasItems = Array.isArray(data.items) && data.items.length > 0;
     if (data.kind === "execute") {
       if (hasResults) renderResults(data);
       else if (data.status !== "interrupted") setStep(4);
-    } else if (hasItems) {
-      renderPreview(data);
-      if (data.preview_alive === false) {
-        confirmButton.disabled = true;
-        confirmButton.textContent = "أعد المعاينة قبل التنفيذ";
-      }
     } else if (!data.success) {
       setStep(1);
     }
     loadSessions();
-  }
-
-  function renderPreview(data) {
-    currentPreviewId = data.preview_id;
-    const items = data.items || [];
-    const actions = data.actions || [];
-    let will = 0;
-    let skip = 0;
-    previewList.replaceChildren();
-    items.forEach((post, index) => {
-      const item = document.createElement("li");
-      const top = document.createElement("div");
-      top.className = "post-top";
-      const idx = document.createElement("span");
-      idx.className = "idx";
-      idx.textContent = String(index + 1);
-      const link = document.createElement("a");
-      link.href = post.url;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.textContent = shortPath(post.url);
-      top.append(idx, link);
-      item.appendChild(top);
-      const text = document.createElement("p");
-      text.className = "excerpt";
-      text.textContent = post.text || "بدون نص ظاهر";
-      item.appendChild(text);
-      if (post.needs_parent) {
-        const hint = document.createElement("p");
-        hint.className = "hint";
-        hint.textContent = "ستُفتح هذه التغريدة للوصول إلى الأصلية التي عُلّق عليها، ثم يُنشر الرد هناك.";
-        item.appendChild(hint);
-      }
-      const pills = document.createElement("div");
-      pills.className = "pills";
-      actions.forEach((action) => {
-        const active = Boolean(post.active && post.active[action]);
-        if (active) skip += 1; else will += 1;
-        pills.appendChild(pill(LABELS[action] + (active ? " · مفعّل" : " · سيُطبَّق"), active ? "is-skip" : "is-will"));
-      });
-      item.appendChild(pills);
-      previewList.appendChild(item);
-    });
-    previewSummary.textContent = "@" + data.username + " — طُلب " + data.requested_count + " وظهرت " + items.length + ".";
-    previewStats.replaceChildren(
-      stat(items.length, "منشور"),
-      stat(will, "سيُطبَّق"),
-      stat(skip, "مفعّل مسبقًا")
-    );
-    confirmButton.disabled = will === 0;
-    confirmButton.textContent = will === 0 ? "لا إجراءات جديدة" : "تأكيد تنفيذ " + will;
-    actionPreview.hidden = false;
-    reveal(actionPreview);
-    setStep(3);
   }
 
   function renderResults(data) {
@@ -1544,26 +1362,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
   });
 
-  stopJobButton.addEventListener("click", async () => {
-    const saved = readStoredJob();
-    if (!saved) { showNotice("لا توجد عملية تعمل الآن.", false); return; }
-    stoppingJob = true;
-    stopJobButton.disabled = true;
-    showNotice("جارٍ إيقاف التنفيذ…", true);
-    try {
-      const data = await postJson("/stop", {job_id: saved.id, job_key: saved.key});
-      if (!data.success) {
-        stoppingJob = false;
-        stopJobButton.disabled = false;
-        showNotice(data.message || "تعذّر الإيقاف.", false);
-      }
-    } catch (_) {
-      stoppingJob = false;
-      stopJobButton.disabled = false;
-      showNotice("تعذّر الاتصال أثناء الإيقاف.", false);
-    }
-  });
-
   document.getElementById("repost-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const authToken = tokenField.value.trim();
@@ -1582,7 +1380,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (!geminiModel.value.trim()) { lockGemini(false); showNotice("أدخل اسم النموذج.", false); geminiModel.focus(); return; }
       rememberGeminiLocal();
     }
-    pollGen += 1;
     repostButton.disabled = true;
     try {
       const started = await postJson("/group-run", {
@@ -1615,56 +1412,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
   });
 
-  confirmButton.addEventListener("click", async () => {
-    if (!currentPreviewId) { showNotice("انتهت المعاينة. ابدأ معاينة جديدة.", false); return; }
-    const authToken = tokenField.value.trim();
-    if (!authToken) { showNotice("أدخل الرمز أولًا.", false); tokenField.focus(); return; }
-    confirmButton.disabled = true;
-    cancelButton.disabled = true;
-    repostButton.disabled = true;
-    const total = previewList.children.length;
-    progressStarted = performance.now();
-    renderProgress({phase: "act", done: 0, requested: total, message: "بدء التنفيذ على ما وافقت عليه…", status: "running"});
-    actionPreview.hidden = true;
-    showNotice("بدأ التنفيذ. يمكن متابعة العدد أدناه.", true);
-    try {
-      const started = await postJson("/execute-actions", {
-        auth_token: authToken,
-        preview_id: currentPreviewId,
-        gemini_api_key: geminiKey.value.trim(),
-        gemini_model: geminiModel.value.trim()
-      });
-      if (!started.success || !started.job_id || !started.job_key) {
-        progressPanel.hidden = true;
-        actionPreview.hidden = false;
-        showNotice(started.message || "تعذّر بدء التنفيذ.", false);
-        return;
-      }
-      currentPreviewId = null;
-      rememberJob(started.job_id, started.job_key);
-      const data = await pollJob(started.job_id, started.job_key);
-      if (!data) return;
-      finishTrackedJob(data);
-    } catch (_) {
-      progressPanel.hidden = true;
-      showNotice("تعذّر الاتصال أثناء التنفيذ. راجع النتيجة قبل إعادة المحاولة.", false);
-    } finally {
-      confirmButton.disabled = false;
-      cancelButton.disabled = false;
-      repostButton.disabled = false;
-    }
-  });
-
-  cancelButton.addEventListener("click", async () => {
-    if (currentPreviewId) {
-      try { await postJson("/cancel-preview", {preview_id: currentPreviewId}); } catch (_) {}
-    }
-    currentPreviewId = null;
-    actionPreview.hidden = true;
-    showNotice("أُلغيت المعاينة. لم يُنفَّذ أي إجراء.", true);
-    setStep(2);
-  });
-
   tokenField.addEventListener("input", () => {
     const token = tokenField.value.trim();
     const row = sessionRows.find((item) => item.token === token);
@@ -1683,12 +1430,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const row = sessionRows.find((item) => item.token === token);
     if (row) row.chat_pin = pin;
     postJson("/sessions/pin", {auth_token: token, chat_pin: pin}).catch(() => {});
-  }
-
-  async function resumeStoredJob() {
-    readTasks().forEach((task) => followTask(task));
-    const stored = readStoredJob();
-    if (stored) followTask({id: stored.id, key: stored.key, title: "مهمة سابقة", startedAt: stored.startedAt || Date.now()});
   }
 
   let screenTimer = 0;
@@ -1743,8 +1484,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     } catch (_) {}
     await loadSessions();
     readTasks().forEach((task) => followTask(task));
-    const stored = readStoredJob();
-    if (stored) followTask({id: stored.id, key: stored.key, title: "مهمة سابقة", startedAt: stored.startedAt || Date.now()});
     runningJobs.slice().reverse().forEach((job) => {
       const same = screenJob && screenJob.job_id === job.id;
       followTask({
@@ -1779,17 +1518,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
 
   restoreScreen();
 
-  copyButton.addEventListener("click", async () => {
-    const links = [...previewList.querySelectorAll("a")].map((anchor) => anchor.href).join("\n");
-    if (!links) return;
-    try {
-      await navigator.clipboard.writeText(links);
-      copyButton.textContent = "نُسخت";
-      setTimeout(() => { copyButton.textContent = "نسخ الروابط"; }, 1400);
-    } catch (_) {
-      showNotice("تعذّر النسخ من هذا المتصفح.", false);
-    }
-  });
 })();
 </script>
 </body>
@@ -1798,134 +1526,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
 '''
 
 PAGE = load_page()
-
-READ_TWEETS_JS = r"""
-() => {
-  const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-  const statusPath = (href) => {
-    const match = (href || "").match(/^(?:https?:\/\/(?:www\.)?(?:x|twitter)\.com)?(\/[A-Za-z0-9_]+\/status\/\d+)/);
-    return match ? match[1] : "";
-  };
-  const posts = [];
-  for (const article of document.querySelectorAll('article[data-testid="tweet"]')) {
-    const time = article.querySelector("time");
-    const timed = time && time.closest('a[href*="/status/"]');
-    let href = timed ? (timed.getAttribute("href") || "") : "";
-    if (!href) {
-      const link = article.querySelector('a[href*="/status/"]');
-      href = link ? (link.getAttribute("href") || "") : "";
-    }
-    const selfPath = statusPath(href);
-    let parent = "";
-    const quote = article.querySelector('[data-testid="quoteTweet"]');
-    for (const link of article.querySelectorAll('a[href*="/status/"]')) {
-      if (quote && quote.contains(link)) continue;
-      const path = statusPath(link.getAttribute("href") || "");
-      if (!path || path === selfPath) continue;
-      parent = path;
-      break;
-    }
-    let author = "";
-    const name = article.querySelector('[data-testid="User-Name"] a[href^="/"]');
-    if (name) {
-      const match = (name.getAttribute("href") || "").match(/^\/([A-Za-z0-9_]{1,15})(?:\/|$)/);
-      if (match) author = match[1];
-    }
-    const social = article.querySelector('[data-testid="socialContext"]');
-    const text = article.querySelector('[data-testid="tweetText"]');
-    const group = article.querySelector('[role="group"]');
-    const scope = group || article;
-    posts.push({
-      href,
-      parent,
-      author,
-      social: clean(social ? social.innerText : ""),
-      text: clean(text ? text.innerText : "").slice(0, 280),
-      repost: !!scope.querySelector('[data-testid="unretweet"]'),
-      like: !!scope.querySelector('[data-testid="unlike"]'),
-      bookmark: !!scope.querySelector('[data-testid="removeBookmark"]'),
-    });
-  }
-  return posts;
-}
-"""
-
-TIMELINE_BUSY_JS = r"""
-() => {
-  const count = document.querySelectorAll('article[data-testid="tweet"]').length;
-  const busy = Array.from(document.querySelectorAll('[role="progressbar"]')).some((el) => el.getClientRects().length);
-  return count === 0 || busy;
-}
-"""
-
-SCROLL_TIMELINE_JS = r"""
-() => {
-  function findScroller() {
-    const article = document.querySelector('article[data-testid="tweet"]');
-    const column = document.querySelector('[data-testid="primaryColumn"]');
-    const start = article || column || document.body;
-    let el = start;
-    while (el && el !== document.documentElement) {
-      const style = getComputedStyle(el);
-      const overflow = style.overflowY + " " + style.overflow;
-      if (el.scrollHeight > el.clientHeight + 80 && /(auto|scroll|overlay)/.test(overflow)) return el;
-      el = el.parentElement;
-    }
-    const root = document.scrollingElement || document.documentElement;
-    if (root.scrollHeight > root.clientHeight + 80) return root;
-    let best = root;
-    let bestRoom = root.scrollHeight - root.clientHeight;
-    el = start;
-    while (el) {
-      const room = el.scrollHeight - el.clientHeight;
-      if (room > bestRoom) {
-        best = el;
-        bestRoom = room;
-      }
-      el = el.parentElement;
-    }
-    return best;
-  }
-  const scroller = findScroller();
-  const articles = document.querySelectorAll('article[data-testid="tweet"]');
-  const last = articles[articles.length - 1] || null;
-  const beforeTop = scroller.scrollTop || 0;
-  const delta = Math.max(420, Math.floor((scroller.clientHeight || window.innerHeight) * 0.55));
-  try { scroller.scrollTop = beforeTop + delta; } catch (error) {}
-  let top = scroller.scrollTop || 0;
-  if (Math.abs(top - beforeTop) < 8) {
-    window.scrollBy(0, delta);
-    if (last && last.scrollIntoView) last.scrollIntoView({block: "end", inline: "nearest"});
-    try { scroller.scrollTop = (scroller.scrollTop || 0) + Math.floor(delta * 0.35); } catch (error) {}
-    top = scroller.scrollTop || window.scrollY || 0;
-  }
-  try {
-    scroller.dispatchEvent(new WheelEvent("wheel", {deltaY: delta, bubbles: true, cancelable: true}));
-  } catch (error) {}
-  const height = scroller.scrollHeight || document.documentElement.scrollHeight || 0;
-  const client = scroller.clientHeight || window.innerHeight || 0;
-  return {
-    moved: Math.abs(top - beforeTop) > 8,
-    atBottom: top + client >= height - 160,
-    top,
-    height,
-  };
-}
-"""
-
-SCROLL_TOP_JS = r"""
-() => {
-  const article = document.querySelector('article[data-testid="tweet"]');
-  let el = article || document.body;
-  const seen = new Set();
-  while (el && !seen.has(el)) {
-    seen.add(el);
-    try { el.scrollTop = 0; } catch (error) {}
-    el = el.parentElement;
-  }
-  window.scrollTo(0, 0);
-}
-"""
 
 ACTION_CONTROLS = {
     "repost": ("unretweet", "retweet"),
@@ -2320,13 +1920,6 @@ CHAT_URLS = ("https://x.com/i/chat", "https://x.com/messages")
 ALLOWED_ACTIONS = {"repost", "like", "bookmark", "comment"}
 
 
-def normalize_username(value: str) -> str:
-    username = (value or "").strip()
-    if username.startswith("@"):
-        username = username[1:]
-    return username
-
-
 def parse_requested_count(value) -> int | None:
     if isinstance(value, bool):
         return None
@@ -2350,218 +1943,6 @@ def normalize_status_path(href: str) -> str | None:
     if status_id:
         return f"/i/web/status/{status_id.group(1)}"
     return None
-
-
-def status_owner(path: str) -> str:
-    match = re.match(r"/([^/]+)/status/", path or "")
-    return (match.group(1) if match else "").lower()
-
-
-def comment_targets_from_posts(posts: list[dict], username: str) -> list[dict]:
-    """Parent tweets a profile replied to, taken from one replies-tab viewport."""
-    owner = username.lower()
-    targets: list[dict] = []
-    for index, post in enumerate(posts):
-        if not isinstance(post, dict):
-            continue
-        author = str(post.get("author") or "").strip().lstrip("@").lower()
-        if author != owner:
-            continue
-        self_path = normalize_status_path(str(post.get("href") or ""))
-        parent_path = normalize_status_path(str(post.get("parent") or ""))
-        excerpt = str(post.get("text") or "")[:280]
-        chosen = None
-        if parent_path and status_owner(parent_path) != owner:
-            chosen = parent_path
-        elif index > 0 and isinstance(posts[index - 1], dict):
-            prev = posts[index - 1]
-            prev_author = str(prev.get("author") or "").strip().lstrip("@").lower()
-            prev_path = normalize_status_path(str(prev.get("href") or ""))
-            if prev_path and prev_author and prev_author != owner:
-                chosen = prev_path
-                excerpt = str(prev.get("text") or excerpt)[:280]
-        if not chosen:
-            continue
-        targets.append({
-            "url": "https://x.com" + chosen,
-            "text": excerpt,
-            "needs_parent": False,
-            "active": {"repost": False, "like": False, "bookmark": False, "comment": False},
-        })
-    return targets
-
-
-def own_replies_from_posts(posts: list[dict], username: str) -> list[dict]:
-    owner = username.lower()
-    rows: list[dict] = []
-    for post in posts:
-        if not isinstance(post, dict):
-            continue
-        author = str(post.get("author") or "").strip().lstrip("@").lower()
-        path = normalize_status_path(str(post.get("href") or ""))
-        if author != owner or not path:
-            continue
-        rows.append({
-            "url": "https://x.com" + path,
-            "text": str(post.get("text") or "")[:280],
-            "needs_parent": True,
-            "active": {"repost": False, "like": False, "bookmark": False, "comment": False},
-        })
-    return rows
-
-
-def read_timeline_posts(page) -> list[dict]:
-    try:
-        posts = page.evaluate(READ_TWEETS_JS)
-    except Exception:
-        return []
-    if not isinstance(posts, list):
-        return []
-    return [post for post in posts if isinstance(post, dict)]
-
-
-def timeline_is_busy(page) -> bool:
-    try:
-        return bool(page.evaluate(TIMELINE_BUSY_JS))
-    except Exception:
-        return False
-
-
-def click_retry(page) -> bool:
-    for label in ("Retry", "Try again", "إعادة المحاولة", "حاول مرة أخرى"):
-        button = page.get_by_role("button", name=label)
-        try:
-            if button.count() == 0:
-                continue
-            button.first.click(timeout=2000)
-            page.wait_for_timeout(700)
-            return True
-        except Exception:
-            continue
-    return False
-
-
-def wait_for_new_posts(page, seen: set[str], timeout_s: float) -> bool:
-    """Poll until a not-yet-collected status mounts, or the timeline settles."""
-    deadline = time.monotonic() + timeout_s
-    extended = False
-    while time.monotonic() < deadline:
-        page.wait_for_timeout(280)
-        for post in read_timeline_posts(page):
-            path = normalize_status_path(str(post.get("href") or ""))
-            if path and path not in seen:
-                return True
-        if not extended and timeline_is_busy(page):
-            deadline += 6
-            extended = True
-    return False
-
-
-def absorb_visible_posts(page, seen: set[str], found: list[dict], requested_count: int, username: str = "", source: str = "reposts", fallback: list[dict] | None = None) -> int:
-    if source == "replies":
-        return absorb_reply_targets(page, seen, found, requested_count, username, fallback)
-    added = 0
-    for post in read_timeline_posts(page):
-        path = normalize_status_path(str(post.get("href") or ""))
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        found.append({
-            "url": "https://x.com" + path,
-            "text": str(post.get("text") or "")[:280],
-            "active": {
-                "repost": bool(post.get("repost")),
-                "like": bool(post.get("like")),
-                "bookmark": bool(post.get("bookmark")),
-            },
-        })
-        added += 1
-        if len(found) >= requested_count:
-            break
-    return added
-
-
-def absorb_reply_targets(page, seen: set[str], found: list[dict], requested_count: int, username: str, fallback: list[dict] | None) -> int:
-    posts = read_timeline_posts(page)
-    added = 0
-    for item in comment_targets_from_posts(posts, username):
-        path = normalize_status_path(item["url"])
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        found.append(item)
-        added += 1
-        if len(found) >= requested_count:
-            break
-    if fallback is not None:
-        known = {normalize_status_path(item["url"]) for item in fallback}
-        for item in own_replies_from_posts(posts, username):
-            path = normalize_status_path(item["url"])
-            if not path or path in seen or path in known:
-                continue
-            known.add(path)
-            fallback.append(item)
-    return added
-
-
-def collect_repost_items(page, requested_count: int, on_progress=None, username: str = "", source: str = "reposts") -> list[dict]:
-    """Scroll the virtualized timeline until enough posts mount or it ends."""
-    seen: set[str] = set()
-    found: list[dict] = []
-    fallback: list[dict] = []
-
-    def report() -> None:
-        if on_progress:
-            on_progress(len(found), requested_count, "collect")
-
-    for _ in range(50):
-        if absorb_visible_posts(page, seen, found, requested_count, username, source, fallback):
-            break
-        page.wait_for_timeout(200)
-    report()
-    if len(found) >= requested_count:
-        return found[:requested_count]
-
-    stagnant = 0
-    max_passes = min(5000, max(90, requested_count * 4))
-    for _ in range(max_passes):
-        if len(found) >= requested_count:
-            break
-        try:
-            metrics = page.evaluate(SCROLL_TIMELINE_JS) or {}
-        except Exception:
-            metrics = {}
-        timeout_s = 2.4 if stagnant == 0 else min(8.0, 2.4 + stagnant * 1.3)
-        if stagnant in (2, 5):
-            click_retry(page)
-        appeared = wait_for_new_posts(page, seen, timeout_s)
-        added = absorb_visible_posts(page, seen, found, requested_count, username, source, fallback)
-        if added or appeared:
-            stagnant = 0
-            if added:
-                report()
-            continue
-        stagnant += 1
-        at_bottom = bool(metrics.get("atBottom"))
-        moved = bool(metrics.get("moved"))
-        # A slow page is not a failure: stop only after repeated settled misses.
-        if stagnant >= 6 and (at_bottom or not moved):
-            break
-        if stagnant >= 10:
-            break
-    if source == "replies" and len(found) < requested_count:
-        for item in fallback:
-            path = normalize_status_path(item["url"])
-            if not path or path in seen:
-                continue
-            seen.add(path)
-            found.append(item)
-            if len(found) >= requested_count:
-                break
-    report()
-    label = "replies" if source == "replies" else "reposts"
-    print(f"X {label} collected {len(found)}/{requested_count}", flush=True)
-    return found[:requested_count]
 
 
 _mouse_at: dict[int, tuple[float, float]] = {}
@@ -2887,92 +2268,6 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
                 raise BrowserClosed() from exc
             outcome[action] = "تعذر التنفيذ"
     return outcome
-
-
-def act_on_visible(page, pending: dict[str, dict], actions: list[str], results: list[dict], on_item=None) -> int:
-    acted = 0
-    visible: list[str] = []
-    for post in read_timeline_posts(page):
-        path = normalize_status_path(str(post.get("href") or ""))
-        if path and path in pending and path not in visible:
-            visible.append(path)
-    for path in visible:
-        if path not in pending:
-            continue
-        item = pending.pop(path)
-        result = results[item["_index"]]
-        result["actions"] = apply_actions_on_path(page, path, actions)
-        acted += 1
-        if on_item:
-            on_item()
-    return acted
-
-
-def execute_selected_actions(page, items: list[dict], actions: list[str], on_progress=None) -> list[dict]:
-    """Apply confirmed actions while scrolling, before virtualization drops each post."""
-    pending: dict[str, dict] = {}
-    results: list[dict] = []
-    for index, item in enumerate(items):
-        path = normalize_status_path(item.get("url", ""))
-        results.append({"url": item.get("url", ""), "text": item.get("text", ""), "actions": {}})
-        if not path:
-            results[-1]["actions"] = {key: "تعذر العثور على المنشور" for key in actions}
-            continue
-        pending[path] = {"_index": index}
-
-    finished = len(items) - len(pending)
-
-    def note() -> None:
-        nonlocal finished
-        finished += 1
-        if on_progress:
-            on_progress(finished, len(items), "act")
-
-    if on_progress:
-        on_progress(finished, len(items), "act")
-
-    def run_passes(limit: int) -> None:
-        stagnant = 0
-        for _ in range(limit):
-            if not pending:
-                return
-            acted = act_on_visible(page, pending, actions, results, note)
-            if not pending:
-                return
-            try:
-                metrics = page.evaluate(SCROLL_TIMELINE_JS) or {}
-            except Exception:
-                metrics = {}
-            page.wait_for_timeout(450 if acted else 900)
-            if timeline_is_busy(page):
-                page.wait_for_timeout(1500)
-            if acted:
-                stagnant = 0
-                continue
-            stagnant += 1
-            if stagnant in (2, 4):
-                click_retry(page)
-            if stagnant >= 6 and (bool(metrics.get("atBottom")) or not bool(metrics.get("moved"))):
-                return
-            if stagnant >= 8:
-                return
-
-    try:
-        page.evaluate(SCROLL_TOP_JS)
-    except Exception:
-        pass
-    max_passes = min(5000, max(90, len(items) * 4))
-    run_passes(max_passes)
-    if pending:
-        try:
-            page.evaluate(SCROLL_TOP_JS)
-        except Exception:
-            pass
-        page.wait_for_timeout(600)
-        run_passes(max_passes)
-    for path, item in pending.items():
-        results[item["_index"]]["actions"] = {key: "تعذر العثور على المنشور" for key in actions}
-    return results
 
 
 def normalize_gemini_model(value: str) -> str | None:
@@ -3474,18 +2769,6 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
     return results
 
 
-def launch_x_browser(playwright, auth_token: str):
-    browser = playwright.chromium.launch(
-        headless=True,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-        ],
-    )
-    context, page = open_x_context(browser, auth_token)
-    return browser, page
-
-
 # Do not download images, videos or audio in the automation browser.
 BLOCK_MEDIA = True
 BLOCKED_RESOURCE_TYPES = {"image", "media"}
@@ -3520,142 +2803,6 @@ def allow_media(page) -> None:
         state["allow"] = True
 
 
-def open_x_context(browser, auth_token: str):
-    context = browser.new_context(
-        viewport={"width": VIEWPORT_WIDTH, "height": NORMAL_VIEWPORT_HEIGHT},
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ),
-        locale="en-US",
-    )
-    context.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
-    block_media(context)
-    if auth_token:
-        context.add_cookies([{
-            "name": "auth_token",
-            "value": auth_token,
-            "domain": ".x.com",
-            "path": "/",
-            "httpOnly": True,
-            "secure": True,
-            "sameSite": "Lax",
-        }])
-    page = context.new_page()
-    page.set_default_timeout(20_000)
-    page.set_default_navigation_timeout(60_000)
-    return context, page
-
-
-class BrowserHub:
-    """One Chromium process. The account changes only when the auth token changes."""
-
-    def __init__(self) -> None:
-        self._queue: queue.Queue = queue.Queue()
-        self._thread: threading.Thread | None = None
-        self._start_lock = threading.Lock()
-        self._playwright = None
-        self._browser = None
-        self._context = None
-        self._page = None
-        self._token = ""
-
-    def _loop(self) -> None:
-        while True:
-            fn, box = self._queue.get()
-            try:
-                box["value"] = fn()
-            except Exception as exc:
-                box["error"] = exc
-                self._drop_page()
-            finally:
-                box["event"].set()
-
-    def _ensure_thread(self) -> None:
-        with self._start_lock:
-            if self._thread and self._thread.is_alive():
-                return
-            self._thread = threading.Thread(target=self._loop, name="x-browser", daemon=True)
-            self._thread.start()
-
-    def call(self, fn):
-        self._ensure_thread()
-        box = {"event": threading.Event(), "value": None, "error": None}
-        self._queue.put((fn, box))
-        box["event"].wait()
-        if box["error"] is not None:
-            raise box["error"]
-        return box["value"]
-
-    def _drop_page(self) -> None:
-        self._page = None
-        browser = self._browser
-        if browser is None:
-            return
-        try:
-            connected = browser.is_connected()
-        except Exception:
-            connected = False
-        if not connected:
-            self._browser = None
-            self._context = None
-            self._token = ""
-
-    def _browser_alive(self) -> bool:
-        if self._browser is None:
-            return False
-        try:
-            return bool(self._browser.is_connected())
-        except Exception:
-            return False
-
-    def page_for(self, auth_token: str):
-        if not self._browser_alive():
-            if self._playwright is None:
-                self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            self._context = None
-            self._page = None
-            self._token = ""
-        if self._context is None or self._token != auth_token:
-            if self._context is not None:
-                try:
-                    self._context.close()
-                except Exception:
-                    pass
-            self._context, self._page = open_x_context(self._browser, auth_token)
-            self._token = auth_token
-            return self._page
-        if self._page is None or self._page.is_closed():
-            self._page = self._context.new_page()
-            self._page.set_default_timeout(20_000)
-            self._page.set_default_navigation_timeout(60_000)
-        return self._page
-
-    def reload_open_page(self) -> str:
-        def work():
-            page = self._page
-            if not self._browser_alive() or page is None:
-                return ""
-            try:
-                if page.is_closed():
-                    return ""
-            except Exception:
-                return ""
-            page.reload(wait_until="domcontentloaded", timeout=60_000)
-            return page.url or "ok"
-        return self.call(work)
-
-
-browser_hub = BrowserHub()
 MAX_PARALLEL_JOBS = 4
 
 
@@ -3903,26 +3050,6 @@ def verify_x_login(auth_token: str) -> tuple[bool, str]:
     return run_on_browser(auth_token, work)
 
 
-def open_reposts_tab(page, username: str, source: str = "reposts") -> str | None:
-    leaf = "with_replies" if source == "replies" else "reposts"
-    page.goto(
-        "https://x.com/" + quote(username, safe="_") + "/" + leaf,
-        wait_until="domcontentloaded",
-        timeout=60_000,
-    )
-    try:
-        page.locator('article[data-testid="tweet"]').first.wait_for(state="attached", timeout=20_000)
-    except PlaywrightTimeoutError:
-        pass
-    try:
-        body_text = page.evaluate("() => (document.body && document.body.innerText || '').slice(0, 5000)")
-    except Exception:
-        body_text = ""
-    if re.search(r"This account doesn.t exist|Account suspended|هذا الحساب غير موجود|الحساب موقوف", body_text, re.I):
-        return "profile"
-    return None
-
-
 def valid_chat_pin(value: str) -> bool:
     return bool(re.fullmatch(r"\d{4,8}", (value or "").strip()))
 
@@ -3943,15 +3070,6 @@ def pin_error_message(page) -> str | None:
     return None
 
 
-def inbox_ready(page) -> bool:
-    try:
-        if page.locator('[data-testid^="dm-conversation-item-"], [data-testid="dm-inbox-panel"]').count():
-            return True
-    except Exception:
-        pass
-    return "/i/chat" in (page.url or "") and "pin" not in (page.url or "")
-
-
 def pin_fields(page):
     locator = page.locator("input[type='password']:visible, input[type='tel']:visible, input[inputmode='numeric']:visible")
     boxes = []
@@ -3963,12 +3081,6 @@ def pin_fields(page):
         except Exception:
             continue
     return boxes
-
-
-def pin_screen(page) -> bool:
-    if pin_fields(page):
-        return True
-    return bool(re.search(r"enter your (chat )?pin|chat pin|passcode|أدخل.{0,24}رمز", chat_body_text(page), re.I))
 
 
 def type_pin_once(page, pin: str) -> None:
@@ -4046,118 +3158,6 @@ def choose_inbox_filter(page, testid: str, label: str) -> None:
 
 def show_groups_only(page) -> None:
     choose_inbox_filter(page, "dm-inbox-dropdown-groups", r"groups|قروب|مجموع")
-
-
-def show_all_inbox(page) -> None:
-    choose_inbox_filter(page, "dm-inbox-dropdown-all", r"^all$|الكل|all conversations|كل الرسائل")
-
-
-INBOX_TOP_JS = r"""
-() => {
-  const roots = [];
-  const walk = (root) => {
-    if (!root || roots.includes(root)) return;
-    roots.push(root);
-    const nodes = root.querySelectorAll ? root.querySelectorAll("*") : [];
-    for (const node of nodes) if (node.shadowRoot) walk(node.shadowRoot);
-  };
-  walk(document);
-  const query = (selector) => {
-    for (const root of roots) {
-      const found = root.querySelector && root.querySelector(selector);
-      if (found) return found;
-    }
-    return null;
-  };
-  const panel = query('[data-testid="dm-inbox-panel"]');
-  const row = query('[data-testid^="dm-conversation-item-"]');
-  let node = panel || (row ? row.parentElement : null);
-  while (node && node !== document.body) {
-    const style = getComputedStyle(node);
-    if (/(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 40) {
-      node.scrollTop = 0;
-      return true;
-    }
-    node = node.parentElement;
-  }
-  return false;
-}
-"""
-
-
-def nudge_inbox(page, delta: int) -> None:
-    try:
-        page.evaluate(SCROLL_INBOX_JS)
-    except Exception:
-        pass
-    try:
-        panel = page.locator('[data-testid="dm-inbox-panel"]').first
-        box = panel.bounding_box()
-        if box:
-            page.mouse.move(box["x"] + min(box["width"] / 2, 280), box["y"] + min(box["height"] * 0.55, 420))
-            page.mouse.wheel(0, delta)
-    except Exception:
-        pass
-
-
-def settle_inbox(page) -> int:
-    last = -1
-    stable = 0
-    rows = 0
-    for _ in range(22):
-        try:
-            payload = page.evaluate(READ_GROUPS_JS, "") or {}
-        except Exception:
-            payload = {}
-        rows = int(payload.get("rows") or 0)
-        loading = bool(payload.get("loading"))
-        nudge_inbox(page, 650)
-        page.wait_for_timeout(650)
-        if rows > 0 and rows == last and not loading:
-            stable += 1
-            if stable >= 3:
-                break
-        else:
-            stable = 0
-        last = rows
-    try:
-        page.evaluate(INBOX_TOP_JS)
-    except Exception:
-        pass
-    page.wait_for_timeout(400)
-    return rows
-
-
-def prepare_chat(auth_token: str, pin: str) -> dict:
-    def work(page):
-        if not ensure_logged_in(page):
-            return {"ok": False, "message": "الجلسة غير مسجّلة الدخول.", "groups": []}
-        handle = read_session_username(page)
-        if handle:
-            remember_session(auth_token, handle, pin)
-        error = open_chat(page, pin)
-        if error:
-            return {"ok": False, "message": error, "groups": []}
-        show_all_inbox(page)
-        rows = settle_inbox(page)
-        names = collect_groups(page)
-        show_all_inbox(page)
-        try:
-            page.evaluate(INBOX_TOP_JS)
-        except Exception:
-            pass
-        if rows <= 0 and not names:
-            return {"ok": False, "message": "فُتحت الدردشة لكن القائمة لم تظهر.", "groups": []}
-        return {
-            "ok": True,
-            "groups": names,
-            "rows": rows,
-            "message": f"تمت التهيئة. ظهر {len(names)} قروب و{rows} محادثة. أُغلق المتصفح، وكل مهمة تفتح متصفحها الخاص.",
-        }
-    try:
-        return run_on_browser(auth_token, work)
-    except Exception:
-        return {"ok": False, "message": "تعذّر فتح المتصفح.", "groups": []}
 
 
 GROUP_IDS_PATH = DATA_DIR / "group_ids.json"
@@ -4343,82 +3343,6 @@ def focus_group_scroller(page) -> None:
         box = None
     if box and box.get("height", 0) >= 40:
         page.mouse.move(box["x"] + box["width"] * 0.45, box["y"] + min(box["height"] * 0.42, 640))
-
-
-NUDGE_OLDER_JS = r"""
-(delta) => {
-  const roots = [];
-  const walk = (root) => {
-    if (!root || roots.includes(root)) return;
-    roots.push(root);
-    const nodes = root.querySelectorAll ? root.querySelectorAll("*") : [];
-    for (const node of nodes) if (node.shadowRoot) walk(node.shadowRoot);
-  };
-  walk(document);
-  const query = (selector) => {
-    for (const root of roots) {
-      const found = root.querySelector && root.querySelector(selector);
-      if (found) return found;
-    }
-    return null;
-  };
-  const scroller = query('[data-testid="dm-message-scroller"]')
-    || query('[data-testid="dm-message-list"]')
-    || query('[data-testid="dm-conversation-content"]');
-  if (!scroller) return false;
-  scroller.dispatchEvent(new WheelEvent("wheel", {deltaY: delta, bubbles: true, cancelable: true}));
-  return true;
-}
-"""
-
-
-def nudge_older(page, distance: int, page_up: bool = False) -> None:
-    focus_group_scroller(page)
-    try:
-        page.mouse.wheel(0, distance)
-    except Exception:
-        pass
-    try:
-        page.evaluate(NUDGE_OLDER_JS, distance)
-    except Exception:
-        pass
-    if page_up:
-        try:
-            page.keyboard.press("PageUp")
-        except Exception:
-            pass
-
-
-SET_SCROLL_TOP_JS = r"""
-(value) => {
-  const roots = [];
-  const walk = (root) => {
-    if (!root || roots.includes(root)) return;
-    roots.push(root);
-    const nodes = root.querySelectorAll ? root.querySelectorAll("*") : [];
-    for (const node of nodes) if (node.shadowRoot) walk(node.shadowRoot);
-  };
-  walk(document);
-  const query = (selector) => {
-    for (const root of roots) {
-      const found = root.querySelector && root.querySelector(selector);
-      if (found) return found;
-    }
-    return null;
-  };
-  const scroller = query('[data-testid="dm-message-scroller"]') || query('[data-testid="dm-message-list"]');
-  if (!scroller) return false;
-  scroller.scrollTop = value;
-  return true;
-}
-"""
-
-
-def park_scroller(page, scroll_top: int) -> None:
-    try:
-        page.evaluate(SET_SCROLL_TOP_JS, max(0, int(scroll_top)))
-    except Exception:
-        pass
 
 
 def tweet_url(raw_url: str, status_id: str) -> str:
@@ -5414,45 +4338,6 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             message = "أُغلق المتصفح أثناء العمل." if browser_closed_error(exc) else (str(exc) or "تعذّر تنفيذ إجراءات القروب.")
             publish_job(job_id, status="done", success=False, message=message)
 
-def check_x_login_and_reposts(auth_token: str, username: str, requested_count: int, on_progress=None, source: str = "reposts") -> tuple[bool, list[dict], str | None]:
-    """Verify the session, open reposts or replies, then collect links."""
-    if on_progress:
-        on_progress(0, requested_count, "login")
-    def work(page):
-        if not ensure_logged_in(page):
-            return False, [], "login"
-        handle = read_session_username(page)
-        if handle:
-            remember_session(auth_token, handle)
-        issue = open_reposts_tab(page, username, source)
-        if issue:
-            return True, [], issue
-        return True, collect_repost_items(page, requested_count, on_progress, username, source), None
-    return run_on_browser(auth_token, work)
-
-
-def execute_x_actions(auth_token: str, username: str, items: list[dict], actions: list[str], on_progress=None, gemini_api_key: str = "", gemini_model: str = "") -> tuple[bool, list[dict], str | None]:
-    """Execute confirmed actions. Comments visit each tweet, screenshot it, and reply."""
-    if on_progress:
-        on_progress(0, len(items), "login")
-    def work(page):
-        if not ensure_logged_in(page):
-            return False, [], "login"
-        handle = read_session_username(page)
-        if handle:
-            remember_session(auth_token, handle)
-        if "comment" in actions:
-            return True, execute_comment_actions(page, items, actions, gemini_api_key, gemini_model, on_progress, account=profile_key(auth_token)), None
-        issue = open_reposts_tab(page, username, "reposts")
-        if issue:
-            return True, [], issue
-        try:
-            page.locator('article[data-testid="tweet"]').first.wait_for(state="attached", timeout=15_000)
-        except PlaywrightTimeoutError:
-            return True, [], "profile"
-        return True, execute_selected_actions(page, items, actions, on_progress), None
-    return run_on_browser(auth_token, work)
-
 
 def allow_attempt(client: str) -> bool:
     now = time.monotonic()
@@ -5802,7 +4687,6 @@ def begin_job(owner: str, client_id: str, requested: int, phase: str, message: s
             "requested": requested,
             "message": message,
             "success": None,
-            "preview_id": None,
             "username": username,
             "actions": [],
             "items": [],
@@ -5843,119 +4727,7 @@ def public_job(job: dict, light: bool = False) -> dict:
     if light and job["status"] == "running":
         payload["items"] = []
         payload["results"] = []
-    if job["status"] != "running":
-        preview_id = job.get("preview_id")
-        with preview_lock:
-            preview_alive = bool(preview_id) and preview_id in pending_previews
-        payload["preview_id"] = preview_id
-        payload["preview_alive"] = preview_alive
     return payload
-
-
-def remember_preview(owner: str, client_id: str, auth_token: str, username: str, requested_actions: list[str], reposts: list[dict]) -> str:
-    preview_id = secrets.token_urlsafe(24)
-    preview = {
-        "owner": owner,
-        "client_id": client_id,
-        "token_digest": hashlib.sha256(auth_token.encode("utf-8")).hexdigest(),
-        "created": time.monotonic(),
-        "username": username,
-        "actions": requested_actions,
-        "items": reposts,
-    }
-    with preview_lock:
-        now = time.monotonic()
-        for key in [k for k, value in pending_previews.items() if now - value["created"] > PREVIEW_TTL_SECONDS]:
-            pending_previews.pop(key, None)
-        if len(pending_previews) >= 128:
-            pending_previews.pop(next(iter(pending_previews)))
-        pending_previews[preview_id] = preview
-    return preview_id
-
-
-def run_preview_job(job_id: str, auth_token: str, username: str, requested_count: int, requested_actions: list[str], owner: str, client_id: str) -> None:
-    def on_progress(collected: int, requested: int, phase: str) -> None:
-        if phase == "login":
-            message = "التحقق من الجلسة قبل فتح التبويب…"
-        else:
-            message = f"تم جمع {collected} من {requested}. التمرير ينتظر اكتمال كل دفعة."
-        publish_job(job_id, collected=collected, requested=requested, phase=phase, message=message)
-    source = "replies" if "comment" in requested_actions else "reposts"
-    try:
-        success, reposts, issue = check_x_login_and_reposts(auth_token, username, requested_count, on_progress, source)
-        if not success:
-            publish_job(job_id, status="done", success=False, phase="login", message="فشل التحقق: لم يظهر الحساب مسجّل الدخول. قد يكون الرمز غير صالح أو منتهيًا.")
-            return
-        if issue == "profile":
-            tab = "الردود" if source == "replies" else "إعادات النشر"
-            publish_job(job_id, status="done", success=False, message=f"لم يتم العثور على الحساب أو تبويب {tab} غير متاح.")
-            return
-        if not reposts:
-            missing = "تغريدات علّق عليها هذا الحساب" if source == "replies" else "إعادات نشر في هذا الحساب"
-            publish_job(job_id, status="done", success=False, message=f"لم يُعثر على {missing}.")
-            return
-        preview_id = remember_preview(owner, client_id, auth_token, username, requested_actions, reposts)
-        kind = "تبويب الردود" if source == "replies" else "إعادات النشر"
-        if len(reposts) < requested_count:
-            message = (
-                f"تم جمع {len(reposts)} من {requested_count} المطلوبة في @{username} من {kind}. "
-                "توقف ظهور منشورات جديدة، والقائمة هي كل ما تحمّل. راجعها ثم أكّد."
-            )
-        else:
-            message = f"اكتمل جمع {len(reposts)} منشورات من @{username} عبر {kind}. راجع الحالات ثم أكّد التنفيذ."
-        publish_job(
-            job_id, status="done", success=True, message=message, preview_id=preview_id,
-            username=username, actions=requested_actions, items=reposts,
-            collected=len(reposts), requested=requested_count, phase="collect",
-        )
-    except Exception:
-        app.logger.warning("X repost preview failed (details suppressed)")
-        publish_job(job_id, status="done", success=False, message="تعذّر تجهيز المعاينة بسبب مشكلة في الاتصال أو تشغيل المتصفح.")
-    finally:
-        auth_token = ""
-
-
-def run_execute_job(job_id: str, auth_token: str, preview: dict, gemini_api_key: str = "", gemini_model: str = "") -> None:
-    total = len(preview["items"])
-    commenting = "comment" in (preview.get("actions") or [])
-
-    def on_progress(done: int, requested: int, phase: str) -> None:
-        if phase == "login":
-            message = "التحقق من الجلسة قبل التنفيذ…"
-            publish_job(job_id, phase=phase, message=message, requested=requested, done=0)
-            return
-        if commenting:
-            message = f"التعليق {done} من {requested}: صورة التغريدة، ثم رد من 10 إلى 20 كلمة."
-        else:
-            message = f"أُنجز {done} من {requested}."
-        publish_job(job_id, phase="act", done=done, requested=requested, collected=done, message=message)
-
-    try:
-        login_ok, results, issue = execute_x_actions(
-            auth_token, preview["username"], preview["items"], preview["actions"], on_progress,
-            gemini_api_key, gemini_model,
-        )
-        if not login_ok:
-            publish_job(job_id, status="done", success=False, message="فشل التحقق من الجلسة؛ لم تُنفذ الإجراءات.")
-            return
-        if issue == "profile":
-            publish_job(job_id, status="done", success=False, message="تعذر فتح تبويب إعادات النشر؛ لم تُنفذ الإجراءات.")
-            return
-        summary = "; ".join(
-            f"{name}: {sum(1 for row in results if row.get('actions', {}).get(name) == 'تم التنفيذ')} نُفّذ، "
-            f"{sum(1 for row in results if 'مفعّل مسبقًا' in row.get('actions', {}).get(name, ''))} كان مفعّلًا وتم تجاوزه"
-            for name in preview["actions"]
-        )
-        publish_job(
-            job_id, status="done", success=True, phase="act", done=total, requested=total,
-            message="اكتملت المحاولة. " + summary, results=results,
-        )
-    except Exception:
-        app.logger.warning("X action execution failed (details suppressed)")
-        publish_job(job_id, status="done", success=False, message="توقفت العملية بسبب خطأ؛ راجع الحالات المعروضة قبل إعادة المحاولة.")
-    finally:
-        auth_token = ""
-        gemini_api_key = ""
 
 
 SCREEN_PATH = DATA_DIR / "screen.json"
@@ -5965,7 +4737,6 @@ screen: dict = {
     "chat_pin": "",
     "groups": [],
     "group": "",
-    "count": 25,
     "stop_tweet": "",
     "actions": ["repost", "like", "bookmark"],
     "job_id": "",
@@ -5989,10 +4760,6 @@ def load_screen() -> None:
             picked = [action for action in actions if isinstance(action, str) and action in ALLOWED_ACTIONS]
             if picked:
                 screen["actions"] = list(dict.fromkeys(picked))
-        try:
-            screen["count"] = max(1, min(MAX_REPOSTS_REQUEST, int(loaded.get("count") or 25)))
-        except (TypeError, ValueError):
-            screen["count"] = 25
         screen["stop_tweet"] = str(loaded.get("stop_tweet") or "")
         try:
             screen["started_at"] = float(loaded.get("started_at") or 0)
@@ -6027,7 +4794,6 @@ def screen_payload() -> dict:
             "chat_pin": screen.get("chat_pin") or "",
             "groups": list(screen.get("groups") or []),
             "group": screen.get("group") or "",
-            "count": screen.get("count") or 25,
             "stop_tweet": screen.get("stop_tweet") or "",
             "actions": list(screen.get("actions") or []),
             "job_id": screen.get("job_id") or "",
@@ -6065,9 +4831,6 @@ def save_screen_endpoint(access_path: str):
     group_name = re.sub(r"\s+", " ", str(data.get("group") or "")).strip()
     if group_name and len(group_name) <= 80:
         fields["group"] = group_name
-    requested_count = parse_requested_count(data.get("count"))
-    if requested_count:
-        fields["count"] = requested_count
     if "stop_tweet" in data:
         fields["stop_tweet"] = str(data.get("stop_tweet") or "").strip()[:300]
     actions = data.get("actions")
@@ -6081,59 +4844,6 @@ def save_screen_endpoint(access_path: str):
     if fields:
         save_screen(**fields)
     return jsonify(success=True)
-
-
-@app.post("/<access_path>/reload")
-def reload_browser_endpoint(access_path: str):
-    if not hmac.compare_digest(access_path, ACCESS_PATH):
-        abort(404)
-    data = request.get_json(silent=True) or {}
-    if not csrf_ok(data):
-        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
-    auth_token = str(data.get("auth_token", "")).strip()
-    if not valid_auth_token(auth_token):
-        return jsonify(success=False, message="أدخل auth_token صالحًا."), 400
-    with jobs_lock:
-        busy = any(job.get("status") == "running" for job in jobs.values())
-    if busy:
-        return jsonify(success=False, message="هناك مهمة تعمل الآن. انتظر اكتمالها ثم حدّث."), 409
-    try:
-        url = browser_hub.reload_open_page()
-    except Exception:
-        return jsonify(success=False, message="تعذّر تحديث صفحة المتصفح."), 502
-    if not url:
-        return jsonify(success=False, message="لا يوجد متصفح مفتوح لتحديثه: كل مهمة تفتح متصفحها الخاص وتغلقه عند انتهائها.")
-    return jsonify(success=True, message="تم تحديث صفحة متصفح السكربت.")
-
-
-@app.post("/<access_path>/prepare")
-def prepare_endpoint(access_path: str):
-    if not hmac.compare_digest(access_path, ACCESS_PATH):
-        abort(404)
-    data = request.get_json(silent=True) or {}
-    if not csrf_ok(data):
-        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
-    auth_token = str(data.get("auth_token", "")).strip()
-    pin = str(data.get("chat_pin", "")).strip()
-    if not valid_auth_token(auth_token):
-        return jsonify(success=False, message="أدخل auth_token صالحًا."), 400
-    if not valid_chat_pin(pin):
-        return jsonify(success=False, message="رمز الدردشة يجب أن يكون من ٤ إلى ٨ أرقام."), 400
-    with jobs_lock:
-        busy = any(job.get("status") == "running" for job in jobs.values())
-    if busy:
-        return jsonify(success=False, message="هناك مهمة تعمل الآن. انتظر اكتمالها."), 409
-    result = prepare_chat(auth_token, pin)
-    if not result.get("ok"):
-        return jsonify(success=False, message=result.get("message") or "تعذّرت التهيئة.", groups=[])
-    names = result.get("groups") or []
-    current_group = ""
-    with screen_lock:
-        current_group = str(screen.get("group") or "")
-    if names and current_group not in names:
-        current_group = ""
-    save_screen(auth_token=auth_token, chat_pin=pin, groups=names or screen.get("groups") or [], group=current_group)
-    return jsonify(success=True, groups=names, rows=result.get("rows") or 0, message=result.get("message") or "تمت التهيئة.")
 
 
 @app.post("/<access_path>/groups")
@@ -6180,7 +4890,6 @@ def group_run_endpoint(access_path: str):
     group_name = re.sub(r"\s+", " ", str(data.get("group", ""))).strip()
     stop_raw = str(data.get("stop_tweet") or "").strip()
     stop_id = extract_status_id(stop_raw) if stop_raw else ""
-    requested_count = parse_requested_count(data.get("count"))
     requested_actions = data.get("actions")
     if not valid_auth_token(auth_token):
         return jsonify(success=False, message="أدخل auth_token صالحًا."), 400
@@ -6225,7 +4934,6 @@ def group_run_endpoint(access_path: str):
         auth_token=auth_token,
         chat_pin=pin,
         group=group_name,
-        count=requested_count,
         stop_tweet=stop_raw,
         actions=requested_actions,
         job_id=job_id,
@@ -6300,88 +5008,6 @@ def stop_job_endpoint(access_path: str):
         job["updated_at"] = time.time()
         persist_jobs_unlocked()
     return jsonify(success=True, message="جارٍ إيقاف التنفيذ.")
-
-
-@app.post("/<access_path>/reposts")
-def preview_actions_endpoint(access_path: str):
-    if not hmac.compare_digest(access_path, ACCESS_PATH):
-        abort(404)
-    data = request.get_json(silent=True) or {}
-    if not csrf_ok(data):
-        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
-    if not allow_attempt(request.remote_addr or "unknown"):
-        return jsonify(success=False, message="تجاوزت عدد المحاولات المسموح به مؤقتًا. انتظر قليلًا ثم أعد المحاولة."), 429
-    auth_token = str(data.get("auth_token", "")).strip()
-    username = normalize_username(str(data.get("username", "")))
-    requested_count = parse_requested_count(data.get("count"))
-    requested_actions = data.get("actions")
-    if not valid_auth_token(auth_token):
-        return jsonify(success=False, message="أدخل auth_token صالحًا."), 400
-    if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", username):
-        return jsonify(success=False, message="اسم المستخدم غير صالح. أدخل اسم X فقط، مع أو دون @."), 400
-    if requested_count is None or not 1 <= requested_count <= MAX_REPOSTS_REQUEST:
-        return jsonify(success=False, message=f"عدد المنشورات يجب أن يكون عددًا صحيحًا من 1 إلى {MAX_REPOSTS_REQUEST}."), 400
-    if not isinstance(requested_actions, list) or not requested_actions or any(not isinstance(action, str) or action not in ALLOWED_ACTIONS for action in requested_actions):
-        return jsonify(success=False, message="اختر إجراء واحدًا على الأقل من الإجراءات المتاحة."), 400
-    requested_actions = list(dict.fromkeys(requested_actions))
-    owner = session.get("csrf_token", "")
-    client_id = request_client_id()
-    job_id, job_key = begin_job(owner, client_id, requested_count, "login", "يبدأ التحقق ثم التمرير…", "preview", username)
-    threading.Thread(
-        target=run_preview_job,
-        args=(job_id, auth_token, username, requested_count, requested_actions, owner, client_id),
-        daemon=True,
-    ).start()
-    return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأت المعاينة.")
-
-
-@app.post("/<access_path>/execute-actions")
-def execute_actions_endpoint(access_path: str):
-    if not hmac.compare_digest(access_path, ACCESS_PATH):
-        abort(404)
-    data = request.get_json(silent=True) or {}
-    if not csrf_ok(data):
-        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
-    if not allow_attempt(request.remote_addr or "unknown"):
-        return jsonify(success=False, message="تجاوزت عدد المحاولات المسموح به مؤقتًا. انتظر قليلًا ثم أعد المحاولة."), 429
-    auth_token = str(data.get("auth_token", "")).strip()
-    preview_id = str(data.get("preview_id", ""))
-    if not valid_auth_token(auth_token):
-        return jsonify(success=False, message="أدخل auth_token صالحًا."), 400
-    client_id = request_client_id()
-    csrf_token = session.get("csrf_token", "")
-    with preview_lock:
-        preview = pending_previews.get(preview_id)
-        if preview and time.monotonic() - preview["created"] > PREVIEW_TTL_SECONDS:
-            pending_previews.pop(preview_id, None)
-            preview = None
-        elif preview and not (
-            preview.get("owner") == csrf_token or (bool(client_id) and preview.get("client_id") == client_id)
-        ):
-            preview = None
-        if preview and not hmac.compare_digest(preview["token_digest"], hashlib.sha256(auth_token.encode("utf-8")).hexdigest()):
-            return jsonify(success=False, message="رمز الدخول الحالي لا يطابق الرمز المستخدم للمعاينة. أعد المعاينة بالتوكن الصحيح."), 400
-        gemini_api_key = str(data.get("gemini_api_key") or "").strip()
-        gemini_model = normalize_gemini_model(str(data.get("gemini_model") or ""))
-        if preview and "comment" in (preview.get("actions") or []):
-            if not gemini_api_key:
-                gemini_api_key = saved_gemini.get("api_key") or ""
-            if not gemini_model:
-                gemini_model = normalize_gemini_model(saved_gemini.get("model") or "")
-            if not valid_gemini_key(gemini_api_key) or not gemini_model:
-                return jsonify(success=False, message="أدخل مفتاح Gemini واسم نموذج صالح قبل تنفيذ التعليقات."), 400
-            remember_gemini(gemini_api_key, gemini_model or "")
-        if preview:
-            pending_previews.pop(preview_id, None)
-    if not preview:
-        return jsonify(success=False, message="انتهت صلاحية المعاينة أو استُخدمت من قبل. أعد البحث لعمل معاينة جديدة."), 400
-    job_id, job_key = begin_job(csrf_token, client_id, len(preview["items"]), "login", "التحقق من الجلسة قبل التنفيذ…", "execute", preview["username"])
-    threading.Thread(
-        target=run_execute_job,
-        args=(job_id, auth_token, preview, gemini_api_key, gemini_model or ""),
-        daemon=True,
-    ).start()
-    return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأ التنفيذ.")
 
 
 @app.get("/<access_path>/jobs/<job_id>")
@@ -6497,23 +5123,6 @@ def delete_session_endpoint(access_path: str):
             save_screen(auth_token="")
         delete_profile(removed["token"])
     return jsonify(success=True, message="حُذفت الجلسة.")
-
-
-@app.post("/<access_path>/cancel-preview")
-def cancel_preview_endpoint(access_path: str):
-    if not hmac.compare_digest(access_path, ACCESS_PATH):
-        abort(404)
-    data = request.get_json(silent=True) or {}
-    if not csrf_ok(data):
-        return jsonify(success=False, message="انتهت صلاحية الصفحة."), 400
-    preview_id = str(data.get("preview_id", ""))
-    client_id = request_client_id()
-    csrf_token = session.get("csrf_token", "")
-    with preview_lock:
-        preview = pending_previews.get(preview_id)
-        if preview and (preview.get("owner") == csrf_token or (bool(client_id) and preview.get("client_id") == client_id)):
-            pending_previews.pop(preview_id, None)
-    return jsonify(success=True, message="أُلغيت المعاينة ولم تُنفّذ أي إجراءات.")
 
 
 load_sessions()
