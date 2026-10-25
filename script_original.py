@@ -1041,7 +1041,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const watch = async () => {
       try {
         for (;;) {
-          const response = await fetch(apiRoot + "/jobs/" + encodeURIComponent(task.id), {
+          const response = await fetch(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "?light=1", {
             headers: {"X-CSRF-Token": csrf, "X-Job-Key": task.key, "X-Client-Id": clientId()},
             cache: "no-store"
           });
@@ -5543,10 +5543,11 @@ def verify_login_endpoint(access_path: str):
         auth_token = ""
 
 
-def write_private_json(path: Path, payload: dict) -> None:
+def write_private_json(path: Path, payload: dict, compact: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) if compact else json.dumps(payload, ensure_ascii=False, indent=2)
+    temporary.write_text(text, encoding="utf-8")
     try:
         os.chmod(temporary, 0o600)
     except OSError:
@@ -5685,8 +5686,29 @@ def job_record(job: dict) -> dict:
     return {field: job.get(field) for field in JOB_FIELDS}
 
 
+# Task progress is saved to jobs.json at most this often; a change of status is saved at once.
+JOBS_SAVE_EVERY = 2.0
+jobs_saved_at = 0.0
+jobs_unsaved = False
+
+
 def persist_jobs_unlocked() -> None:
-    write_private_json(JOBS_PATH, {"version": 1, "jobs": {key: job_record(job) for key, job in jobs.items()}})
+    global jobs_saved_at, jobs_unsaved
+    write_private_json(JOBS_PATH, {"version": 1, "jobs": {key: job_record(job) for key, job in jobs.items()}}, compact=True)
+    jobs_saved_at = time.monotonic()
+    jobs_unsaved = False
+
+
+def save_jobs_in_background() -> None:
+    """Write progress that was held back by the 2-second limit."""
+    while True:
+        time.sleep(JOBS_SAVE_EVERY)
+        try:
+            with jobs_lock:
+                if jobs_unsaved:
+                    persist_jobs_unlocked()
+        except Exception:
+            pass
 
 
 def mark_job_interrupted(job: dict) -> None:
@@ -5748,13 +5770,17 @@ def prune_jobs() -> None:
 
 
 def publish_job(job_id: str, **fields) -> None:
+    global jobs_unsaved
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
             return
         job.update(fields)
         job["updated_at"] = time.time()
-        persist_jobs_unlocked()
+        if "status" in fields or time.monotonic() - jobs_saved_at >= JOBS_SAVE_EVERY:
+            persist_jobs_unlocked()
+        else:
+            jobs_unsaved = True
 
 
 def begin_job(owner: str, client_id: str, requested: int, phase: str, message: str, kind: str, username: str) -> tuple[str, str]:
@@ -5795,7 +5821,9 @@ def job_key_matches(job: dict, presented: str) -> bool:
     return bool(expected) and hmac.compare_digest(digest, expected)
 
 
-def public_job(job: dict) -> dict:
+def public_job(job: dict, light: bool = False) -> dict:
+    """light: while the task runs, leave out its tweet and result lists (the page only
+    needs the counts and message then; the full lists are sent once it finishes)."""
     payload = {
         "status": job["status"],
         "phase": job.get("phase") or "collect",
@@ -5812,6 +5840,9 @@ def public_job(job: dict) -> dict:
         "results": job.get("results") or [],
         "resumable": bool(job.get("resumable")) and job.get("status") == "done",
     }
+    if light and job["status"] == "running":
+        payload["items"] = []
+        payload["results"] = []
     if job["status"] != "running":
         preview_id = job.get("preview_id")
         with preview_lock:
@@ -5983,7 +6014,7 @@ def running_job_rows(limit: int = 5) -> list[dict]:
     running.sort(key=lambda pair: float(pair[1].get("created_at") or 0), reverse=True)
     rows = []
     for job_id, job in running[:limit]:
-        row = public_job(job)
+        row = public_job(job, light=True)
         row["id"] = job_id
         rows.append(row)
     return rows
@@ -6006,7 +6037,7 @@ def screen_payload() -> dict:
     job_id = payload["job_id"]
     with jobs_lock:
         job = jobs.get(job_id)
-        payload["job"] = public_job(job) if job else None
+        payload["job"] = public_job(job, light=True) if job else None
     payload["running_jobs"] = running_job_rows()
     payload["success"] = True
     return payload
@@ -6362,13 +6393,13 @@ def job_status(access_path: str, job_id: str):
         if not job:
             return jsonify(success=False, message="لا توجد عملية بهذا المعرّف."), 404
         if job_key_matches(job, request.headers.get("X-Job-Key", "")):
-            return jsonify(public_job(job))
+            return jsonify(public_job(job, light=request.args.get("light") == "1"))
         if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
             return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
         owner_ok = bool(job.get("owner")) and job.get("owner") == session.get("csrf_token", "")
         if not owner_ok:
             return jsonify(success=False, message="لا توجد عملية بهذا المعرّف."), 404
-        return jsonify(public_job(job))
+        return jsonify(public_job(job, light=request.args.get("light") == "1"))
 
 
 @app.get("/<access_path>/sessions")
@@ -6491,6 +6522,7 @@ load_done_history()
 load_gemini()
 load_gemini_usage()
 load_jobs()
+threading.Thread(target=save_jobs_in_background, name="jobs-saver", daemon=True).start()
 load_screen()
 atexit.register(shutdown_jobs)
 
