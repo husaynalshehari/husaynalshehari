@@ -660,8 +660,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <div class="group-wait-row">
             <label class="wait-groups" for="tweet-wait-on">
               <input id="tweet-wait-on" type="checkbox">
-              انتظار بين كل تغريدة
-              <input id="tweet-wait-sec" class="wait-sec" type="number" min="0" max="120" step="1" value="2" inputmode="numeric" aria-label="ثواني الانتظار بين كل تغريدة">
+              انتظار بين كل تغريدة من
+              <input id="tweet-wait-min" class="wait-sec" type="number" min="0" max="120" step="1" value="1" inputmode="numeric" aria-label="أقل انتظار بين التغريدات بالثواني">
+              إلى
+              <input id="tweet-wait-max" class="wait-sec" type="number" min="0" max="120" step="1" value="4" inputmode="numeric" aria-label="أكثر انتظار بين التغريدات بالثواني">
               ث
             </label>
           </div>
@@ -794,7 +796,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const groupWaitOn = document.getElementById("group-wait-on");
   const groupWaitSec = document.getElementById("group-wait-sec");
   const tweetWaitOn = document.getElementById("tweet-wait-on");
-  const tweetWaitSec = document.getElementById("tweet-wait-sec");
+  const tweetWaitMin = document.getElementById("tweet-wait-min");
+  const tweetWaitMax = document.getElementById("tweet-wait-max");
   const accountProfilesOn = document.getElementById("account-profiles-on");
   const accountProfiles = document.getElementById("account-profiles");
   function rememberWaits() {
@@ -802,7 +805,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       localStorage.setItem("x_wait_settings", JSON.stringify({
         groupsOn: waitGroups.checked, groupsSec: waitGroupsSec.value,
         groupOn: groupWaitOn.checked, groupSec: groupWaitSec.value,
-        tweetOn: tweetWaitOn.checked, tweetSec: tweetWaitSec.value,
+        tweetOn: tweetWaitOn.checked, tweetMin: tweetWaitMin.value, tweetMax: tweetWaitMax.value,
         profilesOn: accountProfilesOn.checked, profiles: accountProfiles.value
       }));
     } catch (_) {}
@@ -815,12 +818,13 @@ EMBEDDED_PAGE = r'''<!doctype html>
       groupWaitOn.checked = !!savedWaits.groupOn;
       if (savedWaits.groupSec !== undefined && savedWaits.groupSec !== "") groupWaitSec.value = savedWaits.groupSec;
       tweetWaitOn.checked = !!savedWaits.tweetOn;
-      if (savedWaits.tweetSec !== undefined && savedWaits.tweetSec !== "") tweetWaitSec.value = savedWaits.tweetSec;
+      if (savedWaits.tweetMin !== undefined && savedWaits.tweetMin !== "") tweetWaitMin.value = savedWaits.tweetMin;
+      if (savedWaits.tweetMax !== undefined && savedWaits.tweetMax !== "") tweetWaitMax.value = savedWaits.tweetMax;
       accountProfilesOn.checked = !!savedWaits.profilesOn;
       if (savedWaits.profiles) accountProfiles.value = savedWaits.profiles;
     }
   } catch (_) {}
-  [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec, tweetWaitOn, tweetWaitSec, accountProfilesOn, accountProfiles].forEach((node) => node.addEventListener("change", rememberWaits));
+  [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec, tweetWaitOn, tweetWaitMin, tweetWaitMax, accountProfilesOn, accountProfiles].forEach((node) => node.addEventListener("change", rememberWaits));
   function secondsFrom(field, min, max, fallback) {
     const value = Number.parseInt(field.value, 10);
     if (!Number.isInteger(value)) return fallback;
@@ -1462,7 +1466,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
         gemini_api_key: geminiKey.value.trim(),
         gemini_model: geminiModel.value.trim(),
         group_wait: groupWaitOn.checked ? secondsFrom(groupWaitSec, 0, 300, 8) : null,
-        tweet_wait: tweetWaitOn.checked ? secondsFrom(tweetWaitSec, 0, 120, 2) : 0,
+        tweet_wait_min: tweetWaitOn.checked ? secondsFrom(tweetWaitMin, 0, 120, 1) : 0,
+        tweet_wait_max: tweetWaitOn.checked ? secondsFrom(tweetWaitMax, 0, 120, 4) : 0,
         account_profiles: accountProfilesOn.checked ? secondsFrom(accountProfiles, 1, 5, 2) : 1
       });
       if (!started.success || !started.job_id || !started.job_key) {
@@ -2723,9 +2728,9 @@ def resolve_comment_target(page, path: str, needs_parent: bool) -> tuple[str, ob
     return path, page.locator('article[data-testid="tweet"]').first
 
 
-def wait_between_tweets(page, seconds: float, should_stop=None) -> None:
-    """The pause set on the page between tweets. Stopping the task cuts it short."""
-    end = time.monotonic() + seconds
+def wait_between_tweets(page, wait_range: tuple[float, float], should_stop=None) -> None:
+    """A random pause within the range set on the page between tweets. Stopping the task cuts it short."""
+    end = time.monotonic() + random.uniform(*wait_range)
     while not (should_stop and should_stop()):
         left = end - time.monotonic()
         if left <= 0:
@@ -2733,7 +2738,7 @@ def wait_between_tweets(page, seconds: float, should_stop=None) -> None:
         page.wait_for_timeout(min(500.0, left * 1000))
 
 
-def execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress=None, should_stop=None, on_snapshot=None, account: str = "", wait_s: float = 0) -> list[dict]:
+def execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress=None, should_stop=None, on_snapshot=None, account: str = "", wait_range: tuple[float, float] = (0, 0)) -> list[dict]:
     allow_media(page)
     results: list[dict] = []
     plain = [action for action in actions if action != "comment"]
@@ -2763,9 +2768,9 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
             if on_progress:
                 on_progress(index + 1, total, "act")
             continue
-        # The wait set between tweets, from the second tweet that is opened on.
-        if opened_one and wait_s > 0:
-            wait_between_tweets(page, wait_s, should_stop)
+        # A random wait within the range set between tweets, from the second tweet that is opened on.
+        if opened_one and wait_range[1] > 0:
+            wait_between_tweets(page, wait_range, should_stop)
             if should_stop and should_stop():
                 break
         opened_one = True
@@ -4135,7 +4140,7 @@ def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None
             pass
 
 
-def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "", wait_s: float = 0) -> list[dict]:
+def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "", wait_range: tuple[float, float] = (0, 0)) -> list[dict]:
     results: list[dict] = []
     total = len(items)
     restarts_used = 0
@@ -4156,9 +4161,9 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             if on_progress:
                 on_progress(index + 1, total, "act")
             continue
-        # The wait set between tweets, from the second tweet that is opened on.
-        if opened_one and wait_s > 0:
-            wait_between_tweets(page, wait_s, should_stop)
+        # A random wait within the range set between tweets, from the second tweet that is opened on.
+        if opened_one and wait_range[1] > 0:
+            wait_between_tweets(page, wait_range, should_stop)
             if should_stop and should_stop():
                 break
         opened_one = True
@@ -4287,7 +4292,7 @@ def job_cancelled(job_id: str) -> bool:
 DEFAULT_GROUP_WAIT_SECONDS = 8
 
 
-def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, tweet_wait_s: int = 0) -> None:
+def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, tweet_wait: tuple[int, int] = (0, 0)) -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
             raise JobStopped
@@ -4303,7 +4308,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
         else:
             publish_job(job_id, phase=phase, message="فتح الدردشة والقروب…")
 
-    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, tweet_wait_s)
+    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, tweet_wait)
 
     def work(page):
         try:
@@ -4377,10 +4382,10 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if "comment" in actions:
                     fresh = execute_comment_actions(
                         page, pending, actions, gemini_api_key, gemini_model, on_act,
-                        lambda: job_cancelled(job_id), snapshot, profile_key(auth_token), tweet_wait_s,
+                        lambda: job_cancelled(job_id), snapshot, profile_key(auth_token), tweet_wait,
                     )
                 else:
-                    fresh = visit_and_apply(page, pending, actions, on_act, snapshot, lambda: job_cancelled(job_id), profile_key(auth_token), tweet_wait_s)
+                    fresh = visit_and_apply(page, pending, actions, on_act, snapshot, lambda: job_cancelled(job_id), profile_key(auth_token), tweet_wait)
                 results = prefix + fresh
             if job_cancelled(job_id):
                 publish_job(
@@ -5011,8 +5016,9 @@ def group_run_endpoint(access_path: str):
             group_wait_s = max(0, min(300, parsed_wait))
     profiles_per_account = parse_requested_count(data.get("account_profiles")) or 1
     profiles_per_account = max(1, min(MAX_PROFILES_PER_ACCOUNT, profiles_per_account))
-    tweet_wait_s = parse_requested_count(data.get("tweet_wait")) or 0
-    tweet_wait_s = max(0, min(120, tweet_wait_s))
+    wait_low = max(0, min(120, parse_requested_count(data.get("tweet_wait_min")) or 0))
+    wait_high = max(0, min(120, parse_requested_count(data.get("tweet_wait_max")) or 0))
+    tweet_wait = (min(wait_low, wait_high), max(wait_low, wait_high))
     requested_actions = list(dict.fromkeys(requested_actions))
     gemini_api_key = str(data.get("gemini_api_key") or "").strip()
     gemini_model = normalize_gemini_model(str(data.get("gemini_model") or ""))
@@ -5043,7 +5049,7 @@ def group_run_endpoint(access_path: str):
     )
     threading.Thread(
         target=run_group_job,
-        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, tweet_wait_s),
+        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, tweet_wait),
         daemon=True,
     ).start()
     return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأ التنفيذ.")
