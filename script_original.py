@@ -639,9 +639,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
                    autocomplete="off" spellcheck="false" placeholder="٤ أرقام" aria-label="رمز الدردشة">
             <button id="groups-button" class="btn btn-ghost" type="button">عرض القروبات</button>
             <label class="wait-groups" for="wait-groups">
-              <input id="wait-groups" type="checkbox">
+              <input id="wait-groups" type="checkbox" checked>
               انتظار
-              <input id="wait-groups-sec" class="wait-sec" type="number" min="1" max="120" step="1" value="10" inputmode="numeric" aria-label="ثواني الانتظار قبل التقاط القروبات">
+              <input id="wait-groups-sec" class="wait-sec" type="number" min="1" max="120" step="1" value="30" inputmode="numeric" aria-label="ثواني الانتظار قبل التقاط القروبات">
               ث
             </label>
           </div>
@@ -651,9 +651,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
           </div>
           <div class="group-wait-row">
             <label class="wait-groups" for="group-wait-on">
-              <input id="group-wait-on" type="checkbox">
+              <input id="group-wait-on" type="checkbox" checked>
               انتظار داخل القروب قبل التمرير
-              <input id="group-wait-sec" class="wait-sec" type="number" min="0" max="300" step="1" value="8" inputmode="numeric" aria-label="ثواني الانتظار داخل القروب">
+              <input id="group-wait-sec" class="wait-sec" type="number" min="0" max="300" step="1" value="30" inputmode="numeric" aria-label="ثواني الانتظار داخل القروب">
               ث
             </label>
           </div>
@@ -661,9 +661,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <label class="wait-groups" for="tweet-wait-on">
               <input id="tweet-wait-on" type="checkbox">
               انتظار بين كل تغريدة من
-              <input id="tweet-wait-min" class="wait-sec" type="number" min="0" max="120" step="1" value="1" inputmode="numeric" aria-label="أقل انتظار بين التغريدات بالثواني">
+              <input id="tweet-wait-min" class="wait-sec" type="number" min="0" max="120" step="1" value="0" inputmode="numeric" aria-label="أقل انتظار بين التغريدات بالثواني">
               إلى
-              <input id="tweet-wait-max" class="wait-sec" type="number" min="0" max="120" step="1" value="4" inputmode="numeric" aria-label="أكثر انتظار بين التغريدات بالثواني">
+              <input id="tweet-wait-max" class="wait-sec" type="number" min="0" max="120" step="1" value="0" inputmode="numeric" aria-label="أكثر انتظار بين التغريدات بالثواني">
               ث
             </label>
           </div>
@@ -671,7 +671,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <label class="wait-groups" for="account-profiles-on">
               <input id="account-profiles-on" type="checkbox">
               عدد المهام في نفس الوقت لكل حساب
-              <input id="account-profiles" class="wait-sec" type="number" min="1" max="5" step="1" value="2" inputmode="numeric" aria-label="عدد المهام لكل حساب">
+              <input id="account-profiles" class="wait-sec" type="number" min="0" max="5" step="1" value="0" inputmode="numeric" aria-label="عدد المهام لكل حساب">
             </label>
           </div>
           <div class="stop-row">
@@ -802,7 +802,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const accountProfiles = document.getElementById("account-profiles");
   function rememberWaits() {
     try {
-      localStorage.setItem("x_wait_settings", JSON.stringify({
+      localStorage.setItem("x_wait_settings_v2", JSON.stringify({
         groupsOn: waitGroups.checked, groupsSec: waitGroupsSec.value,
         groupOn: groupWaitOn.checked, groupSec: groupWaitSec.value,
         tweetOn: tweetWaitOn.checked, tweetMin: tweetWaitMin.value, tweetMax: tweetWaitMax.value,
@@ -811,7 +811,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
     } catch (_) {}
   }
   try {
-    const savedWaits = JSON.parse(localStorage.getItem("x_wait_settings") || "null");
+    // "_v2": choices saved before the current defaults (30 s waits ticked) are not restored.
+    const savedWaits = JSON.parse(localStorage.getItem("x_wait_settings_v2") || "null");
     if (savedWaits) {
       waitGroups.checked = !!savedWaits.groupsOn;
       if (savedWaits.groupsSec) waitGroupsSec.value = savedWaits.groupsSec;
@@ -1417,7 +1418,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     if (!/^\d{4,8}$/.test(pin)) { showNotice("رمز الدردشة ٤ إلى ٨ أرقام.", false); pinField.focus(); return; }
     groupsButton.disabled = true;
     const settle = !!waitGroups.checked;
-    const settleSeconds = secondsFrom(waitGroupsSec, 1, 120, 10);
+    const settleSeconds = secondsFrom(waitGroupsSec, 1, 120, 30);
     showNotice(settle ? "جارٍ فتح الدردشة ثم الانتظار " + settleSeconds + " ث قبل التقاط القروبات…" : "جارٍ فتح الدردشة وعرض القروبات…", true);
     try {
       const data = await postJson("/groups", {auth_token: authToken, chat_pin: pin, wait: settle, wait_seconds: settleSeconds});
@@ -1465,10 +1466,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
         actions,
         gemini_api_key: geminiKey.value.trim(),
         gemini_model: geminiModel.value.trim(),
-        group_wait: groupWaitOn.checked ? secondsFrom(groupWaitSec, 0, 300, 8) : null,
-        tweet_wait_min: tweetWaitOn.checked ? secondsFrom(tweetWaitMin, 0, 120, 1) : 0,
-        tweet_wait_max: tweetWaitOn.checked ? secondsFrom(tweetWaitMax, 0, 120, 4) : 0,
-        account_profiles: accountProfilesOn.checked ? secondsFrom(accountProfiles, 1, 5, 2) : 1
+        group_wait: groupWaitOn.checked ? secondsFrom(groupWaitSec, 0, 300, 30) : null,
+        tweet_wait_min: tweetWaitOn.checked ? secondsFrom(tweetWaitMin, 0, 120, 0) : 0,
+        tweet_wait_max: tweetWaitOn.checked ? secondsFrom(tweetWaitMax, 0, 120, 0) : 0,
+        account_profiles: accountProfilesOn.checked ? secondsFrom(accountProfiles, 1, 5, 1) : 1
       });
       if (!started.success || !started.job_id || !started.job_key) {
         showNotice(started.message || "تعذّر بدء التنفيذ.", false);
