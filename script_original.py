@@ -235,7 +235,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       line-height: 1.2;
       font-weight: 600;
     }
-    .steps {
+    .counts {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 6px;
@@ -243,37 +243,23 @@ EMBEDDED_PAGE = r'''<!doctype html>
       padding: 0;
       list-style: none;
     }
-    .steps li {
+    .counts li {
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
       gap: 2px;
       min-width: 0;
-      padding: 4px 2px;
+      padding: 5px 2px;
       border-radius: 8px;
-      background: rgba(255, 253, 248, 0.72);
+      background: var(--sheet);
+      box-shadow: inset 0 0 0 1px var(--line);
       color: var(--muted);
-      font-size: 10px;
+      font-size: 11px;
       font-weight: 500;
       text-align: center;
-      line-height: 1.15;
+      line-height: 1.2;
     }
-    .steps li:not(:last-child)::after { content: none; }
-    .steps .n {
-      width: 18px;
-      height: 18px;
-      display: grid;
-      place-items: center;
-      border-radius: 99px;
-      font-size: 11px;
-      font-variant-numeric: tabular-nums;
-      box-shadow: inset 0 0 0 1px var(--line);
-    }
-    .steps li.is-current { color: var(--ink); font-weight: 600; background: var(--sheet); }
-    .steps li.is-current .n { background: var(--ink); color: var(--sheet); box-shadow: none; }
-    .steps li.is-done { color: var(--pine); }
-    .steps li.is-done .n { background: var(--pine); color: var(--on-pine); box-shadow: none; }
+    .counts b { color: var(--ink); font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
     .lede, .block-head p, .choice-copy, .gemini-fields .hint, .footnote { display: none; }
     .sheet {
@@ -570,21 +556,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
         padding-top: 36px;
       }
       .mast { flex-direction: row; justify-content: space-between; align-items: flex-end; gap: 24px; }
-      .steps { display: flex; flex-wrap: wrap; width: auto; background: transparent; gap: 0; }
-      .steps li {
-        flex-direction: row;
-        width: auto;
-        padding: 0;
-        background: transparent;
-        font-size: 13px;
-      }
-      .steps li:not(:last-child)::after {
-        content: "";
-        width: 14px;
-        height: 1px;
-        margin-inline: 8px;
-        background: var(--line);
-      }
+      .counts { min-width: 340px; }
       h1 { font-size: 28px; }
       .lede { font-size: 14px; max-width: 62ch; }
       .sheet { border-radius: 18px; padding: 6px; }
@@ -611,11 +583,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <h1>تنفيذ على تغريدات القروب</h1>
         </div>
       </div>
-      <ol class="steps" id="steps">
-        <li data-step="1" class="is-current"><span class="n">١</span> الجلسة</li>
-        <li data-step="2"><span class="n">٢</span> القروب</li>
-        <li data-step="3"><span class="n">٣</span> الجمع</li>
-        <li data-step="4"><span class="n">٤</span> التنفيذ</li>
+      <ol class="counts" aria-label="الإجراءات الناجحة">
+        <li>الرتويت <b id="count-repost">0</b></li>
+        <li>الإعجاب <b id="count-like">0</b></li>
+        <li>المرجعية <b id="count-bookmark">0</b></li>
+        <li>التعليقات <b id="count-comment">0</b></li>
       </ol>
     </header>
     <p class="lede">يُفتح تبويب إعادات النشر ويُمرَّر حتى يكتمل العدد أو ينتهي الخط. ترى حالة كل إجراء، ثم تقرر. لا يُمس الحساب قبل «تأكيد التنفيذ».</p>
@@ -1057,6 +1029,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             if (Array.isArray(data.results) && data.results.length) renderResults(data);
             // A task stopped with a retry button stays in the saved task list so it is still there after a reload.
             if (!data.resumable) writeTasks(readTasks().filter((row) => row.id !== task.id));
+            loadActionCounts();
             break;
           }
           await new Promise((resolve) => setTimeout(resolve, 700));
@@ -1168,12 +1141,16 @@ EMBEDDED_PAGE = r'''<!doctype html>
     } catch (_) {}
   }
 
-  function setStep(current) {
-    document.querySelectorAll("#steps li").forEach((item) => {
-      const step = Number(item.dataset.step);
-      item.classList.toggle("is-current", step === current);
-      item.classList.toggle("is-done", step < current);
-    });
+  // Successful actions of all tasks so far (kept on the server), shown at the top of the page.
+  async function loadActionCounts() {
+    try {
+      const response = await fetch(apiRoot + "/stats", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
+      const data = await response.json();
+      if (!response.ok || !data.success) return;
+      ["repost", "like", "bookmark", "comment"].forEach((key) => {
+        document.getElementById("count-" + key).textContent = Number(data.counts[key] || 0).toLocaleString("en-US");
+      });
+    } catch (_) {}
   }
 
   function reveal(node) {
@@ -1272,7 +1249,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     progressNote.textContent = phase === "act"
       ? "مضى " + clock + ". الحالات المفعّلة مسبقًا تُتجاوز."
       : "مضى " + clock + ". لا يُنفَّذ أي إجراء خلال هذه المرحلة.";
-    setStep(phase === "act" ? 4 : 2);
   }
 
   function finishTrackedJob(data) {
@@ -1283,12 +1259,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       progressNote.textContent = "آخر حالة قبل توقف السكربت. لن تُستكمل العملية تلقائيًا.";
     }
     const hasResults = Array.isArray(data.results) && data.results.length > 0;
-    if (data.kind === "execute") {
-      if (hasResults) renderResults(data);
-      else if (data.status !== "interrupted") setStep(4);
-    } else if (!data.success) {
-      setStep(1);
-    }
+    if (data.kind === "execute" && hasResults) renderResults(data);
     loadSessions();
   }
 
@@ -1334,7 +1305,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     noReposts.hidden = rows.length > 0;
     repostResults.hidden = false;
     reveal(repostResults);
-    setStep(4);
   }
 
   toggleToken.addEventListener("click", () => {
@@ -1390,6 +1360,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
   syncGemini();
   loadGeminiUsage();
   setInterval(loadGeminiUsage, 15000);
+  loadActionCounts();
+  setInterval(loadActionCounts, 5000);
   // The invisible top-left button: with the password, the comment cost starts again from 0 (the count stays).
   document.getElementById("cost-reset").addEventListener("click", async () => {
     const password = window.prompt("كلمة السر");
@@ -1409,12 +1381,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
     loginButton.disabled = true;
     toggleToken.disabled = true;
     showNotice("جارٍ التحقق من الجلسة…", true);
-    setStep(1);
     try {
       const data = await postJson("/verify-login", {auth_token: authToken});
       showNotice(data.message, data.success);
       if (data.success) {
-        setStep(2);
         showAccount(data.username ? "تم التحقق: هذه الجلسة تخص @" + data.username : "تم التحقق من الدخول، دون قراءة الاسم.");
         await loadSessions();
       }
@@ -1469,7 +1439,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (selectedGroup && !groupNames.includes(selectedGroup)) selectedGroup = "";
       renderGroups();
       showNotice(groupNames.length ? "ظهر " + groupNames.length + " قروب. اختر واحدًا ثم اضغط تنفيذ." : "لم يظهر أي قروب.", groupNames.length > 0);
-      setStep(2);
     } catch (_) {
       showNotice("تعذّر الاتصال أثناء جلب القروبات.", false);
     } finally {
@@ -2906,6 +2875,7 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
         # Save what was done, for the tweet in the group and for the tweet actually replied to.
         for done_id in {status_id, tweet_status_id(result["url"])}:
             remember_done(account, done_id, result["actions"])
+        count_successes(result["actions"])
         results.append(result)
         if on_snapshot:
             on_snapshot(list(results))
@@ -4168,6 +4138,35 @@ def already_done_recently(account: str, status_id: str, actions: list[str]) -> b
         return all(done.get(action, 0) >= cutoff for action in actions)
 
 
+ACTION_COUNTS_PATH = DATA_DIR / "action_counts.json"
+action_counts_lock = threading.Lock()
+action_counts: dict[str, int] = {"repost": 0, "like": 0, "bookmark": 0, "comment": 0}
+
+
+def load_action_counts() -> None:
+    loaded = read_private_json(ACTION_COUNTS_PATH) or {}
+    with action_counts_lock:
+        for action in action_counts:
+            try:
+                action_counts[action] = max(0, int(loaded.get(action) or 0))
+            except (TypeError, ValueError):
+                action_counts[action] = 0
+
+
+def count_successes(outcome: dict[str, str]) -> None:
+    """Add this tweet's successful actions to the totals shown at the top of the page."""
+    done = [action for action, note in (outcome or {}).items() if note == "تم التنفيذ" and action in action_counts]
+    if not done:
+        return
+    with action_counts_lock:
+        for action in done:
+            action_counts[action] += 1
+        try:
+            write_private_json(ACTION_COUNTS_PATH, dict(action_counts))
+        except Exception:
+            pass
+
+
 def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None:
     """Save the actions that are now on for this tweet (done now or already on)."""
     if not account or not status_id:
@@ -4276,6 +4275,7 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
                 raise BrowserClosed() from exc
             result["actions"] = {key: "تعذر تنفيذ الإجراء بعد فتح التغريدة" for key in actions}
         remember_done(account, status_id or tweet_status_id(opened), result["actions"])
+        count_successes(result["actions"])
         results.append(result)
         if on_snapshot:
             on_snapshot(list(results))
@@ -5222,6 +5222,17 @@ def gemini_usage_endpoint(access_path: str):
     )
 
 
+@app.get("/<access_path>/stats")
+def stats_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    with action_counts_lock:
+        counts = dict(action_counts)
+    return jsonify(success=True, counts=counts)
+
+
 @app.post("/<access_path>/gemini-usage/reset")
 def gemini_usage_reset_endpoint(access_path: str):
     if not hmac.compare_digest(access_path, ACCESS_PATH):
@@ -5308,6 +5319,7 @@ load_group_ids()
 load_done_history()
 load_gemini()
 load_gemini_usage()
+load_action_counts()
 load_jobs()
 threading.Thread(target=save_jobs_in_background, name="jobs-saver", daemon=True).start()
 load_screen()
