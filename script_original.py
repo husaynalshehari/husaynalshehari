@@ -293,9 +293,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
       font-weight: 600;
     }
     .hint { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
-    .gemini-usage { display: flex; flex-direction: column; gap: 2px; margin: 10px 0; padding: 8px 10px; border-radius: 10px;
+    .gemini-usage { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0; padding: 8px 10px; border-radius: 10px;
       background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); color: var(--muted); font-size: 12px; line-height: 1.5; }
     .gemini-usage b { color: var(--ink); font-size: 12px; }
+    /* Brown at $0; the page turns it redder as the cost grows, fully red from $10. */
+    .gemini-cost { padding: 1px 8px; border-radius: 999px; background: rgb(139, 69, 19); color: #fff; font-weight: 600; }
     input[type="password"], input[type="text"], input[type="number"] {
       width: 100%;
       min-height: 32px;
@@ -748,7 +750,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <p class="hint">يُحفظ المفتاح واسم النموذج على هذا الخادم بعد أول إدخال، ويظهران تلقائيًا حتى بعد إغلاق الصفحة أو إعادة تشغيل السكربت.</p>
           </div>
           <div id="gemini-usage" class="gemini-usage" aria-live="polite">
-            <span id="gemini-usage-text">التعليقات (0) التكلفة (0.000)</span>
+            <span id="gemini-usage-text">التعليقات (0)</span>
+            <span id="gemini-cost" class="gemini-cost">التكلفة (<bdi id="gemini-cost-value" dir="ltr">$0.000</bdi>)</span>
           </div>
           <button id="reposts-button" class="btn btn-pine btn-wide" type="submit">تنفيذ</button>
         </section>
@@ -854,6 +857,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const geminiKey = document.getElementById("gemini-key");
   const geminiModel = document.getElementById("gemini-model");
   const geminiUsageText = document.getElementById("gemini-usage-text");
+  const geminiCost = document.getElementById("gemini-cost");
+  const geminiCostValue = document.getElementById("gemini-cost-value");
   const editGemini = document.getElementById("edit-gemini");
   function lockGemini(locked) {
     geminiKey.readOnly = locked;
@@ -1199,7 +1204,13 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (!response.ok || !data.success) return;
       const comments = Number(data.comments || 0);
       const total = Number(data.total || 0);
-      geminiUsageText.textContent = "التعليقات (" + comments.toLocaleString("en-US") + ") التكلفة (" + total.toFixed(3) + ")";
+      geminiUsageText.textContent = "التعليقات (" + comments.toLocaleString("en-US") + ")";
+      geminiCostValue.textContent = "$" + total.toFixed(3);
+      // Brown at $0, redder as the cost grows, fully red from $10.
+      const brown = [139, 69, 19];
+      const red = [211, 47, 47];
+      const share = Math.max(0, Math.min(1, total / 10));
+      geminiCost.style.backgroundColor = "rgb(" + brown.map((value, i) => Math.round(value + (red[i] - value) * share)).join(", ") + ")";
     } catch (_) {}
   }
 
