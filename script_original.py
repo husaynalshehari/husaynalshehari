@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import gzip
 import hashlib
 import hmac
 import json
@@ -892,6 +893,18 @@ EMBEDDED_PAGE = r'''<!doctype html>
     localStorage.setItem("x_reposts_tasks", JSON.stringify(rows.slice(0, 12)));
   }
 
+  // A request with no answer in 15 s is dropped so the page can ask again, instead of waiting on
+  // one that was cut while the phone was away or switching networks.
+  async function fetchWithTimeout(url, options, ms = 15000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      return await fetch(url, {...options, signal: controller.signal});
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // Pages opened over plain http (a server IP) have no navigator.clipboard, so fall back to execCommand.
   async function copyText(text) {
     if (navigator.clipboard && window.isSecureContext) {
@@ -948,7 +961,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const loadLinks = async () => {
       linksWanted = false;
       try {
-        const response = await fetch(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "?light=1&links=1", {
+        const response = await fetchWithTimeout(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "?light=1&links=1", {
           headers: {"X-CSRF-Token": csrf, "X-Job-Key": task.key, "X-Client-Id": clientId()},
           cache: "no-store"
         });
@@ -1016,11 +1029,20 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const watch = async () => {
       try {
         for (;;) {
-          const response = await fetch(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "?light=1", {
-            headers: {"X-CSRF-Token": csrf, "X-Job-Key": task.key, "X-Client-Id": clientId()},
-            cache: "no-store"
-          });
-          const data = await response.json();
+          let response;
+          let data;
+          try {
+            response = await fetchWithTimeout(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "?light=1", {
+              headers: {"X-CSRF-Token": csrf, "X-Job-Key": task.key, "X-Client-Id": clientId()},
+              cache: "no-store"
+            });
+            data = await response.json();
+          } catch (_) {
+            // No answer (the phone was away, the network changed): keep trying instead of stopping.
+            card.querySelector(".task-msg").textContent = "انقطع الاتصال لحظيًا. جارٍ إعادة الاتصال…";
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            continue;
+          }
           if (response.status === 404) writeTasks(readTasks().filter((row) => row.id !== task.id));
           if (!response.ok) throw new Error(data.message || "تعذّر متابعة المهمة.");
           paint(data);
@@ -1122,7 +1144,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
 
   async function loadSessions() {
     try {
-      const response = await fetch(apiRoot + "/sessions", {
+      const response = await fetchWithTimeout(apiRoot + "/sessions", {
         headers: {"X-CSRF-Token": csrf, "X-Client-Id": clientId()},
         cache: "no-store"
       });
@@ -1144,7 +1166,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   // Successful actions of all tasks so far (kept on the server), shown at the top of the page.
   async function loadActionCounts() {
     try {
-      const response = await fetch(apiRoot + "/stats", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
+      const response = await fetchWithTimeout(apiRoot + "/stats", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
       const data = await response.json();
       if (!response.ok || !data.success) return;
       ["repost", "like", "bookmark", "comment"].forEach((key) => {
@@ -1176,7 +1198,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   // Total comments written by the model, and their price, read from the server.
   async function loadGeminiUsage() {
     try {
-      const response = await fetch(apiRoot + "/gemini-usage", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
+      const response = await fetchWithTimeout(apiRoot + "/gemini-usage", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
       const data = await response.json();
       if (!response.ok || !data.success) return;
       const comments = Number(data.comments || 0);
@@ -1557,19 +1579,22 @@ EMBEDDED_PAGE = r'''<!doctype html>
   }
 
   async function restoreScreen() {
+    // The saved tasks start showing their progress at once, without waiting for the rest.
+    readTasks().forEach((task) => followTask(task));
     let runningJobs = [];
     let screenJob = null;
-    try {
-      const response = await fetch(apiRoot + "/state", {cache: "no-store"});
-      const data = await response.json();
-      if (response.ok && data && data.success) {
-        applyScreen(data);
-        screenJob = data;
-        runningJobs = Array.isArray(data.running_jobs) ? data.running_jobs : [];
-      }
-    } catch (_) {}
+    for (let attempt = 0; attempt < 2 && !screenJob; attempt += 1) {
+      try {
+        const response = await fetchWithTimeout(apiRoot + "/state", {cache: "no-store"});
+        const data = await response.json();
+        if (response.ok && data && data.success) {
+          applyScreen(data);
+          screenJob = data;
+          runningJobs = Array.isArray(data.running_jobs) ? data.running_jobs : [];
+        }
+      } catch (_) {}
+    }
     await loadSessions();
-    readTasks().forEach((task) => followTask(task));
     runningJobs.slice().reverse().forEach((job) => {
       const same = screenJob && screenJob.job_id === job.id;
       followTask({
@@ -4524,6 +4549,27 @@ def secure_response(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'"
+    return response
+
+
+@app.after_request
+def compress_response(response):
+    """Big answers (a finished task's list, the page itself) go gzipped: a phone loads them in a
+    fraction of the time."""
+    if (
+        response.status_code != 200
+        or response.direct_passthrough
+        or "Content-Encoding" in response.headers
+        or "gzip" not in (request.headers.get("Accept-Encoding") or "").lower()
+        or response.mimetype not in ("application/json", "text/html")
+    ):
+        return response
+    body = response.get_data()
+    if len(body) < 2048:
+        return response
+    response.set_data(gzip.compress(body, compresslevel=5))
+    response.headers["Content-Encoding"] = "gzip"
+    response.vary.add("Accept-Encoding")
     return response
 
 
