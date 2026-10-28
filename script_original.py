@@ -174,6 +174,21 @@ EMBEDDED_PAGE = r'''<!doctype html>
       background: var(--ink);
     }
     [hidden] { display: none !important; }
+    /* Invisible spot in the top-left corner: asks for the password that resets the comment cost. */
+    .cost-reset {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 5;
+      width: 40px;
+      height: 40px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      opacity: 0;
+      cursor: default;
+      -webkit-tap-highlight-color: transparent;
+    }
     button, [role="button"] { cursor: pointer; }
     button:disabled { cursor: wait; }
     :focus-visible { outline: 2px solid rgba(15, 107, 80, 0.4); outline-offset: 2px; }
@@ -584,6 +599,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   </style>
 </head>
 <body>
+  <button id="cost-reset" class="cost-reset" type="button" tabindex="-1" aria-hidden="true"></button>
   <main class="page">
     <header class="mast">
       <div class="brand">
@@ -1363,6 +1379,18 @@ EMBEDDED_PAGE = r'''<!doctype html>
   syncGemini();
   loadGeminiUsage();
   setInterval(loadGeminiUsage, 15000);
+  // The invisible top-left button: with the password, the comment cost starts again from 0 (the count stays).
+  document.getElementById("cost-reset").addEventListener("click", async () => {
+    const password = window.prompt("كلمة السر");
+    if (password === null) return;
+    try {
+      const data = await postJson("/gemini-usage/reset", {password});
+      showNotice(data.message || "تعذّرت إعادة التعيين.", Boolean(data.success));
+      if (data.success) loadGeminiUsage();
+    } catch (_) {
+      showNotice("تعذّر الاتصال أثناء إعادة التعيين.", false);
+    }
+  });
 
   loginButton.addEventListener("click", async () => {
     const authToken = tokenField.value.trim();
@@ -2405,6 +2433,8 @@ def gemini_is_busy(status: int, detail: str) -> bool:
 GEMINI_USAGE_PATH = DATA_DIR / "gemini_usage.json"
 # Price counted for each comment the model writes (shown on the page as the running total).
 GEMINI_PRICE_PER_COMMENT = 0.007
+# Password asked by the page's hidden button that resets the cost (the comment count is kept).
+COST_RESET_PASSWORD = "a1@"
 gemini_usage_lock = threading.Lock()
 gemini_usage: dict = {}
 
@@ -2414,11 +2444,13 @@ def load_gemini_usage() -> None:
     try:
         comments = max(0, int(loaded.get("comments") or 0))
         since = float(loaded.get("since") or 0)
+        # Comments counted in the cost since it was last reset (all of them if it never was).
+        cost_comments = max(0, int(loaded.get("cost_comments", comments) or 0))
     except (TypeError, ValueError):
-        comments, since = 0, 0.0
+        comments, since, cost_comments = 0, 0.0, 0
     with gemini_usage_lock:
         gemini_usage.clear()
-        gemini_usage.update({"comments": comments, "since": since})
+        gemini_usage.update({"comments": comments, "since": since, "cost_comments": cost_comments})
 
 
 def record_comment_generated() -> None:
@@ -2428,9 +2460,17 @@ def record_comment_generated() -> None:
             if not gemini_usage.get("since"):
                 gemini_usage["since"] = time.time()
             gemini_usage["comments"] = int(gemini_usage.get("comments") or 0) + 1
+            gemini_usage["cost_comments"] = int(gemini_usage.get("cost_comments") or 0) + 1
             write_private_json(GEMINI_USAGE_PATH, dict(gemini_usage))
     except Exception:
         pass
+
+
+def reset_gemini_cost() -> None:
+    """Start the cost again from 0; the comment count is kept."""
+    with gemini_usage_lock:
+        gemini_usage["cost_comments"] = 0
+        write_private_json(GEMINI_USAGE_PATH, dict(gemini_usage))
 
 
 def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: str) -> str:
@@ -5160,14 +5200,31 @@ def gemini_usage_endpoint(access_path: str):
         return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
     with gemini_usage_lock:
         comments = int(gemini_usage.get("comments") or 0)
+        cost_comments = int(gemini_usage.get("cost_comments") or 0)
         since = gemini_usage.get("since") or 0
     return jsonify(
         success=True,
         since=since,
         comments=comments,
         price_per_comment=GEMINI_PRICE_PER_COMMENT,
-        total=round(comments * GEMINI_PRICE_PER_COMMENT, 6),
+        total=round(cost_comments * GEMINI_PRICE_PER_COMMENT, 6),
     )
+
+
+@app.post("/<access_path>/gemini-usage/reset")
+def gemini_usage_reset_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    if not allow_attempt("cost-reset:" + (request.remote_addr or "unknown")):
+        return jsonify(success=False, message="محاولات كثيرة. انتظر بضع دقائق ثم أعد المحاولة."), 429
+    password = str(data.get("password") or "")
+    if not hmac.compare_digest(password.encode("utf-8"), COST_RESET_PASSWORD.encode("utf-8")):
+        return jsonify(success=False, message="كلمة السر غير صحيحة."), 403
+    reset_gemini_cost()
+    return jsonify(success=True, message="أُعيد تعيين التكلفة إلى 0. عدد التعليقات كما هو.")
 
 
 @app.post("/<access_path>/gemini")
