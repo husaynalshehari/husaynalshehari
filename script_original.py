@@ -32,7 +32,7 @@ from urllib.parse import quote
 
 from flask import Flask, abort, jsonify, make_response, redirect, render_template_string, request, session
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Page, sync_playwright
 
 app = Flask(__name__)
 app.secret_key = secrets.token_bytes(32)
@@ -422,6 +422,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .task-card .meter { margin-top: 8px; }
     .task-actions { display: flex; flex-wrap: wrap; column-gap: 6px; }
     .task-actions .btn { margin-top: 6px; }
+    .task-view { display: block; width: 100%; height: auto; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; }
     .progress-top h2 { margin: 0; font-size: 16px; font-weight: 600; text-wrap: balance; }
     .progress-top p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
     .progress-figure { text-align: end; flex: 0 0 auto; }
@@ -952,11 +953,49 @@ EMBEDDED_PAGE = r'''<!doctype html>
     taskBoard.hidden = false;
     const card = document.createElement("article");
     card.className = "task-card";
-    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><div class="task-actions"><button class="btn btn-ghost task-stop" type="button">إيقاف هذه المهمة</button><button class="btn btn-ghost task-copy" type="button" hidden>نسخ التغريدات</button><button class="btn task-retry" type="button" hidden>إعادة المحاولة</button></div>';
+    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><div class="task-actions"><button class="btn btn-ghost task-stop" type="button">إيقاف هذه المهمة</button><button class="btn btn-ghost task-watch" type="button" hidden>مراقبة</button><button class="btn btn-ghost task-copy" type="button" hidden>نسخ التغريدات</button><button class="btn task-retry" type="button" hidden>إعادة المحاولة</button></div><p class="task-view-note" hidden>جارٍ تجهيز صورة المتصفح…</p><img class="task-view" alt="متصفح المهمة" hidden>';
     card.querySelector("h3").textContent = task.title || "مهمة";
     const stopButton = card.querySelector(".task-stop");
     const retryButton = card.querySelector(".task-retry");
     const copyButton = card.querySelector(".task-copy");
+    const watchButton = card.querySelector(".task-watch");
+    const view = card.querySelector(".task-view");
+    const viewNote = card.querySelector(".task-view-note");
+    let watching = false;
+    let watchGen = 0;
+    let viewUrl = "";
+    // "مراقبة": a picture of the task's browser, asked for every second while it is open.
+    const setWatching = async (on) => {
+      watching = on;
+      const gen = ++watchGen;
+      watchButton.textContent = on ? "إخفاء المراقبة" : "مراقبة";
+      viewNote.hidden = !on || Boolean(viewUrl);
+      view.hidden = !on || !viewUrl;
+      if (!on) {
+        if (viewUrl) URL.revokeObjectURL(viewUrl);
+        viewUrl = "";
+        view.removeAttribute("src");
+        return;
+      }
+      while (watching && gen === watchGen) {
+        try {
+          const response = await fetchWithTimeout(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "/view", {
+            headers: {"X-CSRF-Token": csrf, "X-Job-Key": task.key, "X-Client-Id": clientId()},
+            cache: "no-store"
+          });
+          if (response.status === 200 && watching && gen === watchGen) {
+            const url = URL.createObjectURL(await response.blob());
+            if (viewUrl) URL.revokeObjectURL(viewUrl);
+            viewUrl = url;
+            view.src = url;
+            view.hidden = false;
+            viewNote.hidden = true;
+          }
+        } catch (_) {}
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    };
+    watchButton.addEventListener("click", () => setWatching(!watching));
     let links = [];
     let linksWanted = true;
     copyButton.addEventListener("click", async () => {
@@ -1037,6 +1076,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (Array.isArray(data.items) && data.items.length) links = data.items.map((item) => item && item.url).filter(Boolean);
       if (!links.length && linksWanted && phase === "act") loadLinks();
       copyButton.hidden = !links.length;
+      watchButton.hidden = data.status !== "running";
+      if (data.status !== "running" && watching) setWatching(false);
     };
     const watch = async () => {
       try {
@@ -3052,6 +3093,48 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
 # The running task's "close and reopen the browser" function (one per worker thread).
 browser_restart = threading.local()
 
+# Live view of a task's browser ("مراقبة" on its card). Pictures are taken in the task's own
+# thread during its waits, and only while someone is watching.
+LIVE_VIEW_EVERY = 0.8
+live_task = threading.local()
+live_views: dict[str, dict] = {}
+live_views_lock = threading.Lock()
+_page_wait_for_timeout = Page.wait_for_timeout
+
+
+def capture_live_view(page, job_id: str) -> None:
+    now = time.monotonic()
+    with live_views_lock:
+        view = live_views.get(job_id)
+        if not view or view["wanted_until"] < now or now - view["taken_at"] < LIVE_VIEW_EVERY:
+            return
+        view["taken_at"] = now
+    try:
+        size = page.viewport_size or {"width": VIEWPORT_WIDTH, "height": NORMAL_VIEWPORT_HEIGHT}
+        image = page.screenshot(type="jpeg", quality=45, timeout=3000,
+                                clip={"x": 0, "y": 0, "width": size["width"], "height": min(size["height"], 1000)})
+    except Exception:
+        return
+    with live_views_lock:
+        view["image"] = image
+
+
+def wait_and_watch(page, timeout: float) -> None:
+    """page.wait_for_timeout for every page: in a task's thread it also feeds that task's live view."""
+    job_id = getattr(live_task, "job_id", "")
+    if not job_id:
+        return _page_wait_for_timeout(page, timeout)
+    end = time.monotonic() + max(0.0, timeout) / 1000
+    while True:
+        capture_live_view(page, job_id)
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        _page_wait_for_timeout(page, min(left, 1.0) * 1000)
+
+
+Page.wait_for_timeout = wait_and_watch
+
 
 def restart_browser():
     fn = getattr(browser_restart, "fn", None)
@@ -4534,6 +4617,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             publish_job(job_id, status="done", success=False, message=str(exc) or "تعذّر تنفيذ إجراءات القروب.")
             raise
     # One attempt only. If anything fails, the task stops with a message and is not retried.
+    live_task.job_id = job_id
     try:
         run_on_fresh_browser(auth_token, work, profiles_per_account)
     except BrowserClosed:
@@ -4553,6 +4637,10 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             app.logger.warning("group run failed")
             message = "أُغلق المتصفح أثناء العمل." if browser_closed_error(exc) else (str(exc) or "تعذّر تنفيذ إجراءات القروب.")
             publish_job(job_id, status="done", success=False, message=message)
+    finally:
+        live_task.job_id = ""
+        with live_views_lock:
+            live_views.pop(job_id, None)
 
 
 def allow_attempt(client: str) -> bool:
@@ -4586,7 +4674,7 @@ def secure_response(response):
     response.headers["Pragma"] = "no-cache"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'"
     return response
 
 
@@ -5251,6 +5339,32 @@ def stop_job_endpoint(access_path: str):
         job["updated_at"] = time.time()
         persist_jobs_unlocked()
     return jsonify(success=True, message="جارٍ إيقاف التنفيذ.")
+
+
+@app.get("/<access_path>/jobs/<job_id>/view")
+def job_view(access_path: str, job_id: str):
+    """The latest picture of a running task's browser; asking for it keeps pictures coming for 5 s."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    with jobs_lock:
+        job = jobs.get(job_id)
+        allowed = bool(job) and (
+            job_key_matches(job, request.headers.get("X-Job-Key", ""))
+            or (csrf_matches(request.headers.get("X-CSRF-Token", ""))
+                and bool(job.get("owner")) and job.get("owner") == session.get("csrf_token", ""))
+        )
+        running = allowed and job.get("status") == "running"
+    if not allowed:
+        return jsonify(success=False, message="لا توجد عملية بهذا المعرّف."), 404
+    if not running:
+        return "", 204
+    with live_views_lock:
+        view = live_views.setdefault(job_id, {"wanted_until": 0.0, "taken_at": 0.0, "image": None})
+        view["wanted_until"] = time.monotonic() + 5
+        image = view["image"]
+    if not image:
+        return "", 204
+    return image, 200, {"Content-Type": "image/jpeg"}
 
 
 @app.get("/<access_path>/jobs/<job_id>")
