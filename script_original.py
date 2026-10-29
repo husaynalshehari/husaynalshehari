@@ -964,7 +964,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     let watching = false;
     let watchGen = 0;
     let viewUrl = "";
-    // "مراقبة": a picture of the task's browser, asked for every second while it is open.
+    // "مراقبة": the task's browser, asked for 4 times a second while open (only new pictures come back).
     const setWatching = async (on) => {
       watching = on;
       const gen = ++watchGen;
@@ -977,13 +977,15 @@ EMBEDDED_PAGE = r'''<!doctype html>
         view.removeAttribute("src");
         return;
       }
+      let lastFrame = 0;
       while (watching && gen === watchGen) {
         try {
-          const response = await fetchWithTimeout(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "/view", {
+          const response = await fetchWithTimeout(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "/view?after=" + lastFrame, {
             headers: {"X-CSRF-Token": csrf, "X-Job-Key": task.key, "X-Client-Id": clientId()},
             cache: "no-store"
           });
           if (response.status === 200 && watching && gen === watchGen) {
+            lastFrame = Number(response.headers.get("X-Frame")) || lastFrame;
             const url = URL.createObjectURL(await response.blob());
             if (viewUrl) URL.revokeObjectURL(viewUrl);
             viewUrl = url;
@@ -992,7 +994,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             viewNote.hidden = true;
           }
         } catch (_) {}
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 250));
       }
     };
     watchButton.addEventListener("click", () => setWatching(!watching));
@@ -3095,28 +3097,35 @@ browser_restart = threading.local()
 
 # Live view of a task's browser ("مراقبة" on its card). Pictures are taken in the task's own
 # thread during its waits, and only while someone is watching.
-LIVE_VIEW_EVERY = 0.8
+LIVE_VIEW_EVERY = 0.25
 live_task = threading.local()
 live_views: dict[str, dict] = {}
 live_views_lock = threading.Lock()
 _page_wait_for_timeout = Page.wait_for_timeout
 
 
-def capture_live_view(page, job_id: str) -> None:
+def capture_live_view(page, job_id: str) -> bool:
+    """Take the task's next picture when one is due. Returns whether someone is watching."""
     now = time.monotonic()
     with live_views_lock:
         view = live_views.get(job_id)
-        if not view or view["wanted_until"] < now or now - view["taken_at"] < LIVE_VIEW_EVERY:
-            return
+        if not view or view["wanted_until"] < now:
+            return False
+        if now - view["taken_at"] < LIVE_VIEW_EVERY:
+            return True
         view["taken_at"] = now
     try:
         size = page.viewport_size or {"width": VIEWPORT_WIDTH, "height": NORMAL_VIEWPORT_HEIGHT}
-        image = page.screenshot(type="jpeg", quality=45, timeout=3000,
+        image = page.screenshot(type="jpeg", quality=40, timeout=3000,
                                 clip={"x": 0, "y": 0, "width": size["width"], "height": min(size["height"], 1000)})
     except Exception:
-        return
+        return True
     with live_views_lock:
-        view["image"] = image
+        # An unchanged page gives the same picture: keep the old one so nothing is sent again.
+        if image != view["image"]:
+            view["image"] = image
+            view["seq"] += 1
+    return True
 
 
 def wait_and_watch(page, timeout: float) -> None:
@@ -3126,11 +3135,12 @@ def wait_and_watch(page, timeout: float) -> None:
         return _page_wait_for_timeout(page, timeout)
     end = time.monotonic() + max(0.0, timeout) / 1000
     while True:
-        capture_live_view(page, job_id)
+        watched = capture_live_view(page, job_id)
         left = end - time.monotonic()
         if left <= 0:
             return
-        _page_wait_for_timeout(page, min(left, 1.0) * 1000)
+        # Watched: wake up for every picture. Otherwise once a second, to notice a new viewer.
+        _page_wait_for_timeout(page, min(left, LIVE_VIEW_EVERY if watched else 1.0) * 1000)
 
 
 Page.wait_for_timeout = wait_and_watch
@@ -5343,7 +5353,7 @@ def stop_job_endpoint(access_path: str):
 
 @app.get("/<access_path>/jobs/<job_id>/view")
 def job_view(access_path: str, job_id: str):
-    """The latest picture of a running task's browser; asking for it keeps pictures coming for 5 s."""
+    """The latest picture of a running task's browser, if newer than ?after=; asking keeps pictures coming for 3 s."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
     with jobs_lock:
@@ -5358,13 +5368,17 @@ def job_view(access_path: str, job_id: str):
         return jsonify(success=False, message="لا توجد عملية بهذا المعرّف."), 404
     if not running:
         return "", 204
+    try:
+        after = int(request.args.get("after") or 0)
+    except ValueError:
+        after = 0
     with live_views_lock:
-        view = live_views.setdefault(job_id, {"wanted_until": 0.0, "taken_at": 0.0, "image": None})
-        view["wanted_until"] = time.monotonic() + 5
-        image = view["image"]
-    if not image:
+        view = live_views.setdefault(job_id, {"wanted_until": 0.0, "taken_at": 0.0, "image": None, "seq": 0})
+        view["wanted_until"] = time.monotonic() + 3
+        image, seq = view["image"], view["seq"]
+    if not image or seq <= after:
         return "", 204
-    return image, 200, {"Content-Type": "image/jpeg"}
+    return image, 200, {"Content-Type": "image/jpeg", "X-Frame": str(seq)}
 
 
 @app.get("/<access_path>/jobs/<job_id>")
