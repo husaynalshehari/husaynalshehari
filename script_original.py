@@ -300,6 +300,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     input:focus { outline: none; border-color: var(--pine); box-shadow: 0 0 0 3px rgba(15, 107, 80, 0.16); }
     #auth_token, #stop-tweet, #gemini-model { direction: ltr; text-align: start; }
     #auth_token[readonly], #gemini-key[readonly], #gemini-model[readonly] { color: var(--muted); }
+    #account-name { font-weight: 600; }
     .token-row { display: flex; align-items: stretch; gap: 6px; }
     .token-row input { flex: 1; min-width: 0; }
     .btn {
@@ -603,19 +604,29 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <h2>الجلسة</h2>
             <p>يُحفظ الرمز مع اسم الحساب على هذا الخادم فقط، ويبقى بعد إغلاق المتصفح أو إعادة تشغيل السكربت.</p>
           </div>
-          <label class="field-label" for="auth_token">Auth token</label>
           <div class="token-row">
-            <input id="auth_token" name="auth_token" type="password" required maxlength="512"
-                   autocomplete="off" autocapitalize="off" spellcheck="false"
-                   placeholder="الصق الرمز" aria-label="Auth token">
-            <button id="toggle-token" class="btn btn-ghost" type="button" aria-pressed="false">إظهار</button>
-            <button id="edit-token" class="btn btn-ghost" type="button" aria-pressed="false">تحرير</button>
-            <button id="login-button" class="btn btn-ghost" type="button">تحقق</button>
+            <input id="account-name" type="text" readonly tabindex="-1" dir="auto" placeholder="اسم المستخدم" aria-label="الحساب">
+            <button id="quick-verify" class="btn btn-ghost" type="button">تحقق</button>
+            <button id="account-settings" class="btn btn-ghost" type="button" aria-expanded="false" aria-controls="account-panel">إعداد الحساب</button>
           </div>
-          <p id="session-account" class="session-account" hidden></p>
-          <div id="saved-sessions" class="saved-sessions" hidden>
-            <p class="field-label">جلسات محفوظة</p>
-            <ul id="saved-session-list" class="saved-list"></ul>
+          <div id="account-panel" hidden>
+            <label class="field-label" for="auth_token">Auth token</label>
+            <div class="token-row">
+              <input id="auth_token" name="auth_token" type="password" required maxlength="512"
+                     autocomplete="off" autocapitalize="off" spellcheck="false"
+                     placeholder="الصق الرمز" aria-label="Auth token">
+              <button id="toggle-token" class="btn btn-ghost" type="button" aria-pressed="false">إظهار</button>
+              <button id="edit-token" class="btn btn-ghost" type="button" aria-pressed="false">تحرير</button>
+              <button id="login-button" class="btn btn-ghost" type="button">تحقق</button>
+            </div>
+            <p id="session-account" class="session-account" hidden></p>
+            <div id="saved-sessions" class="saved-sessions" hidden>
+              <p class="field-label">جلسات محفوظة</p>
+              <ul id="saved-session-list" class="saved-list"></ul>
+            </div>
+            <label class="field-label" for="chat-pin">رمز الدردشة</label>
+            <input id="chat-pin" name="chat_pin" type="password" inputmode="numeric" maxlength="8" required
+                   autocomplete="off" spellcheck="false" placeholder="٤ أرقام" aria-label="رمز الدردشة">
           </div>
         </section>
 
@@ -624,10 +635,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <h2>القروب</h2>
             <p>يُفتح صندوق الدردشة، وتُعرض القروبات فقط. اختر واحدًا ثم العدد.</p>
           </div>
-          <label class="field-label" for="chat-pin">رمز الدردشة</label>
           <div class="token-row">
-            <input id="chat-pin" name="chat_pin" type="password" inputmode="numeric" maxlength="8" required
-                   autocomplete="off" spellcheck="false" placeholder="٤ أرقام" aria-label="رمز الدردشة">
             <button id="groups-button" class="btn btn-ghost" type="button">عرض القروبات</button>
             <label class="wait-groups" for="wait-groups">
               <input id="wait-groups" type="checkbox" checked>
@@ -842,6 +850,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
   lockGemini(true);
   const csrf = document.getElementById("csrf_token").value;
   const loginButton = document.getElementById("login-button");
+  const accountName = document.getElementById("account-name");
+  const quickVerify = document.getElementById("quick-verify");
+  const accountSettings = document.getElementById("account-settings");
+  const accountPanel = document.getElementById("account-panel");
   const toggleToken = document.getElementById("toggle-token");
   const repostButton = document.getElementById("reposts-button");
   const notice = document.getElementById("notice");
@@ -1070,6 +1082,25 @@ EMBEDDED_PAGE = r'''<!doctype html>
     sessionAccount.hidden = !text;
   }
 
+  // The one-row view: the account's username; the token, its buttons and the chat PIN sit behind "إعداد الحساب".
+  function syncAccountName() {
+    const token = tokenField.value.trim();
+    const row = sessionRows.find((item) => item.token === token);
+    accountName.value = row && row.username ? "@" + row.username : (token ? "حساب غير معروف" : "");
+  }
+
+  function setAccountPanel(open) {
+    accountPanel.hidden = !open;
+    accountSettings.textContent = open ? "إخفاء الإعداد" : "إعداد الحساب";
+    accountSettings.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  // Focus a field, opening the account settings first when it is inside them.
+  function revealField(field) {
+    if (accountPanel.contains(field)) setAccountPanel(true);
+    field.focus();
+  }
+
   function formatWhen(epoch) {
     if (!epoch) return "";
     const minutes = Math.round(Math.max(0, Date.now() - epoch * 1000) / 60000);
@@ -1140,6 +1171,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       item.append(pick, drop);
       savedSessionList.appendChild(item);
     });
+    syncAccountName();
   }
 
   async function loadSessions() {
@@ -1397,10 +1429,13 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
   });
 
-  loginButton.addEventListener("click", async () => {
+  accountSettings.addEventListener("click", () => setAccountPanel(accountPanel.hidden));
+
+  async function verifySession() {
     const authToken = tokenField.value.trim();
-    if (!authToken) { showNotice("أدخل الرمز أولًا.", false); tokenField.focus(); return; }
+    if (!authToken) { showNotice("أدخل الرمز أولًا.", false); revealField(tokenField); return; }
     loginButton.disabled = true;
+    quickVerify.disabled = true;
     toggleToken.disabled = true;
     showNotice("جارٍ التحقق من الجلسة…", true);
     try {
@@ -1414,9 +1449,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
       showNotice("تعذّر الاتصال لإكمال التحقق.", false);
     } finally {
       loginButton.disabled = false;
+      quickVerify.disabled = false;
       toggleToken.disabled = false;
     }
-  });
+  }
+  loginButton.addEventListener("click", verifySession);
+  quickVerify.addEventListener("click", verifySession);
 
   function renderGroups() {
     groupBox.hidden = groupNames.length === 0;
@@ -1445,8 +1483,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
   groupsButton.addEventListener("click", async () => {
     const authToken = tokenField.value.trim();
     const pin = pinField.value.trim();
-    if (!authToken) { showNotice("أدخل رمز الجلسة أولًا.", false); tokenField.focus(); return; }
-    if (!/^\d{4,8}$/.test(pin)) { showNotice("رمز الدردشة ٤ إلى ٨ أرقام.", false); pinField.focus(); return; }
+    if (!authToken) { showNotice("أدخل رمز الجلسة أولًا.", false); revealField(tokenField); return; }
+    if (!/^\d{4,8}$/.test(pin)) { showNotice("رمز الدردشة ٤ إلى ٨ أرقام.", false); revealField(pinField); return; }
     groupsButton.disabled = true;
     const settle = !!waitGroups.checked;
     const settleSeconds = secondsFrom(waitGroupsSec, 1, 120, 30);
@@ -1476,8 +1514,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const stopMatch = stopRaw.match(/status\/(\d{6,25})/);
     const stopId = stopMatch ? stopMatch[1] : (/^\d{15,25}$/.test(stopRaw) ? stopRaw : "");
     const actions = selectedActions();
-    if (!authToken) { showNotice("أدخل الرمز أولًا.", false); tokenField.focus(); return; }
-    if (!/^\d{4,8}$/.test(pin)) { showNotice("أدخل رمز الدردشة.", false); pinField.focus(); return; }
+    if (!authToken) { showNotice("أدخل الرمز أولًا.", false); revealField(tokenField); return; }
+    if (!/^\d{4,8}$/.test(pin)) { showNotice("أدخل رمز الدردشة.", false); revealField(pinField); return; }
     if (!selectedGroup) { showNotice("اعرض القروبات ثم اختر واحدًا.", false); return; }
     if (!stopId) { showNotice("الصق رابط التغريدة المحددة أو رقمها.", false); stopField.focus(); return; }
     if (!actions.length) { showNotice("اختر إجراءً واحدًا على الأقل.", false); return; }
