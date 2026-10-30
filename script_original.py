@@ -3202,7 +3202,7 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
             except Exception:
                 pass
             try:
-                new_page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=60_000)
+                goto_x(new_page, "https://x.com/home")
                 session_is_logged_in(new_page)
             except Exception:
                 pass
@@ -3254,6 +3254,36 @@ def run_on_browser(auth_token: str, work):
     return run_on_fresh_browser(auth_token, work)
 
 
+def goto_x(page, url: str) -> None:
+    """page.goto for X pages. X sometimes answers with a file instead of the page (Playwright:
+    "Download is starting"): ask again, and after two such answers ask past the browser's cache
+    and X's service worker for that one load (nothing is deleted)."""
+    for attempt in range(4):
+        cdp = None
+        try:
+            if attempt >= 2:
+                cdp = page.context.new_cdp_session(page)
+                cdp.send("Network.enable")
+                cdp.send("Network.setBypassServiceWorker", {"bypass": True})
+                cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
+            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            return
+        except Exception as exc:
+            if "Download is starting" not in str(exc):
+                raise
+            if attempt == 3:
+                raise RuntimeError("أرسل X ملفًا بدل الصفحة أكثر من مرة. أعد المحاولة بعد قليل.") from exc
+        finally:
+            if cdp is not None:
+                try:
+                    cdp.send("Network.setBypassServiceWorker", {"bypass": False})
+                    cdp.send("Network.setCacheDisabled", {"cacheDisabled": False})
+                    cdp.detach()
+                except Exception:
+                    pass
+        page.wait_for_timeout(1500)
+
+
 def ensure_logged_in(page) -> bool:
     probe = page.locator(
         'button[aria-label="Account menu"], '
@@ -3265,7 +3295,7 @@ def ensure_logged_in(page) -> bool:
             return True
     except Exception:
         pass
-    page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=60_000)
+    goto_x(page, "https://x.com/home")
     return session_is_logged_in(page)
 
 
@@ -3381,7 +3411,7 @@ def chat_inbox_open(page) -> bool:
 def open_chat(page, pin: str) -> str | None:
     if chat_inbox_open(page):
         return None
-    page.goto(CHAT_URLS[0], wait_until="domcontentloaded", timeout=60_000)
+    goto_x(page, CHAT_URLS[0])
     typed = False
     deadline = time.monotonic() + 55
     while time.monotonic() < deadline:
@@ -3595,7 +3625,7 @@ def leave_group(page, pin: str) -> None:
     still_inside = re.search(r"/(?:i/chat|messages)/[^/?#]+", page.url or "")
     if still_inside or not chat_inbox_open(page):
         # Back did not land on the chat list: open it directly (types the chat PIN if X asks).
-        page.goto(CHAT_URLS[0], wait_until="domcontentloaded", timeout=60_000)
+        goto_x(page, CHAT_URLS[0])
         error = open_chat(page, pin)
         if error:
             raise RuntimeError(error)
