@@ -678,8 +678,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <div class="group-wait-row">
             <label class="wait-groups" for="phone-screen">
               <input id="phone-screen" type="checkbox">
-              شاشة جوال (تجريبي) بطول
-              <input id="phone-height" class="wait-sec wide" type="number" min="600" max="25000" step="1" value="915" inputmode="numeric" aria-label="طول شاشة الجوال بالبكسل">
+              شاشة جوال (تجريبي) طول الجمع
+              <input id="phone-height" class="wait-sec wide" type="number" min="600" max="25000" step="1" value="915" inputmode="numeric" aria-label="طول شاشة الجوال أثناء الجمع بالبكسل">
               بكسل
             </label>
           </div>
@@ -3071,8 +3071,9 @@ MAX_PARALLEL_JOBS = 4
 
 
 PROFILES_DIR = DATA_DIR / "profiles"
-# "شاشة جوال" on the page: that task's browser is phone-wide, with the height chosen there, at every
-# step, collecting included. Set per worker thread, like browser_restart.
+# "شاشة جوال" on the page: that task's browser is phone-wide at every step, and while it opens the
+# chat and collects from the group (where the normal page is 25000 tall) it has the height chosen
+# there; elsewhere it keeps NORMAL_VIEWPORT_HEIGHT. Set per worker thread, like browser_restart.
 PHONE_SCREEN = {"width": 412, "height": 915}
 task_screen = threading.local()
 # Page height while opening the chat and collecting from the group, and for everything else.
@@ -3274,10 +3275,11 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
 
 
 def screen_size(height: int) -> dict:
-    """The page size for this thread's task: the phone screen when the task asked for it."""
+    """The page size for this thread's task. With "شاشة جوال" it is phone-wide, and the collecting
+    height is the one chosen on the page."""
     phone_height = getattr(task_screen, "phone_height", 0)
     if phone_height:
-        return {"width": PHONE_SCREEN["width"], "height": int(phone_height)}
+        return {"width": PHONE_SCREEN["width"], "height": int(phone_height) if height == COLLECT_VIEWPORT_HEIGHT else int(height)}
     return {"width": VIEWPORT_WIDTH, "height": int(height)}
 
 
