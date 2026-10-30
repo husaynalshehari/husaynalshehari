@@ -3676,6 +3676,42 @@ def peek_named_group(page, name: str, wait_s: float = 10.0) -> bool:
     return True
 
 
+# During the wait inside the group, its page is reloaded once after this many seconds.
+GROUP_RELOAD_AFTER = 10
+
+
+def reload_group(page, pin: str, group_name: str) -> None:
+    """Reload the open group's page and wait until the group shows again. Types the chat PIN if
+    X asks for it; if the reload has not landed back in the group within 20 s, opens the group
+    again from the chat list."""
+    group_url = (page.url or "").split("?")[0]
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=60_000)
+    except Exception as exc:
+        if browser_closed_error(exc):
+            raise
+    typed = False
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        accept_cookies(page)
+        if (page.url or "").split("?")[0] == group_url and page.locator(
+            '[data-testid="dm-message-list"], [data-testid="dm-message-scroller"]'
+        ).count():
+            return
+        if not typed and "pin" in (page.url or "") and pin_fields(page):
+            type_pin_once(page, pin)
+            typed = True
+            error = pin_error_message(page)
+            if error:
+                raise RuntimeError(error)
+        page.wait_for_timeout(500)
+    error = open_chat(page, pin)
+    if error:
+        raise RuntimeError(error)
+    show_groups_only(page)
+    open_named_group(page, group_name)
+
+
 def leave_group(page, pin: str) -> None:
     """Go back from the open group to the chat list, like pressing back."""
     try:
@@ -4643,7 +4679,16 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 opened_name = open_named_group(page, group_name)
                 if opened_name != group_name:
                     publish_job(job_id, phase="login", message=f"تغيّر اسم القروب إلى «{opened_name}» وفُتح.")
-                if group_wait_s > 0:
+                if group_wait_s > GROUP_RELOAD_AFTER:
+                    # Wait the first seconds, reload the group's page once, then wait the rest.
+                    publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع، مع تحديث الصفحة بعد {GROUP_RELOAD_AFTER} ث…")
+                    page.wait_for_timeout(GROUP_RELOAD_AFTER * 1000)
+                    publish_job(job_id, phase="login", message="تحديث صفحة القروب…")
+                    reload_group(page, pin, opened_name)
+                    rest = int(group_wait_s) - GROUP_RELOAD_AFTER
+                    publish_job(job_id, phase="login", message=f"حُدّثت صفحة القروب. انتظار {rest} ث قبل بدء التمرير والجمع…")
+                    page.wait_for_timeout(rest * 1000)
+                elif group_wait_s > 0:
                     publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع…")
                     page.wait_for_timeout(int(group_wait_s) * 1000)
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
