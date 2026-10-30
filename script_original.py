@@ -674,6 +674,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
               <input id="account-profiles" class="wait-sec" type="number" min="0" max="5" step="1" value="0" inputmode="numeric" aria-label="عدد المهام لكل حساب">
             </label>
           </div>
+          <div class="group-wait-row">
+            <label class="wait-groups" for="phone-screen">
+              <input id="phone-screen" type="checkbox">
+              شاشة جوال (تجريبي)
+            </label>
+          </div>
           <div class="stop-row">
             <input id="stop-tweet" name="stop_tweet" type="text" maxlength="300" autocomplete="off" spellcheck="false"
                    placeholder="رابط التغريدة المحددة" aria-label="التغريدة المحددة">
@@ -800,6 +806,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const tweetWaitMin = document.getElementById("tweet-wait-min");
   const tweetWaitMax = document.getElementById("tweet-wait-max");
   const accountProfilesOn = document.getElementById("account-profiles-on");
+  const phoneScreen = document.getElementById("phone-screen");
   const accountProfiles = document.getElementById("account-profiles");
   function rememberWaits() {
     try {
@@ -807,7 +814,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
         groupsOn: waitGroups.checked, groupsSec: waitGroupsSec.value,
         groupOn: groupWaitOn.checked, groupSec: groupWaitSec.value,
         tweetOn: tweetWaitOn.checked, tweetMin: tweetWaitMin.value, tweetMax: tweetWaitMax.value,
-        profilesOn: accountProfilesOn.checked, profiles: accountProfiles.value
+        profilesOn: accountProfilesOn.checked, profiles: accountProfiles.value,
+        phone: phoneScreen.checked
       }));
     } catch (_) {}
   }
@@ -823,10 +831,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (savedWaits.tweetMin !== undefined && savedWaits.tweetMin !== "") tweetWaitMin.value = savedWaits.tweetMin;
       if (savedWaits.tweetMax !== undefined && savedWaits.tweetMax !== "") tweetWaitMax.value = savedWaits.tweetMax;
       accountProfilesOn.checked = !!savedWaits.profilesOn;
+      phoneScreen.checked = !!savedWaits.phone;
       if (savedWaits.profiles) accountProfiles.value = savedWaits.profiles;
     }
   } catch (_) {}
-  [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec, tweetWaitOn, tweetWaitMin, tweetWaitMax, accountProfilesOn, accountProfiles].forEach((node) => node.addEventListener("change", rememberWaits));
+  [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec, tweetWaitOn, tweetWaitMin, tweetWaitMax, accountProfilesOn, accountProfiles, phoneScreen].forEach((node) => node.addEventListener("change", rememberWaits));
   function secondsFrom(field, min, max, fallback) {
     const value = Number.parseInt(field.value, 10);
     if (!Number.isInteger(value)) return fallback;
@@ -1580,7 +1589,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
         group_wait: groupWaitOn.checked ? secondsFrom(groupWaitSec, 0, 300, 30) : null,
         tweet_wait_min: tweetWaitOn.checked ? secondsFrom(tweetWaitMin, 0, 120, 0) : 0,
         tweet_wait_max: tweetWaitOn.checked ? secondsFrom(tweetWaitMax, 0, 120, 0) : 0,
-        account_profiles: accountProfilesOn.checked ? secondsFrom(accountProfiles, 1, 5, 1) : 1
+        account_profiles: accountProfilesOn.checked ? secondsFrom(accountProfiles, 1, 5, 1) : 1,
+        phone_screen: phoneScreen.checked
       });
       if (!started.success || !started.job_id || !started.job_key) {
         showNotice(started.message || "تعذّر بدء التنفيذ.", false);
@@ -1590,7 +1600,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       followTask({
         id: started.job_id,
         key: started.job_key,
-        title: selectedGroup + (account ? " · " + account : ""),
+        title: selectedGroup + (account ? " · " + account : "") + (phoneScreen.checked ? " · جوال" : ""),
         startedAt: Date.now()
       });
       showNotice("بدأت مهمة «" + selectedGroup + "». يمكن بدء مهمة أخرى على نفس الحساب أو حساب مختلف.", true);
@@ -3029,6 +3039,10 @@ MAX_PARALLEL_JOBS = 4
 
 
 PROFILES_DIR = DATA_DIR / "profiles"
+# "شاشة جوال" on the page: that task's browser is phone-sized at every step, collecting included.
+# Set per worker thread, like browser_restart.
+PHONE_SCREEN = {"width": 412, "height": 915}
+task_screen = threading.local()
 # Page height while opening the chat and collecting from the group, and for everything else.
 COLLECT_VIEWPORT_HEIGHT = 25000
 NORMAL_VIEWPORT_HEIGHT = 1800
@@ -3060,7 +3074,7 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
         str(profile_dir),
         headless=True,
         args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"],
-        viewport={"width": VIEWPORT_WIDTH, "height": NORMAL_VIEWPORT_HEIGHT},
+        viewport=screen_size(NORMAL_VIEWPORT_HEIGHT),
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -3227,9 +3241,16 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
         profile_lock(slot_name).release()
 
 
+def screen_size(height: int) -> dict:
+    """The page size for this thread's task: the phone screen when the task asked for it."""
+    if getattr(task_screen, "phone", False):
+        return dict(PHONE_SCREEN)
+    return {"width": VIEWPORT_WIDTH, "height": int(height)}
+
+
 def set_page_height(page, height: int) -> None:
     try:
-        page.set_viewport_size({"width": VIEWPORT_WIDTH, "height": int(height)})
+        page.set_viewport_size(screen_size(height))
         page.wait_for_timeout(500)
     except Exception:
         pass
@@ -3288,7 +3309,10 @@ def ensure_logged_in(page) -> bool:
     probe = page.locator(
         'button[aria-label="Account menu"], '
         '[data-testid="SideNav_AccountSwitcher_Button"], '
-        'a[data-testid="AppTabBar_Profile_Link"]'
+        'a[data-testid="AppTabBar_Profile_Link"], '
+        # X's phone layout (narrow screens) has no side menu: its avatar button and the Home tab.
+        '[data-testid="DashButton_ProfileIcon_Link"], '
+        'a[data-testid="AppTabBar_Home_Link"]'
     )
     try:
         if "x.com" in (page.url or "") and probe.first.is_visible(timeout=1500):
@@ -3304,7 +3328,10 @@ def session_is_logged_in(page) -> bool:
         page.locator(
             'button[aria-label="Account menu"], '
             '[data-testid="SideNav_AccountSwitcher_Button"], '
-            'a[data-testid="AppTabBar_Profile_Link"]'
+            'a[data-testid="AppTabBar_Profile_Link"], '
+            # X's phone layout (narrow screens) has no side menu: its avatar button and the Home tab.
+            '[data-testid="DashButton_ProfileIcon_Link"], '
+            'a[data-testid="AppTabBar_Home_Link"]'
         ).first.wait_for(state="visible", timeout=20_000)
         return True
     except PlaywrightTimeoutError:
@@ -4530,7 +4557,7 @@ def job_cancelled(job_id: str) -> bool:
 DEFAULT_GROUP_WAIT_SECONDS = 8
 
 
-def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, tweet_wait: tuple[int, int] = (0, 0)) -> None:
+def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, tweet_wait: tuple[int, int] = (0, 0), phone_screen: bool = False) -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
             raise JobStopped
@@ -4546,7 +4573,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
         else:
             publish_job(job_id, phase=phase, message="فتح الدردشة والقروب…")
 
-    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, tweet_wait)
+    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, tweet_wait, phone_screen)
 
     def work(page):
         try:
@@ -4658,6 +4685,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             raise
     # One attempt only. If anything fails, the task stops with a message and is not retried.
     live_task.job_id = job_id
+    task_screen.phone = phone_screen
     try:
         run_on_fresh_browser(auth_token, work, profiles_per_account)
     except BrowserClosed:
@@ -4679,6 +4707,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             publish_job(job_id, status="done", success=False, message=message)
     finally:
         live_task.job_id = ""
+        task_screen.phone = False
         with live_views_lock:
             live_views.pop(job_id, None)
 
@@ -5283,6 +5312,7 @@ def group_run_endpoint(access_path: str):
     wait_low = max(0, min(120, parse_requested_count(data.get("tweet_wait_min")) or 0))
     wait_high = max(0, min(120, parse_requested_count(data.get("tweet_wait_max")) or 0))
     tweet_wait = (min(wait_low, wait_high), max(wait_low, wait_high))
+    phone_screen = bool(data.get("phone_screen"))
     requested_actions = list(dict.fromkeys(requested_actions))
     gemini_api_key = str(data.get("gemini_api_key") or "").strip()
     gemini_model = normalize_gemini_model(str(data.get("gemini_model") or ""))
@@ -5313,7 +5343,7 @@ def group_run_endpoint(access_path: str):
     )
     threading.Thread(
         target=run_group_job,
-        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, tweet_wait),
+        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, tweet_wait, phone_screen),
         daemon=True,
     ).start()
     return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأ التنفيذ.")
