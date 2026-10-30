@@ -336,6 +336,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       font-weight: 600;
     }
     .wait-groups input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--pine); }
+    .wait-groups input.wait-sec.wide { width: 72px; }
     .wait-groups input.wait-sec {
       width: 52px;
       min-height: 28px;
@@ -677,7 +678,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <div class="group-wait-row">
             <label class="wait-groups" for="phone-screen">
               <input id="phone-screen" type="checkbox">
-              شاشة جوال (تجريبي)
+              شاشة جوال (تجريبي) بطول
+              <input id="phone-height" class="wait-sec wide" type="number" min="600" max="25000" step="1" value="915" inputmode="numeric" aria-label="طول شاشة الجوال بالبكسل">
+              بكسل
             </label>
           </div>
           <div class="stop-row">
@@ -807,6 +810,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const tweetWaitMax = document.getElementById("tweet-wait-max");
   const accountProfilesOn = document.getElementById("account-profiles-on");
   const phoneScreen = document.getElementById("phone-screen");
+  const phoneHeight = document.getElementById("phone-height");
   const accountProfiles = document.getElementById("account-profiles");
   function rememberWaits() {
     try {
@@ -815,7 +819,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
         groupOn: groupWaitOn.checked, groupSec: groupWaitSec.value,
         tweetOn: tweetWaitOn.checked, tweetMin: tweetWaitMin.value, tweetMax: tweetWaitMax.value,
         profilesOn: accountProfilesOn.checked, profiles: accountProfiles.value,
-        phone: phoneScreen.checked
+        phone: phoneScreen.checked, phoneHeight: phoneHeight.value
       }));
     } catch (_) {}
   }
@@ -832,10 +836,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (savedWaits.tweetMax !== undefined && savedWaits.tweetMax !== "") tweetWaitMax.value = savedWaits.tweetMax;
       accountProfilesOn.checked = !!savedWaits.profilesOn;
       phoneScreen.checked = !!savedWaits.phone;
+      if (savedWaits.phoneHeight) phoneHeight.value = savedWaits.phoneHeight;
       if (savedWaits.profiles) accountProfiles.value = savedWaits.profiles;
     }
   } catch (_) {}
-  [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec, tweetWaitOn, tweetWaitMin, tweetWaitMax, accountProfilesOn, accountProfiles, phoneScreen].forEach((node) => node.addEventListener("change", rememberWaits));
+  [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec, tweetWaitOn, tweetWaitMin, tweetWaitMax, accountProfilesOn, accountProfiles, phoneScreen, phoneHeight].forEach((node) => node.addEventListener("change", rememberWaits));
   function secondsFrom(field, min, max, fallback) {
     const value = Number.parseInt(field.value, 10);
     if (!Number.isInteger(value)) return fallback;
@@ -1590,7 +1595,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
         tweet_wait_min: tweetWaitOn.checked ? secondsFrom(tweetWaitMin, 0, 120, 0) : 0,
         tweet_wait_max: tweetWaitOn.checked ? secondsFrom(tweetWaitMax, 0, 120, 0) : 0,
         account_profiles: accountProfilesOn.checked ? secondsFrom(accountProfiles, 1, 5, 1) : 1,
-        phone_screen: phoneScreen.checked
+        phone_screen: phoneScreen.checked,
+        phone_height: secondsFrom(phoneHeight, 600, 25000, 915)
       });
       if (!started.success || !started.job_id || !started.job_key) {
         showNotice(started.message || "تعذّر بدء التنفيذ.", false);
@@ -1600,7 +1606,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       followTask({
         id: started.job_id,
         key: started.job_key,
-        title: selectedGroup + (account ? " · " + account : "") + (phoneScreen.checked ? " · جوال" : ""),
+        title: selectedGroup + (account ? " · " + account : "") + (phoneScreen.checked ? " · جوال " + secondsFrom(phoneHeight, 600, 25000, 915) : ""),
         startedAt: Date.now()
       });
       showNotice("بدأت مهمة «" + selectedGroup + "». يمكن بدء مهمة أخرى على نفس الحساب أو حساب مختلف.", true);
@@ -2370,17 +2376,43 @@ CLOSE_POPUPS_JS = r"""
 """
 
 
+ACCEPT_COOKIES_JS = r"""
+() => {
+  const accept = /^(accept all cookies|قبول جميع ملفات الكوكيز)$/i;
+  for (const node of document.querySelectorAll('button, [role="button"]')) {
+    if (accept.test((node.textContent || "").replace(/\s+/g, " ").trim()) && node.getClientRects().length) {
+      node.click();
+      return true;
+    }
+  }
+  return false;
+}
+"""
+
+
+def accept_cookies(page) -> bool:
+    """Press "قبول جميع ملفات الكوكيز" on X's cookie notice when it shows: it covers the bottom of the page."""
+    try:
+        clicked = bool(page.evaluate(ACCEPT_COOKIES_JS))
+    except Exception:
+        return False
+    if clicked:
+        page.wait_for_timeout(400)
+    return clicked
+
+
 def close_popups(page) -> int:
-    """Close pop-up dialogs that cover the page. The chat itself is never touched."""
+    """Close pop-up dialogs that cover the page, and accept the cookie notice. The chat itself is never touched."""
+    cookies = accept_cookies(page)
     try:
         closed = page.evaluate(CLOSE_POPUPS_JS) or []
     except Exception:
-        return 0
+        return int(cookies)
     if closed:
         if os.environ.get("COLLECT_DEBUG"):
             print(f"closed popups: {closed}", flush=True)
         page.wait_for_timeout(400)
-    return len(closed)
+    return len(closed) + int(cookies)
 
 
 def press_action_button(page, path: str, status_id: str, action: str) -> str:
@@ -3039,8 +3071,8 @@ MAX_PARALLEL_JOBS = 4
 
 
 PROFILES_DIR = DATA_DIR / "profiles"
-# "شاشة جوال" on the page: that task's browser is phone-sized at every step, collecting included.
-# Set per worker thread, like browser_restart.
+# "شاشة جوال" on the page: that task's browser is phone-wide, with the height chosen there, at every
+# step, collecting included. Set per worker thread, like browser_restart.
 PHONE_SCREEN = {"width": 412, "height": 915}
 task_screen = threading.local()
 # Page height while opening the chat and collecting from the group, and for everything else.
@@ -3243,8 +3275,9 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
 
 def screen_size(height: int) -> dict:
     """The page size for this thread's task: the phone screen when the task asked for it."""
-    if getattr(task_screen, "phone", False):
-        return dict(PHONE_SCREEN)
+    phone_height = getattr(task_screen, "phone_height", 0)
+    if phone_height:
+        return {"width": PHONE_SCREEN["width"], "height": int(phone_height)}
     return {"width": VIEWPORT_WIDTH, "height": int(height)}
 
 
@@ -3442,6 +3475,7 @@ def open_chat(page, pin: str) -> str | None:
     typed = False
     deadline = time.monotonic() + 55
     while time.monotonic() < deadline:
+        accept_cookies(page)
         if page.locator('[data-testid^="dm-conversation-item-"]').count():
             return None
         if not typed and "pin" in (page.url or ""):
@@ -4557,7 +4591,7 @@ def job_cancelled(job_id: str) -> bool:
 DEFAULT_GROUP_WAIT_SECONDS = 8
 
 
-def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, tweet_wait: tuple[int, int] = (0, 0), phone_screen: bool = False) -> None:
+def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, tweet_wait: tuple[int, int] = (0, 0), phone_height: int = 0) -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
             raise JobStopped
@@ -4573,7 +4607,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
         else:
             publish_job(job_id, phase=phase, message="فتح الدردشة والقروب…")
 
-    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, tweet_wait, phone_screen)
+    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, tweet_wait, phone_height)
 
     def work(page):
         try:
@@ -4588,6 +4622,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if not ensure_logged_in(page):
                     publish_job(job_id, status="done", success=False, message="فشل التحقق: الجلسة غير مسجّلة الدخول.")
                     return
+                accept_cookies(page)
                 handle = read_session_username(page)
                 if handle:
                     remember_session(auth_token, handle, pin)
@@ -4685,7 +4720,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             raise
     # One attempt only. If anything fails, the task stops with a message and is not retried.
     live_task.job_id = job_id
-    task_screen.phone = phone_screen
+    task_screen.phone_height = phone_height
     try:
         run_on_fresh_browser(auth_token, work, profiles_per_account)
     except BrowserClosed:
@@ -4707,7 +4742,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             publish_job(job_id, status="done", success=False, message=message)
     finally:
         live_task.job_id = ""
-        task_screen.phone = False
+        task_screen.phone_height = 0
         with live_views_lock:
             live_views.pop(job_id, None)
 
@@ -5312,7 +5347,9 @@ def group_run_endpoint(access_path: str):
     wait_low = max(0, min(120, parse_requested_count(data.get("tweet_wait_min")) or 0))
     wait_high = max(0, min(120, parse_requested_count(data.get("tweet_wait_max")) or 0))
     tweet_wait = (min(wait_low, wait_high), max(wait_low, wait_high))
-    phone_screen = bool(data.get("phone_screen"))
+    phone_height = 0
+    if data.get("phone_screen"):
+        phone_height = max(600, min(25000, parse_requested_count(data.get("phone_height")) or PHONE_SCREEN["height"]))
     requested_actions = list(dict.fromkeys(requested_actions))
     gemini_api_key = str(data.get("gemini_api_key") or "").strip()
     gemini_model = normalize_gemini_model(str(data.get("gemini_model") or ""))
@@ -5343,7 +5380,7 @@ def group_run_endpoint(access_path: str):
     )
     threading.Thread(
         target=run_group_job,
-        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, tweet_wait, phone_screen),
+        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, tweet_wait, phone_height),
         daemon=True,
     ).start()
     return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأ التنفيذ.")
