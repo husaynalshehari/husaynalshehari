@@ -39,7 +39,7 @@ app.config.update(
     MAX_CONTENT_LENGTH=8 * 1024,
 )
 store_lock = threading.Lock()
-store: dict = {"password_hash": "", "password_salt": "", "address": "", "users": []}
+store: dict = {"password_hash": "", "password_salt": "", "address": "", "users": [], "published_version": ""}
 attempts: dict[str, deque[float]] = defaultdict(deque)
 attempts_lock = threading.Lock()
 
@@ -62,6 +62,7 @@ def load_store() -> None:
             "password_salt": str(loaded.get("password_salt") or ""),
             "address": str(loaded.get("address") or ""),
             "users": users,
+            "published_version": str(loaded.get("published_version") or ""),
         })
 
 
@@ -107,9 +108,31 @@ def program_version() -> str:
     return match.group(1) if match else ""
 
 
+def version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", version or "")) or (0,)
+
+
+def published_version_unlocked() -> str:
+    """The version users get: the one published from this page; before the first, the script's own."""
+    return store["published_version"] or program_version() or "1.0"
+
+
+def next_version(version: str) -> str:
+    """1.0 -> 1.1, 1.9 -> 1.10, 2 -> 2.1."""
+    parts = [int(part) for part in re.findall(r"\d+", version)] or [1, 0]
+    if len(parts) == 1:
+        parts.append(0)
+    parts[-1] += 1
+    return ".".join(str(part) for part in parts)
+
+
 def program_for(user_key: str, address: str) -> bytes:
-    """The program as a user gets it: the script with this address and the user's key filled in."""
+    """The program as a user gets it: the script with the published version, this address and the
+    user's key filled in."""
     text = PROGRAM_PATH.read_text(encoding="utf-8")
+    with store_lock:
+        version = published_version_unlocked()
+    text = re.sub(r'^APP_VERSION = ".*"$', lambda _: f"APP_VERSION = {json.dumps(version)}", text, count=1, flags=re.M)
     text = re.sub(r'^UPDATE_SOURCE = ".*"$', lambda _: f"UPDATE_SOURCE = {json.dumps(address)}", text, count=1, flags=re.M)
     text = re.sub(r'^UPDATE_KEY = ".*"$', lambda _: f"UPDATE_KEY = {json.dumps(user_key)}", text, count=1, flags=re.M)
     return text.encode("utf-8")
@@ -122,7 +145,9 @@ def state_payload() -> dict:
             "password_set": bool(store["password_hash"]),
             "address": store["address"],
             "users": [{"id": row["id"], "name": row["name"], "active": row["active"]} for row in store["users"]],
-            "version": program_version(),
+            "version": published_version_unlocked(),
+            "next_version": next_version(published_version_unlocked()),
+            "program_found": PROGRAM_PATH.is_file(),
             "program": PROGRAM_PATH.name,
         }
 
@@ -206,6 +231,14 @@ def control_change():
             if not re.fullmatch(r"https?://[^\s\"'/]+(/[^\s\"']*)?", address):
                 return jsonify(success=False, message="اكتب العنوان كاملًا، مثل https://example.com:5050"), 400
             store["address"] = address
+            save_store_unlocked()
+        elif action == "publish":
+            version = str(data.get("version") or "").strip()
+            if not re.fullmatch(r"\d{1,6}(\.\d{1,6}){0,3}", version):
+                return jsonify(success=False, message="اكتب رقم الإصدار، مثل 1.1"), 400
+            if version_tuple(version) <= version_tuple(published_version_unlocked()):
+                return jsonify(success=False, message=f"اكتب رقمًا أكبر من الإصدار المنشور الآن ({published_version_unlocked()})."), 400
+            store["published_version"] = version
             save_store_unlocked()
         elif action == "add":
             name = re.sub(r"\s+", " ", str(data.get("name") or "")).strip()[:40]
@@ -386,7 +419,7 @@ PAGE = r'''<!doctype html>
 <body>
   <main>
     <h1>توزيع البرنامج</h1>
-    <p class="sub">الإصدار المنشور <b id="version"></b> من <span id="program"></span>. لنشر تحديث ارفع رقم APP_VERSION في ملف البرنامج، فيظهر زر «تحديث» عند المستخدمين.</p>
+    <p class="sub">الإصدار المنشور <b id="version"></b> من <span id="program"></span>.</p>
     <div id="notice" class="notice" role="status" hidden></div>
     <section class="sheet">
       <label for="password">كلمة السر</label>
@@ -395,6 +428,14 @@ PAGE = r'''<!doctype html>
         <button id="password-save" type="button">حفظ</button>
       </div>
       <p id="password-hint" class="hint"></p>
+    </section>
+    <section id="publish-part" class="sheet" hidden>
+      <label for="next-version">نشر تحديث للمستخدمين</label>
+      <div class="row">
+        <input id="next-version" type="text" inputmode="decimal" spellcheck="false" maxlength="20" aria-label="رقم الإصدار الجديد">
+        <button id="publish" type="button">نشر التحديث</button>
+      </div>
+      <p class="hint">ضع ملف <span id="program-name"></span> الجديد مكان القديم أولًا، ثم اضغط «نشر التحديث»، فيظهر زر «تحديث» عند المستخدمين.</p>
     </section>
     <section id="users-part" class="sheet" hidden>
       <label for="address">عنوان هذه الصفحة كما يصل إليه المستخدمون</label>
@@ -418,6 +459,7 @@ PAGE = r'''<!doctype html>
     const address = document.getElementById("address");
     const name = document.getElementById("name");
     const users = document.getElementById("users");
+    const nextVersion = document.getElementById("next-version");
     let savedAddress = "";
 
     function showNotice(text, ok) {
@@ -445,11 +487,14 @@ PAGE = r'''<!doctype html>
     function render(data) {
       document.getElementById("version").textContent = data.version || "؟";
       document.getElementById("program").textContent = data.program;
-      if (!data.version) showNotice("لم يُعثر على " + data.program + " بجانب هذا الملف.", false);
+      document.getElementById("program-name").textContent = data.program;
+      if (!data.program_found) showNotice("لم يُعثر على " + data.program + " بجانب هذا الملف.", false);
+      if (document.activeElement !== nextVersion) nextVersion.value = data.next_version || "";
       document.getElementById("password-hint").textContent = data.password_set
         ? "محفوظة. اكتب كلمة جديدة لتغييرها."
         : "اخترها أولًا: تحمي هذه الصفحة، لأن المستخدمين سيعرفون عنوانها.";
       document.getElementById("users-part").hidden = !data.password_set;
+      document.getElementById("publish-part").hidden = !data.password_set;
       savedAddress = data.address || "";
       if (document.activeElement !== address) address.value = savedAddress || location.origin;
       users.replaceChildren();
@@ -515,6 +560,16 @@ PAGE = r'''<!doctype html>
 
     document.getElementById("password-save").addEventListener("click", async () => {
       if (await change({action: "password", password: password.value}, "حُفظت كلمة السر.")) password.value = "";
+    });
+    document.getElementById("publish").addEventListener("click", async (event) => {
+      const version = nextVersion.value.trim();
+      if (!window.confirm("نشر الإصدار " + version + " لكل المستخدمين؟")) return;
+      event.target.disabled = true;
+      try {
+        if (await change({action: "publish", version}, "نُشر الإصدار " + version + ". يظهر زر «تحديث» عند المستخدمين خلال دقيقة، أو عند فتحهم الصفحة.")) nextVersion.blur();
+      } finally {
+        event.target.disabled = false;
+      }
     });
     document.getElementById("address-save").addEventListener("click", () => {
       change({action: "address", address: address.value.trim()}, "حُفظ العنوان.");

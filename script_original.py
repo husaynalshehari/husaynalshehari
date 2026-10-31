@@ -48,7 +48,8 @@ app.config.update(
 )
 
 ACCESS_PATH = os.getenv("X_ACCESS_PATH", "desk")
-# This copy's version. To publish an update to your users, raise it in your copy (e.g. "1.1").
+# This copy's version. In users' copies it is the version the owner published from «توزيع البرنامج»
+# (g.py writes it into the file it hands out); in the owner's copy it does not change.
 APP_VERSION = "1.0"
 # In a copy given to a user: the owner's address to take updates from, and that user's key.
 # The owner's copy fills both in when it hands the program out; both stay empty in the owner's copy.
@@ -5111,7 +5112,7 @@ def login_page(access_path: str):
         csrf_token = secrets.token_urlsafe(32)
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
-        PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=APP_VERSION,
+        PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(),
     ))
     return response
 
@@ -5193,6 +5194,15 @@ update_check_cache: dict = {"at": 0.0, "answer": None}
 def is_owner_copy() -> bool:
     """The owner's own copy has «توزيع البرنامج»; a copy given to a user takes updates."""
     return not UPDATE_SOURCE
+
+
+def shown_version() -> str:
+    """The version on the page: in the owner's copy, the one last published from «توزيع البرنامج»."""
+    if is_owner_copy():
+        published = (read_private_json(DATA_DIR / "distribution.json") or {}).get("published_version")
+        if published:
+            return str(published)
+    return APP_VERSION
 
 
 def start_distribution(bind_host: str) -> None:
