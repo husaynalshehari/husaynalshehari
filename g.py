@@ -44,6 +44,27 @@ attempts: dict[str, deque[float]] = defaultdict(deque)
 attempts_lock = threading.Lock()
 
 
+def load_user(row: dict) -> dict:
+    usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
+    return {
+        "id": str(row["id"]),
+        "name": str(row.get("name") or ""),
+        "key": str(row["key"]),
+        "active": bool(row.get("active", True)),
+        # The Gemini key the owner set for this user's copy ("" = none).
+        "gemini_key": str(row.get("gemini_key") or ""),
+        # Changes each time the owner resets this user's cost; the copy resets when it sees a new one.
+        "reset_id": str(row.get("reset_id") or ""),
+        # The copy's last report: its comments, cost, the reset it last made, and when.
+        "usage": {
+            "comments": int(usage.get("comments") or 0),
+            "cost": float(usage.get("cost") or 0),
+            "reset_id": str(usage.get("reset_id") or ""),
+            "at": float(usage.get("at") or 0),
+        },
+    }
+
+
 def load_store() -> None:
     try:
         loaded = json.loads(STORE_PATH.read_text(encoding="utf-8"))
@@ -51,11 +72,7 @@ def load_store() -> None:
         loaded = {}
     if not isinstance(loaded, dict):
         loaded = {}
-    users = [
-        {"id": str(row["id"]), "name": str(row.get("name") or ""), "key": str(row["key"]), "active": bool(row.get("active", True))}
-        for row in loaded.get("users") or []
-        if isinstance(row, dict) and row.get("id") and row.get("key")
-    ]
+    users = [load_user(row) for row in loaded.get("users") or [] if isinstance(row, dict) and row.get("id") and row.get("key")]
     with store_lock:
         store.update({
             "password_hash": str(loaded.get("password_hash") or ""),
@@ -138,13 +155,28 @@ def program_for(user_key: str, address: str) -> bytes:
     return text.encode("utf-8")
 
 
+def user_payload(row: dict) -> dict:
+    """A user as the page shows it; the Gemini key only as its first and last letters."""
+    key = row["gemini_key"]
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "active": row["active"],
+        "gemini_key": f"{key[:4]}…{key[-4:]}" if key else "",
+        "comments": row["usage"]["comments"],
+        "cost": row["usage"]["cost"],
+        "reported_at": row["usage"]["at"],
+        "reset_pending": bool(row["reset_id"]) and row["reset_id"] != row["usage"]["reset_id"],
+    }
+
+
 def state_payload() -> dict:
     with store_lock:
         return {
             "success": True,
             "password_set": bool(store["password_hash"]),
             "address": store["address"],
-            "users": [{"id": row["id"], "name": row["name"], "active": row["active"]} for row in store["users"]],
+            "users": [user_payload(row) for row in store["users"]],
             "version": published_version_unlocked(),
             "next_version": next_version(published_version_unlocked()),
             "program_found": PROGRAM_PATH.is_file(),
@@ -244,18 +276,27 @@ def control_change():
             name = re.sub(r"\s+", " ", str(data.get("name") or "")).strip()[:40]
             if not name:
                 return jsonify(success=False, message="اكتب اسم المستخدم."), 400
-            store["users"].append({"id": secrets.token_hex(6), "name": name, "key": secrets.token_urlsafe(24), "active": True})
+            store["users"].append(load_user({"id": secrets.token_hex(6), "name": name, "key": secrets.token_urlsafe(24)}))
             save_store_unlocked()
-        elif action in ("stop", "start", "delete"):
+        elif action in ("stop", "start", "delete", "gemini", "gemini_delete", "cost_reset"):
             user_id = str(data.get("id") or "")
-            if not any(row["id"] == user_id for row in store["users"]):
+            user = next((row for row in store["users"] if row["id"] == user_id), None)
+            if not user:
                 return jsonify(success=False, message="لم يعد هذا المستخدم موجودًا."), 404
             if action == "delete":
                 store["users"] = [row for row in store["users"] if row["id"] != user_id]
+            elif action in ("stop", "start"):
+                user["active"] = action == "start"
+            elif action == "gemini":
+                api_key = str(data.get("api_key") or "").strip()
+                # The same check as the script's own Gemini key field.
+                if not re.fullmatch(r"[A-Za-z0-9_\-]{20,256}", api_key):
+                    return jsonify(success=False, message="صيغة مفتاح Gemini غير صالحة."), 400
+                user["gemini_key"] = api_key
+            elif action == "gemini_delete":
+                user["gemini_key"] = ""
             else:
-                for row in store["users"]:
-                    if row["id"] == user_id:
-                        row["active"] = action == "start"
+                user["reset_id"] = secrets.token_hex(6)
             save_store_unlocked()
         else:
             return jsonify(success=False, message="طلب غير معروف."), 400
@@ -299,6 +340,32 @@ def update_user() -> tuple[dict | None, tuple | None]:
         return None, (jsonify(success=False, message="أوقف صاحب البرنامج التحديثات لهذه النسخة."), 403)
     user["address"] = address
     return user, None
+
+
+@app.post("/user/sync")
+def user_sync():
+    """A user's copy checking in: it reports its Gemini comments and cost, and gets the Gemini key
+    the owner set for it and the last cost reset asked for. Stopped users still check in."""
+    key = (request.headers.get("X-Update-Key") or "").strip()
+    data = request.get_json(silent=True) or {}
+    with store_lock:
+        ready = bool(store["password_hash"] and store["address"])
+        user = next((row for row in store["users"] if key and hmac.compare_digest(row["key"], key)), None)
+        if ready and user:
+            try:
+                comments, cost = max(0, int(data.get("comments") or 0)), max(0.0, float(data.get("cost") or 0))
+            except (TypeError, ValueError):
+                comments, cost = user["usage"]["comments"], user["usage"]["cost"]
+            user["usage"] = {"comments": comments, "cost": round(cost, 6), "reset_id": str(data.get("reset_id") or "")[:32], "at": time.time()}
+            save_store_unlocked()
+            answer = {"success": True, "gemini_key": user["gemini_key"], "reset_id": user["reset_id"]}
+    if not ready:
+        return jsonify(success=False, message="غير متاح الآن."), 404
+    if not user:
+        if not allow_attempt("update:" + (request.remote_addr or "unknown")):
+            return jsonify(success=False, message="محاولات كثيرة. انتظر بضع دقائق."), 429
+        return jsonify(success=False, message="مفتاح التحديث غير صحيح."), 403
+    return jsonify(answer)
 
 
 @app.get("/update/latest")
@@ -408,12 +475,26 @@ PAGE = r'''<!doctype html>
     #address { direction: ltr; text-align: start; }
     ul { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
     li { display: flex; gap: 6px; align-items: stretch; }
+    li .btn, li button { padding: 0 9px; }
+    @media (max-width: 480px) {
+      li { flex-wrap: wrap; }
+      li .who { flex-basis: 100%; }
+      li .btn, li button { flex: 1; }
+    }
     .who { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; padding: 6px 10px; border-radius: 10px; background: var(--paper);
       box-shadow: inset 0 0 0 1px var(--line); font-size: 13px; }
     .who b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .who span { color: var(--muted); font-size: 11px; }
     .who.is-off span { color: var(--clay); }
-    li .drop { color: var(--clay); }
+    li .drop, .manage .drop { color: var(--clay); }
+    dialog { width: min(420px, calc(100vw - 32px)); padding: 0; border: 0; border-radius: 14px; background: var(--sheet); color: var(--ink); }
+    dialog::backdrop { background: rgba(28, 25, 21, 0.35); }
+    .manage { padding: 14px 14px 12px; }
+    .manage h2 { margin: 0 0 4px; font-size: 16px; }
+    .manage .cost { margin: 2px 0 0; font-size: 20px; font-weight: 700; direction: ltr; text-align: end; }
+    .manage .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .manage .close { width: 100%; margin-top: 14px; }
+    #manage-key { direction: ltr; text-align: start; }
   </style>
 </head>
 <body>
@@ -429,6 +510,28 @@ PAGE = r'''<!doctype html>
       </div>
       <p id="password-hint" class="hint"></p>
     </section>
+    <dialog id="manage" aria-labelledby="manage-title">
+      <div class="manage">
+        <h2 id="manage-title"></h2>
+        <div id="manage-notice" class="notice" role="status" hidden></div>
+        <label for="manage-key">مفتاح Gemini</label>
+        <p id="manage-key-now" class="hint"></p>
+        <div class="row">
+          <input id="manage-key" type="password" autocomplete="off" spellcheck="false" placeholder="الصق المفتاح الجديد">
+          <button id="manage-key-save" type="button">حفظ</button>
+        </div>
+        <div class="actions">
+          <button id="manage-key-delete" type="button" class="drop">حذف المفتاح</button>
+        </div>
+        <label>التكلفة</label>
+        <p id="manage-cost" class="cost"></p>
+        <p id="manage-cost-note" class="hint"></p>
+        <div class="actions">
+          <button id="manage-reset" type="button">تصفير التكلفة</button>
+        </div>
+        <button id="manage-close" type="button" class="close">إغلاق</button>
+      </div>
+    </dialog>
     <section id="publish-part" class="sheet" hidden>
       <label for="next-version">نشر تحديث للمستخدمين</label>
       <div class="row">
@@ -463,9 +566,11 @@ PAGE = r'''<!doctype html>
     let savedAddress = "";
 
     function showNotice(text, ok) {
-      notice.textContent = text;
-      notice.className = "notice " + (ok ? "is-ok" : "is-bad");
-      notice.hidden = !text;
+      // While «إدارة» is open, its own notice: the page's one is behind it.
+      const target = dialog.open ? manageNotice : notice;
+      target.textContent = text;
+      target.className = "notice " + (ok ? "is-ok" : "is-bad");
+      target.hidden = !text;
     }
 
     function button(label, className, onClick) {
@@ -506,12 +611,20 @@ PAGE = r'''<!doctype html>
         title.textContent = row.name;
         const status = document.createElement("span");
         status.textContent = row.active ? "فعّال" : "موقوف";
+        if (row.reported_at) {
+          // Its own direction, so the dollar sign stays before the number.
+          const cost = document.createElement("bdi");
+          cost.dir = "ltr";
+          cost.textContent = "$" + row.cost.toFixed(3);
+          status.append(" · ", cost);
+        }
         who.append(title, status);
         const download = document.createElement("a");
         download.className = "btn";
         download.textContent = "تنزيل";
         download.href = "/users/" + encodeURIComponent(row.id) + "/program";
         download.setAttribute("download", "");
+        const manage = button("إدارة", "", async () => openManage(row.id));
         const toggle = button(row.active ? "إيقاف" : "تفعيل", "", () => change(
           {action: row.active ? "stop" : "start", id: row.id},
           row.active ? "أُوقفت تحديثات " + row.name + "." : "عادت تحديثات " + row.name + "."
@@ -520,10 +633,70 @@ PAGE = r'''<!doctype html>
           if (!window.confirm("حذف " + row.name + "؟ تتوقف تحديثات نسخته.")) return;
           await change({action: "delete", id: row.id}, "حُذف " + row.name + ".");
         });
-        item.append(who, download, toggle, remove);
+        item.append(who, download, manage, toggle, remove);
         users.append(item);
       });
+      userRows = data.users || [];
+      if (dialog.open) fillManage();
     }
+
+    // «إدارة»: one user's Gemini key and cost.
+    const dialog = document.getElementById("manage");
+    const manageKey = document.getElementById("manage-key");
+    const manageNotice = document.getElementById("manage-notice");
+    let userRows = [];
+    let managed = "";
+
+    function ago(seconds) {
+      const minutes = Math.floor((Date.now() / 1000 - seconds) / 60);
+      if (minutes < 1) return "منذ أقل من دقيقة";
+      if (minutes < 60) return "منذ " + minutes + " دقيقة";
+      if (minutes < 48 * 60) return "منذ " + Math.floor(minutes / 60) + " ساعة";
+      return "منذ " + Math.floor(minutes / 1440) + " يوم";
+    }
+
+    function fillManage() {
+      const row = userRows.find((user) => user.id === managed);
+      if (!row) {
+        dialog.close();
+        return;
+      }
+      document.getElementById("manage-title").textContent = "إدارة: " + row.name;
+      document.getElementById("manage-key-now").textContent = row.gemini_key
+        ? "المفتاح الحالي: " + row.gemini_key + ". تصل نسخته خلال دقيقتين، أو عند فتحه صفحته."
+        : "لا يوجد مفتاح منك لهذا المستخدم.";
+      document.getElementById("manage-key-delete").hidden = !row.gemini_key;
+      document.getElementById("manage-cost").textContent = row.reported_at ? "$" + row.cost.toFixed(3) : "—";
+      document.getElementById("manage-cost-note").textContent = (row.reported_at
+        ? "التعليقات " + row.comments + " · آخر تحديث من نسخته " + ago(row.reported_at) + "."
+        : "لم تصل بيانات من نسخته بعد.") + (row.reset_pending ? " طلب التصفير بانتظار نسخته." : "");
+    }
+
+    function openManage(userId) {
+      managed = userId;
+      manageKey.value = "";
+      manageNotice.hidden = true;
+      fillManage();
+      dialog.showModal();
+      load();
+    }
+    // Fresh numbers while it is open: a copy's report or a reset made shows up by itself.
+    setInterval(() => {
+      if (dialog.open) load();
+    }, 10000);
+
+    document.getElementById("manage-key-save").addEventListener("click", async () => {
+      if (await change({action: "gemini", id: managed, api_key: manageKey.value.trim()}, "حُفظ مفتاح Gemini لهذا المستخدم.")) manageKey.value = "";
+    });
+    document.getElementById("manage-key-delete").addEventListener("click", async () => {
+      if (!window.confirm("حذف مفتاح Gemini من نسخة هذا المستخدم؟")) return;
+      await change({action: "gemini_delete", id: managed}, "حُذف المفتاح. يُحذف من نسخته خلال دقيقتين، أو عند فتحه صفحته.");
+    });
+    document.getElementById("manage-reset").addEventListener("click", async () => {
+      if (!window.confirm("تصفير تكلفة هذا المستخدم؟ يبقى عدد التعليقات كما هو.")) return;
+      await change({action: "cost_reset", id: managed}, "طُلب التصفير. تصفّر نسخته التكلفة خلال دقيقتين، أو عند فتحه صفحته.");
+    });
+    document.getElementById("manage-close").addEventListener("click", () => dialog.close());
 
     async function change(payload, okMessage) {
       let data;

@@ -619,7 +619,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   </style>
 </head>
 <body>
-  <button id="cost-reset" class="cost-reset" type="button" tabindex="-1" aria-hidden="true"></button>
+  {% if owner_copy %}<button id="cost-reset" class="cost-reset" type="button" tabindex="-1" aria-hidden="true"></button>{% endif %}
   <main class="page">
     <header class="mast">
       <div class="brand">
@@ -1524,8 +1524,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
   setInterval(loadGeminiUsage, 15000);
   loadActionCounts();
   setInterval(loadActionCounts, 5000);
-  // The invisible top-left button: with the password, the comment cost starts again from 0 (the count stays).
-  document.getElementById("cost-reset").addEventListener("click", async () => {
+  // The invisible top-left button (the owner's copy only): with the password, the comment cost starts
+  // again from 0 (the count stays). Users' costs are reset from «توزيع البرنامج».
+  document.getElementById("cost-reset")?.addEventListener("click", async () => {
     const password = window.prompt("كلمة السر");
     if (password === null) return;
     try {
@@ -2704,7 +2705,8 @@ def gemini_is_busy(status: int, detail: str) -> bool:
 GEMINI_USAGE_PATH = DATA_DIR / "gemini_usage.json"
 # Price counted for each comment the model writes (shown on the page as the running total).
 GEMINI_PRICE_PER_COMMENT = 0.007
-# Password asked by the page's hidden button that resets the cost (the comment count is kept).
+# Password asked by the page's hidden button that resets the cost (the comment count is kept). Only in
+# the owner's copy: users' costs are reset from «توزيع البرنامج».
 COST_RESET_PASSWORD = "a1@"
 gemini_usage_lock = threading.Lock()
 gemini_usage: dict = {}
@@ -2721,7 +2723,8 @@ def load_gemini_usage() -> None:
         comments, since, cost_comments = 0, 0.0, 0
     with gemini_usage_lock:
         gemini_usage.clear()
-        gemini_usage.update({"comments": comments, "since": since, "cost_comments": cost_comments})
+        # reset_id: the owner's last cost reset this copy made («توزيع البرنامج»).
+        gemini_usage.update({"comments": comments, "since": since, "cost_comments": cost_comments, "reset_id": str(loaded.get("reset_id") or "")})
 
 
 def record_comment_generated() -> None:
@@ -2737,10 +2740,12 @@ def record_comment_generated() -> None:
         pass
 
 
-def reset_gemini_cost() -> None:
-    """Start the cost again from 0; the comment count is kept."""
+def reset_gemini_cost(reset_id: str = "") -> None:
+    """Start the cost again from 0; the comment count is kept. reset_id: the owner's reset it answers."""
     with gemini_usage_lock:
         gemini_usage["cost_comments"] = 0
+        if reset_id:
+            gemini_usage["reset_id"] = reset_id
         write_private_json(GEMINI_USAGE_PATH, dict(gemini_usage))
 
 
@@ -5112,7 +5117,7 @@ def login_page(access_path: str):
         csrf_token = secrets.token_urlsafe(32)
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
-        PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(),
+        PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(),
     ))
     return response
 
@@ -5235,9 +5240,15 @@ def version_tuple(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in re.findall(r"\d+", version or "")) or (0,)
 
 
-def ask_update_source(path: str, timeout: float) -> tuple[int, bytes]:
-    """A user's copy asks the owner's g.py. Returns (HTTP status, body); status 0 when unreachable."""
-    asking = urllib.request.Request(UPDATE_SOURCE.rstrip("/") + path, headers={"X-Update-Key": UPDATE_KEY, "User-Agent": "x-group-update"})
+def ask_update_source(path: str, timeout: float, report: dict | None = None) -> tuple[int, bytes]:
+    """A user's copy asks the owner's g.py (posting report when given). Returns (HTTP status, body);
+    status 0 when unreachable."""
+    headers = {"X-Update-Key": UPDATE_KEY, "User-Agent": "x-group-update"}
+    body = None
+    if report is not None:
+        body = json.dumps(report).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    asking = urllib.request.Request(UPDATE_SOURCE.rstrip("/") + path, data=body, headers=headers)
     try:
         with urllib.request.urlopen(asking, timeout=timeout) as answer:
             return answer.status, answer.read(MAX_PROGRAM_BYTES + 1)
@@ -5245,6 +5256,67 @@ def ask_update_source(path: str, timeout: float) -> tuple[int, bytes]:
         return exc.code, exc.read(4096)
     except (urllib.error.URLError, OSError, ValueError):
         return 0, b""
+
+
+# A user's copy checks in with the owner this often, and when its page opens.
+OWNER_SYNC_EVERY = 120
+owner_sync_lock = threading.Lock()
+owner_sync_state = {"at": 0.0}
+
+
+def apply_owner_gemini(key: str) -> None:
+    """Use the Gemini key the owner set for this copy; when the owner deleted it, drop it here too."""
+    with gemini_lock:
+        current, managed = saved_gemini.get("api_key") or "", bool(saved_gemini.get("managed"))
+        if key and valid_gemini_key(key):
+            if key == current and managed:
+                return
+            saved_gemini.update(api_key=key, managed=True)
+        elif managed and current:
+            saved_gemini.update(api_key="", managed=False)
+        else:
+            return
+        persist_gemini_unlocked()
+
+
+def sync_with_owner() -> None:
+    """A user's copy checks in with the owner's g.py: it reports its Gemini comments and cost, takes
+    the Gemini key the owner set for it (or drops the one deleted), and resets its cost when asked."""
+    if is_owner_copy() or not owner_sync_lock.acquire(blocking=False):
+        return
+    try:
+        for _ in range(2):  # after a reset, report the new cost straight away
+            with gemini_usage_lock:
+                done = str(gemini_usage.get("reset_id") or "")
+                report = {
+                    "comments": int(gemini_usage.get("comments") or 0),
+                    "cost": round(int(gemini_usage.get("cost_comments") or 0) * GEMINI_PRICE_PER_COMMENT, 6),
+                    "reset_id": done,
+                }
+            status, body = ask_update_source("/user/sync", 15, report)
+            owner_sync_state["at"] = time.monotonic()
+            try:
+                answer = json.loads(body.decode("utf-8")) if status == 200 else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                answer = {}
+            if not isinstance(answer, dict) or not answer.get("success"):
+                return
+            apply_owner_gemini(str(answer.get("gemini_key") or ""))
+            wanted = str(answer.get("reset_id") or "")
+            if not wanted or wanted == done:
+                return
+            reset_gemini_cost(wanted)
+    finally:
+        owner_sync_lock.release()
+
+
+def owner_sync_loop() -> None:
+    while True:
+        try:
+            sync_with_owner()
+        except Exception:
+            pass
+        time.sleep(OWNER_SYNC_EVERY)
 
 
 def latest_update() -> dict:
@@ -5337,10 +5409,16 @@ def remember_gemini(api_key: str, model: str) -> None:
     if key and not valid_gemini_key(key):
         return
     with gemini_lock:
-        if key:
+        if key and key != saved_gemini.get("api_key"):
+            # A key typed on this page is this copy's own, not the owner's.
             saved_gemini["api_key"] = key
+            saved_gemini["managed"] = False
         saved_gemini["model"] = normalized
-        write_private_json(GEMINI_PATH, {"version": 1, "api_key": saved_gemini["api_key"], "model": saved_gemini["model"]})
+        persist_gemini_unlocked()
+
+
+def persist_gemini_unlocked() -> None:
+    write_private_json(GEMINI_PATH, {"version": 1, "api_key": saved_gemini["api_key"], "model": saved_gemini["model"], "managed": bool(saved_gemini.get("managed"))})
 
 
 def load_gemini() -> None:
@@ -5350,7 +5428,8 @@ def load_gemini() -> None:
     model = normalize_gemini_model(str(loaded.get("model") or "")) or "gemini-3.5-flash"
     if key and not valid_gemini_key(key):
         key = ""
-    saved_gemini = {"api_key": key, "model": model}
+    # managed: the owner set this key from «توزيع البرنامج», and may delete it from there.
+    saved_gemini = {"api_key": key, "model": model, "managed": bool(key and loaded.get("managed"))}
 
 
 def persist_sessions_unlocked() -> None:
@@ -5993,7 +6072,7 @@ def stats_endpoint(access_path: str):
 
 @app.post("/<access_path>/gemini-usage/reset")
 def gemini_usage_reset_endpoint(access_path: str):
-    if not hmac.compare_digest(access_path, ACCESS_PATH):
+    if not hmac.compare_digest(access_path, ACCESS_PATH) or not is_owner_copy():
         abort(404)
     data = request.get_json(silent=True) or {}
     if not csrf_ok(data):
@@ -6082,6 +6161,8 @@ def update_check(access_path: str):
                        control_port=CONTROL_PORT if distribution_started.is_set() else 0)
     if request.args.get("light") or updating.is_set():
         return jsonify(success=True, owner=False, version=APP_VERSION, updating=updating.is_set())
+    if time.monotonic() - owner_sync_state["at"] > 10:
+        threading.Thread(target=sync_with_owner, name="owner-sync", daemon=True).start()
     now = time.monotonic()
     answer = update_check_cache["answer"]
     if answer is None or now - update_check_cache["at"] > 60:
@@ -6170,4 +6251,6 @@ if __name__ == "__main__":
             pass
         print("For public use, configure HTTPS and set PUBLIC_BASE_URL.", flush=True)
     start_distribution(bind_host)
+    if not is_owner_copy():
+        threading.Thread(target=owner_sync_loop, name="owner-sync", daemon=True).start()
     app.run(host=bind_host, port=port, debug=False, threaded=True)
