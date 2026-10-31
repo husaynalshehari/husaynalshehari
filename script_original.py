@@ -3054,7 +3054,8 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
     results: list[dict] = []
     plain = [action for action in actions if action != "comment"]
     total = len(items)
-    restarts_used = 0
+    # The tweet before failed to open (a deleted one does not count).
+    failed_before = False
     opened_one = False
     if on_progress:
         on_progress(0, total, "act")
@@ -3088,33 +3089,20 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
         # This account already replied to this tweet in the last 8 hours: never reply to it again.
         replied_before = "comment" in actions and already_done_recently(account, status_id, ["comment"])
         try:
-            opened, reason = open_status_page(page, str(item.get("url") or ""))
-            if not opened and reason != "gone":
-                opened, reason = open_status_page(page, str(item.get("url") or ""))
-            while not opened and reason != "gone" and restarts_used < MAX_BROWSER_RESTARTS:
-                # Still failing: close the browser profile, reopen it on Google, go to X, try again.
-                new_page = restart_browser()
-                if new_page is None:
-                    break
-                restarts_used += 1
-                page = new_page
-                allow_media(page)
-                opened, reason = open_status_page(page, str(item.get("url") or ""))
+            page, opened, reason = open_task_tweet(page, str(item.get("url") or ""), None, failed_before, should_stop, on_progress, total, allow_media)
         except Exception as exc:
             if browser_closed_error(exc):
                 if on_snapshot and results:
                     on_snapshot(list(results))
                 raise BrowserClosed() from exc
             raise
-        if not opened and reason != "gone":
-            # Both browser restarts used and the tweet still won't open: stop the task here.
-            if on_snapshot:
-                on_snapshot(list(results))
-            raise TweetOpenStuck(index)
+        failed_before = not opened and reason != "gone"
         if not opened:
-            note = "محذوفة — تم التخطي"
+            note = "محذوفة — تم التخطي" if reason == "gone" else "تعذر فتح التغريدة"
             result["actions"] = {key: note for key in actions}
             results.append(result)
+            if on_snapshot:
+                on_snapshot(list(results))
             if on_progress:
                 on_progress(index + 1, total, "act")
             continue
@@ -3335,9 +3323,9 @@ def wait_and_watch(page, timeout: float) -> None:
 Page.wait_for_timeout = wait_and_watch
 
 
-def restart_browser():
+def restart_browser(while_closed=None):
     fn = getattr(browser_restart, "fn", None)
-    return fn() if fn else None
+    return fn(while_closed) if fn else None
 
 
 # Highest number of profiles (parallel tasks) one account may use.
@@ -3376,14 +3364,18 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
         playwright = sync_playwright().start()
         state = {"context": None}
 
-        def restart():
-            """Close the profile's browser, reopen it on Google, then go to X. Returns the new page."""
+        def restart(while_closed=None):
+            """Close the profile's browser, reopen it on Google, then go to X. Returns the new page.
+            while_closed runs with the browser closed; when it returns False the browser stays
+            closed and None is returned."""
             try:
                 if state["context"] is not None:
                     state["context"].close()
             except Exception:
                 pass
             state["context"] = None
+            if while_closed is not None and while_closed() is False:
+                return None
             state["context"], new_page = open_x_profile(playwright, auth_token, PROFILES_DIR / slot_name)
             try:
                 new_page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=60_000)
@@ -4702,10 +4694,53 @@ def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None
             pass
 
 
+# When a tweet will not open and the one before it would not either, the browser is closed this long.
+TWEET_FAIL_PAUSE_SECONDS = 240
+
+
+def open_task_tweet(page, url: str, skip_if_on, failed_before: bool, should_stop=None, on_progress=None, total: int = 0, after_reopen=None):
+    """Open a task's tweet with two tries. When it still fails and the tweet before it failed too,
+    close the browser, wait TWEET_FAIL_PAUSE_SECONDS, reopen it and give this tweet two more tries.
+    Returns (page, opened path or None, reason); the page is a new one after the wait."""
+
+    def two_tries(current):
+        opened, reason = open_status_page(current, url, skip_if_on)
+        if not opened and reason != "gone":
+            opened, reason = open_status_page(current, url, skip_if_on)
+        return opened, reason
+
+    opened, reason = two_tries(page)
+    if opened or reason == "gone" or not failed_before:
+        return page, opened, reason
+
+    def wait_closed() -> bool:
+        end = time.monotonic() + TWEET_FAIL_PAUSE_SECONDS
+        shown = None
+        while (left := math.ceil(end - time.monotonic())) > 0:
+            if should_stop and should_stop():
+                return False
+            if on_progress and (shown is None or shown - left >= 5):
+                on_progress(left, total, "pause")
+                shown = left
+            time.sleep(min(1.0, max(0.0, end - time.monotonic())))
+        if on_progress:
+            on_progress(0, total, "pause")
+        return True
+
+    new_page = restart_browser(wait_closed)
+    if new_page is None:
+        return page, opened, reason
+    if after_reopen:
+        after_reopen(new_page)
+    opened, reason = two_tries(new_page)
+    return new_page, opened, reason
+
+
 def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "", wait_range: tuple[float, float] = (0, 0)) -> list[dict]:
     results: list[dict] = []
     total = len(items)
-    restarts_used = 0
+    # The tweet before failed to open (a deleted one does not count).
+    failed_before = False
     opened_one = False
     if on_progress:
         on_progress(0, total, "act")
@@ -4730,28 +4765,14 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
                 break
         opened_one = True
         try:
-            opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
-            if not opened and reason != "gone":
-                opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
-            while not opened and reason != "gone" and restarts_used < MAX_BROWSER_RESTARTS:
-                # Still failing: close the browser profile, reopen it on Google, go to X, try again.
-                new_page = restart_browser()
-                if new_page is None:
-                    break
-                restarts_used += 1
-                page = new_page
-                opened, reason = open_status_page(page, str(item.get("url") or ""), actions)
-            if not opened and reason != "gone":
-                # Both browser restarts used and the tweet still won't open: stop the task here.
-                raise TweetOpenStuck(index)
-        except TweetOpenStuck:
-            raise
+            page, opened, reason = open_task_tweet(page, str(item.get("url") or ""), actions, failed_before, should_stop, on_progress, total)
         except Exception as exc:
             if browser_closed_error(exc):
                 if on_snapshot and results:
                     on_snapshot(list(results))
                 raise BrowserClosed() from exc
             raise
+        failed_before = not opened and reason != "gone"
         if not opened:
             note = "محذوفة — تم التخطي" if reason == "gone" else "تعذر فتح التغريدة"
             result["actions"] = {key: note for key in actions}
@@ -4822,12 +4843,6 @@ class JobStopped(Exception):
     pass
 
 
-class TweetOpenStuck(Exception):
-    """A tweet still failed to open after both browser restarts; the task stops and can be retried."""
-
-
-# How many times one task may close and reopen the browser when tweets fail to open.
-MAX_BROWSER_RESTARTS = 2
 # Arguments of each group task, kept in memory so the retry button can continue it.
 job_run_args: dict[str, tuple] = {}
 
@@ -4868,6 +4883,12 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             publish_job(job_id, phase="collect", collected=0, requested=0, message=f"يبحث عن التغريدة المحددة. الخطوة {done}، وما زال يحمّل الأقدم.")
         elif phase == "act":
             publish_job(job_id, phase="act", done=done, collected=done, requested=requested, message=f"تنفيذ {done} من {requested}.")
+        elif phase == "pause":
+            # Two tweets in a row would not open: the browser is closed, done = seconds left.
+            if done > 0:
+                publish_job(job_id, phase="act", message=f"تعذّر فتح تغريدتين متتاليتين، فأُغلق المتصفح. المتابعة بعد {done // 60}:{done % 60:02d}.")
+            else:
+                publish_job(job_id, phase="act", message="انتهى الانتظار. إعادة فتح المتصفح ومتابعة التنفيذ…")
         else:
             publish_job(job_id, phase=phase, message="فتح الدردشة والقروب…")
 
@@ -4950,7 +4971,10 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     )
 
                 def on_act(done: int, requested: int, phase: str) -> None:
-                    on_progress(len(prefix) + done, len(items), "act")
+                    if phase == "pause":
+                        on_progress(done, requested, phase)
+                    else:
+                        on_progress(len(prefix) + done, len(items), "act")
 
                 if "comment" in actions:
                     fresh = execute_comment_actions(
@@ -4974,14 +4998,6 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             )
         except JobStopped:
             publish_job(job_id, status="done", success=False, message="تم إيقاف التنفيذ.")
-            return
-        except TweetOpenStuck:
-            with jobs_lock:
-                done_count = len((jobs.get(job_id) or {}).get("results") or [])
-            publish_job(
-                job_id, status="done", success=False, resumable=True, phase="act", done=done_count,
-                message=f"توقفت المهمة: تعذّر فتح التغريدة {done_count + 1} بعد إغلاق المتصفح وفتحه مرتين. اضغط «إعادة المحاولة» للمتابعة من حيث توقفت.",
-            )
             return
         except BrowserClosed:
             raise
