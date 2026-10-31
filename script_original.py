@@ -683,6 +683,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
               بكسل
             </label>
           </div>
+          <div class="group-wait-row">
+            <label class="wait-groups" for="fast-connection">
+              <input id="fast-connection" type="checkbox">
+              اتصال سريع (تمرير أطول داخل القروب)
+            </label>
+          </div>
           <div class="stop-row">
             <input id="stop-tweet" name="stop_tweet" type="text" maxlength="300" autocomplete="off" spellcheck="false"
                    placeholder="رابط التغريدة المحددة" aria-label="التغريدة المحددة">
@@ -811,6 +817,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const accountProfilesOn = document.getElementById("account-profiles-on");
   const phoneScreen = document.getElementById("phone-screen");
   const phoneHeight = document.getElementById("phone-height");
+  const fastConnection = document.getElementById("fast-connection");
   const accountProfiles = document.getElementById("account-profiles");
   function rememberWaits() {
     try {
@@ -819,7 +826,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
         groupOn: groupWaitOn.checked, groupSec: groupWaitSec.value,
         tweetOn: tweetWaitOn.checked, tweetMin: tweetWaitMin.value, tweetMax: tweetWaitMax.value,
         profilesOn: accountProfilesOn.checked, profiles: accountProfiles.value,
-        phone: phoneScreen.checked, phoneHeight: phoneHeight.value
+        phone: phoneScreen.checked, phoneHeight: phoneHeight.value,
+        fast: fastConnection.checked
       }));
     } catch (_) {}
   }
@@ -842,9 +850,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
         if (savedWaits.phoneHeight) phoneHeight.value = savedWaits.phoneHeight;
       }
       if (savedWaits.profiles) accountProfiles.value = savedWaits.profiles;
+      fastConnection.checked = !!savedWaits.fast;
     }
   } catch (_) {}
-  [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec, tweetWaitOn, tweetWaitMin, tweetWaitMax, accountProfilesOn, accountProfiles, phoneScreen, phoneHeight].forEach((node) => node.addEventListener("change", rememberWaits));
+  [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec, tweetWaitOn, tweetWaitMin, tweetWaitMax, accountProfilesOn, accountProfiles, phoneScreen, phoneHeight, fastConnection].forEach((node) => node.addEventListener("change", rememberWaits));
   function secondsFrom(field, min, max, fallback) {
     const value = Number.parseInt(field.value, 10);
     if (!Number.isInteger(value)) return fallback;
@@ -1600,7 +1609,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
         tweet_wait_max: tweetWaitOn.checked ? secondsFrom(tweetWaitMax, 0, 120, 0) : 0,
         account_profiles: accountProfilesOn.checked ? secondsFrom(accountProfiles, 1, 5, 1) : 1,
         phone_screen: phoneScreen.checked,
-        phone_height: secondsFrom(phoneHeight, 600, 25000, 4000)
+        phone_height: secondsFrom(phoneHeight, 600, 25000, 4000),
+        fast_connection: fastConnection.checked
       });
       if (!started.success || !started.job_id || !started.job_key) {
         showNotice(started.message || "تعذّر بدء التنفيذ.", false);
@@ -1610,7 +1620,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       followTask({
         id: started.job_id,
         key: started.job_key,
-        title: selectedGroup + (account ? " · " + account : "") + (phoneScreen.checked ? " · جوال " + secondsFrom(phoneHeight, 600, 25000, 4000) : ""),
+        title: selectedGroup + (account ? " · " + account : "") + (phoneScreen.checked ? " · جوال " + secondsFrom(phoneHeight, 600, 25000, 4000) : "") + (fastConnection.checked ? " · سريع" : ""),
         startedAt: Date.now()
       });
       showNotice("بدأت مهمة «" + selectedGroup + "». يمكن بدء مهمة أخرى على نفس الحساب أو حساب مختلف.", true);
@@ -1880,9 +1890,11 @@ GROUP_READ_TWEETS_JS = r"""
 (arg) => {
   let stopId = "";
   let dir = 0;
+  let factor = 1;
   if (arg && typeof arg === "object") {
     stopId = String(arg.stopId || "");
     dir = arg.dir === 1 || arg.dir === -1 ? arg.dir : 0;
+    factor = Number(arg.factor) > 1 ? Number(arg.factor) : 1;
   } else {
     stopId = String(arg || "");
   }
@@ -2029,9 +2041,11 @@ GROUP_READ_TWEETS_JS = r"""
     const beforeTop = scroller.scrollTop || 0;
     atOlderEdge = beforeTop <= 48;
     const client = scroller.clientHeight || 800;
-    const step = dir > 0
+    const base = dir > 0
       ? Math.max(560, Math.min(1200, Math.round(client * 0.75)))
       : Math.max(400, Math.min(800, Math.round(client * 0.5)));
+    // "اتصال سريع" (factor 2): a longer step, but never past what the chat shows at once.
+    const step = Math.max(base, Math.min(base * factor, Math.round(client * 0.9)));
     if (dir === -1 || dir === 1) {
       if (dir < 0 && beforeTop <= 48) {
         scroller.scrollTop = 0;
@@ -3888,7 +3902,7 @@ STEP_OLDER_JS = r"""
 """
 
 
-def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", should_stop=None) -> tuple[list[dict], bool]:
+def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", should_stop=None, scroll_factor: int = 1) -> tuple[list[dict], bool]:
     found: list[dict] = []
     seen: set[str] = set()
     reached = False
@@ -4015,6 +4029,8 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
                 break
             client = int(scan.get("clientHeight") or 0) or 800
             step = max(250, min(500, int(client * 0.2)))
+            # "اتصال سريع" (factor 2): a longer step, but never past what the chat shows at once.
+            step = max(step, min(step * scroll_factor, int(client * 0.9)))
             before_top = int(scan.get("scrollTop") or 0)
             focus_group_scroller(page)
             try:
@@ -4085,7 +4101,7 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
                 raise JobStopped
             close_popups(page)
             try:
-                payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": 1, "stopId": stop_id}) or {}
+                payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": 1, "stopId": stop_id, "factor": scroll_factor}) or {}
             except Exception:
                 payload = {}
             if not isinstance(payload, dict):
@@ -4141,7 +4157,7 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         before_count = len(found)
         close_popups(page)
         try:
-            payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": -1, "stopId": ""}) or {}
+            payload = page.evaluate(GROUP_READ_TWEETS_JS, {"dir": -1, "stopId": "", "factor": scroll_factor}) or {}
         except Exception:
             payload = {}
         if not isinstance(payload, dict):
@@ -4633,7 +4649,7 @@ def job_cancelled(job_id: str) -> bool:
 DEFAULT_GROUP_WAIT_SECONDS = 8
 
 
-def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, tweet_wait: tuple[int, int] = (0, 0), phone_height: int = 0) -> None:
+def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, tweet_wait: tuple[int, int] = (0, 0), phone_height: int = 0, scroll_factor: int = 1) -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
             raise JobStopped
@@ -4649,7 +4665,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
         else:
             publish_job(job_id, phase=phase, message="فتح الدردشة والقروب…")
 
-    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, tweet_wait, phone_height)
+    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, tweet_wait, phone_height, scroll_factor)
 
     def work(page):
         try:
@@ -4698,7 +4714,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع…")
                     page.wait_for_timeout(int(group_wait_s) * 1000)
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
-                items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
+                items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id), scroll_factor)
                 set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
                 if job_cancelled(job_id):
                     raise JobStopped
@@ -5401,6 +5417,8 @@ def group_run_endpoint(access_path: str):
     phone_height = 0
     if data.get("phone_screen"):
         phone_height = max(600, min(25000, parse_requested_count(data.get("phone_height")) or PHONE_SCREEN["height"]))
+    # "اتصال سريع": scroll twice as far per step inside the group.
+    scroll_factor = 2 if data.get("fast_connection") else 1
     requested_actions = list(dict.fromkeys(requested_actions))
     gemini_api_key = str(data.get("gemini_api_key") or "").strip()
     gemini_model = normalize_gemini_model(str(data.get("gemini_model") or ""))
@@ -5431,7 +5449,7 @@ def group_run_endpoint(access_path: str):
     )
     threading.Thread(
         target=run_group_job,
-        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, tweet_wait, phone_height),
+        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, tweet_wait, phone_height, scroll_factor),
         daemon=True,
     ).start()
     return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأ التنفيذ.")
