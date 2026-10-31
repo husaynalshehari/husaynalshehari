@@ -575,8 +575,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       font-weight: 600;
       box-shadow: inset 0 0 0 1px var(--line);
     }
-    a.drop { display: inline-flex; align-items: center; text-decoration: none; }
-    .drop.is-plain { color: var(--ink); }
     .update-bar {
       display: flex;
       align-items: center;
@@ -824,36 +822,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
       </div>
     </section>
 
-    <section id="distribution" class="sheet" hidden>
-      <div class="sheet-inner">
-        <h2>توزيع البرنامج</h2>
-        <p class="hint">الإصدار المنشور <b id="dist-version"></b>. لنشر تحديث ارفع رقم APP_VERSION في ملفك، فيظهر زر «تحديث» عند المستخدمين.</p>
-        <label class="field-label" for="dist-password">كلمة سر اللوحة</label>
-        <div class="token-row">
-          <input id="dist-password" type="password" autocomplete="new-password" placeholder="٨ أحرف على الأقل">
-          <button id="dist-password-save" class="btn btn-ghost" type="button">حفظ</button>
-        </div>
-        <p id="dist-password-hint" class="hint"></p>
-        <div id="dist-body" hidden>
-          <label class="field-label" for="dist-address">عنوان استضافتك</label>
-          <div class="token-row">
-            <input id="dist-address" type="text" inputmode="url" spellcheck="false" placeholder="https://example.com">
-            <button id="dist-address-save" class="btn btn-ghost" type="button">حفظ</button>
-          </div>
-          <label class="field-label" for="dist-name">مستخدم جديد</label>
-          <div class="token-row">
-            <input id="dist-name" type="text" maxlength="40" placeholder="الاسم">
-            <button id="dist-add" class="btn btn-ghost" type="button">إضافة</button>
-          </div>
-          <ul id="dist-users" class="saved-list"></ul>
-        </div>
-      </div>
-    </section>
-
     <p class="version-line">
       <span>الإصدار {{ app_version }}</span>
       <span id="update-state"></span>
-      <button id="dist-toggle" class="link-button" type="button" aria-expanded="false" aria-controls="distribution" hidden>توزيع البرنامج</button>
+      <a id="dist-link" class="link-button" target="_blank" rel="noopener" hidden>توزيع البرنامج</a>
     </p>
 
     <p class="footnote">الأعداد الكبيرة تأخذ وقتًا لأن كل دفعة تُنتظر حتى تظهر. إذا أغلقت المتصفح أثناء العملية فافتح الصفحة نفسها لاحقًا: يظهر التقدم من حيث بلغ، أو النتيجة إن اكتملت. الجلسات المحفوظة تبقى بعد إعادة تشغيل السكربت.</p>
@@ -1806,28 +1778,21 @@ EMBEDDED_PAGE = r'''<!doctype html>
   restoreScreen();
 
   // Updates. A user's copy shows «تحديث» when the owner offers a newer version; the owner's
-  // copy shows «توزيع البرنامج» instead.
+  // copy shows «توزيع البرنامج», which opens distribution.py.
   const updateBar = document.getElementById("update-bar");
   const updateText = document.getElementById("update-text");
   const updateButton = document.getElementById("update-button");
   const updateState = document.getElementById("update-state");
-  const distToggle = document.getElementById("dist-toggle");
-  const distSection = document.getElementById("distribution");
-  const distVersion = document.getElementById("dist-version");
-  const distPassword = document.getElementById("dist-password");
-  const distPasswordHint = document.getElementById("dist-password-hint");
-  const distBody = document.getElementById("dist-body");
-  const distAddress = document.getElementById("dist-address");
-  const distName = document.getElementById("dist-name");
-  const distUsers = document.getElementById("dist-users");
-  let distAddressSaved = "";
+  const distLink = document.getElementById("dist-link");
 
   async function checkUpdate() {
     try {
       const response = await fetchWithTimeout(apiRoot + "/update/check", {cache: "no-store"}, 30000);
       const data = await response.json();
       if (data.owner) {
-        distToggle.hidden = false;
+        // distribution.py: this host on its own port, unless CONTROL_URL says where.
+        distLink.href = data.control_url || location.protocol + "//" + location.hostname + ":" + data.control_port + "/";
+        distLink.hidden = false;
         return;
       }
       updateState.textContent = data.message || "";
@@ -1867,109 +1832,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       } catch (_) {}
     }
     updateText.textContent = "لم يعد البرنامج للعمل بعد. حدّث الصفحة بعد قليل.";
-  });
-
-  function distButton(label, plain, onClick) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "drop" + (plain ? " is-plain" : "");
-    button.textContent = label;
-    button.addEventListener("click", async () => {
-      button.disabled = true;
-      try {
-        await onClick();
-      } finally {
-        button.disabled = false;
-      }
-    });
-    return button;
-  }
-
-  function renderDistribution(data) {
-    distVersion.textContent = data.version;
-    distPasswordHint.textContent = data.password_set
-      ? "محفوظة. اكتب كلمة جديدة لتغييرها."
-      : "اخترها أولًا: عنوان استضافتك سيكون داخل البرنامج، وكلمة السر تمنع المستخدمين من فتح لوحتك.";
-    distBody.hidden = !data.password_set;
-    distAddressSaved = data.address || "";
-    if (document.activeElement !== distAddress) distAddress.value = distAddressSaved || location.origin;
-    distUsers.replaceChildren();
-    data.users.forEach((row) => {
-      const item = document.createElement("li");
-      item.className = "saved-session";
-      const info = document.createElement("div");
-      info.className = "pick";
-      const who = document.createElement("span");
-      who.className = "who";
-      who.textContent = row.name;
-      const meta = document.createElement("span");
-      meta.className = "meta";
-      meta.textContent = row.active ? "فعّال" : "موقوف";
-      info.append(who, meta);
-      const download = document.createElement("a");
-      download.className = "drop is-plain";
-      download.textContent = "تنزيل";
-      download.href = apiRoot + "/distribution/" + encodeURIComponent(row.id) + "/program";
-      download.setAttribute("download", "");
-      download.setAttribute("aria-label", "تنزيل البرنامج لـ " + row.name);
-      const toggle = distButton(row.active ? "إيقاف" : "تفعيل", true, () => changeDistribution(
-        {action: row.active ? "stop" : "start", id: row.id},
-        row.active ? "أُوقفت تحديثات " + row.name + "." : "عادت تحديثات " + row.name + "."
-      ));
-      const remove = distButton("حذف", false, async () => {
-        if (!window.confirm("حذف " + row.name + "؟ تتوقف تحديثات نسخته.")) return;
-        await changeDistribution({action: "delete", id: row.id}, "حُذف " + row.name + ".");
-      });
-      item.append(info, download, toggle, remove);
-      distUsers.append(item);
-    });
-  }
-
-  async function loadDistribution() {
-    try {
-      const response = await fetchWithTimeout(apiRoot + "/distribution", {cache: "no-store"});
-      renderDistribution(await response.json());
-    } catch (_) {
-      showNotice("تعذّر تحميل التوزيع.", false);
-    }
-  }
-
-  async function changeDistribution(payload, okMessage) {
-    let data;
-    try {
-      data = await postJson("/distribution", payload);
-    } catch (_) {
-      data = {message: "تعذّر الاتصال."};
-    }
-    if (!data.success) {
-      showNotice(data.message || "تعذّر الحفظ.", false);
-      return false;
-    }
-    renderDistribution(data);
-    if (okMessage) showNotice(okMessage, true);
-    return true;
-  }
-
-  distToggle.addEventListener("click", async () => {
-    const open = distSection.hidden;
-    distSection.hidden = !open;
-    distToggle.setAttribute("aria-expanded", String(open));
-    distToggle.textContent = open ? "إخفاء التوزيع" : "توزيع البرنامج";
-    if (open) {
-      await loadDistribution();
-      distSection.scrollIntoView({behavior: "smooth", block: "start"});
-    }
-  });
-  document.getElementById("dist-password-save").addEventListener("click", async () => {
-    if (await changeDistribution({action: "password", password: distPassword.value}, "حُفظت كلمة سر اللوحة.")) distPassword.value = "";
-  });
-  document.getElementById("dist-address-save").addEventListener("click", () => {
-    changeDistribution({action: "address", address: distAddress.value.trim()}, "حُفظ عنوان استضافتك.");
-  });
-  document.getElementById("dist-add").addEventListener("click", async () => {
-    // The address goes inside the program a user downloads, so it is saved first.
-    if (!distAddressSaved && !(await changeDistribution({action: "address", address: distAddress.value.trim()}, ""))) return;
-    if (await changeDistribution({action: "add", name: distName.value.trim()}, "أُضيف " + distName.value.trim() + ". نزّل له البرنامج من «تنزيل».")) distName.value = "";
   });
 
   checkUpdate();
@@ -5296,57 +5158,53 @@ def read_private_json(path: Path) -> dict | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-# Handing the program out ("توزيع البرنامج"). The owner's copy keeps the panel password, its
-# address as users reach it, and one key per user; a user's copy takes updates with its key.
+# Updates. Users and their keys live in distribution.py, the owner's separate program beside this
+# one, on its own port ("توزيع البرنامج"); a user's copy takes updates from it with its key.
+# distribution.py also keeps the owner's password, which guards this panel too.
 DISTRIBUTION_PATH = DATA_DIR / "distribution.json"
+CONTROL_PORT = int(os.getenv("CONTROL_PORT", "5050"))
+# Where «توزيع البرنامج» opens, when not this host on CONTROL_PORT (e.g. behind a domain).
+CONTROL_URL = os.getenv("CONTROL_URL", "")
 BACKUPS_DIR = DATA_DIR / "backups"
 MAX_PROGRAM_BYTES = 8 * 1024 * 1024
-distribution_lock = threading.Lock()
-distribution: dict = {"password_hash": "", "password_salt": "", "address": "", "users": []}
+panel_password_lock = threading.Lock()
+panel_password: dict = {"hash": "", "salt": "", "stamp": None}
 # Set while a user's copy installs an update: no new task starts.
 updating = threading.Event()
 update_check_cache: dict = {"at": 0.0, "answer": None}
 
 
 def is_owner_copy() -> bool:
-    """The owner's own copy hands updates out; a copy given to a user takes them."""
+    """The owner's own copy has «توزيع البرنامج»; a copy given to a user takes updates."""
     return not UPDATE_SOURCE
 
 
-def load_distribution() -> None:
-    loaded = read_private_json(DISTRIBUTION_PATH) or {}
-    users = [
-        {"id": str(row["id"]), "name": str(row.get("name") or ""), "key": str(row["key"]), "active": bool(row.get("active", True))}
-        for row in loaded.get("users") or []
-        if isinstance(row, dict) and row.get("id") and row.get("key")
-    ]
-    with distribution_lock:
-        distribution.update({
-            "password_hash": str(loaded.get("password_hash") or ""),
-            "password_salt": str(loaded.get("password_salt") or ""),
-            "address": str(loaded.get("address") or ""),
-            "users": users,
-        })
-
-
-def save_distribution_unlocked() -> None:
-    write_private_json(DISTRIBUTION_PATH, {"version": 1, **distribution})
+def current_panel_password() -> tuple[str, str]:
+    """The owner's password (hash, salt) from distribution.py's file, read again when it changes."""
+    try:
+        stamp = DISTRIBUTION_PATH.stat().st_mtime_ns
+    except OSError:
+        stamp = None
+    with panel_password_lock:
+        if stamp != panel_password["stamp"]:
+            loaded = (read_private_json(DISTRIBUTION_PATH) or {}) if stamp else {}
+            panel_password.update(hash=str(loaded.get("password_hash") or ""), salt=str(loaded.get("password_salt") or ""), stamp=stamp)
+        return panel_password["hash"], panel_password["salt"]
 
 
 def password_digest(password: str, salt: str) -> str:
+    # distribution.py sets the password the same way.
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 200_000).hex()
 
 
 def panel_password_ok(password: str) -> bool:
-    with distribution_lock:
-        expected, salt = distribution["password_hash"], distribution["password_salt"]
+    expected, salt = current_panel_password()
     return bool(expected and salt) and hmac.compare_digest(password_digest(password, salt), expected)
 
 
 def panel_login_mark() -> str:
-    """What a logged-in session holds: changes when the panel password changes."""
-    with distribution_lock:
-        return distribution["password_hash"][:16]
+    """What a logged-in session holds: changes when the password changes."""
+    return current_panel_password()[0][:16]
 
 
 def version_of(text: str) -> str:
@@ -5358,16 +5216,8 @@ def version_tuple(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in re.findall(r"\d+", version or "")) or (0,)
 
 
-def program_for(user_key: str, address: str) -> bytes:
-    """This program as a user gets it: the owner's file with the address and the user's key filled in."""
-    text = Path(__file__).read_text(encoding="utf-8")
-    text = re.sub(r'^UPDATE_SOURCE = ".*"$', lambda _: f"UPDATE_SOURCE = {json.dumps(address)}", text, count=1, flags=re.M)
-    text = re.sub(r'^UPDATE_KEY = ".*"$', lambda _: f"UPDATE_KEY = {json.dumps(user_key)}", text, count=1, flags=re.M)
-    return text.encode("utf-8")
-
-
 def ask_update_source(path: str, timeout: float) -> tuple[int, bytes]:
-    """A user's copy asks the owner's copy. Returns (HTTP status, body); status 0 when unreachable."""
+    """A user's copy asks the owner's distribution.py. Returns (HTTP status, body); status 0 when unreachable."""
     asking = urllib.request.Request(UPDATE_SOURCE.rstrip("/") + path, headers={"X-Update-Key": UPDATE_KEY, "User-Agent": "x-group-update"})
     try:
         with urllib.request.urlopen(asking, timeout=timeout) as answer:
@@ -6283,51 +6133,13 @@ def panel_login(access_path: str):
     return jsonify(success=True)
 
 
-def update_user() -> tuple[dict | None, tuple | None]:
-    """The user asking the owner's copy for updates, or the answer refusing them."""
-    with distribution_lock:
-        ready = is_owner_copy() and distribution["password_hash"] and distribution["address"]
-        key = (request.headers.get("X-Update-Key") or "").strip()
-        user = next((dict(row) for row in distribution["users"] if key and hmac.compare_digest(row["key"], key)), None)
-        address = distribution["address"]
-    if not ready:
-        abort(404)
-    if not user:
-        if not allow_attempt("update:" + (request.remote_addr or "unknown")):
-            return None, (jsonify(success=False, message="محاولات كثيرة. انتظر بضع دقائق."), 429)
-        return None, (jsonify(success=False, message="مفتاح التحديث غير صحيح."), 403)
-    if not user["active"]:
-        return None, (jsonify(success=False, message="أوقف صاحب البرنامج التحديثات لهذه النسخة."), 403)
-    user["address"] = address
-    return user, None
-
-
-@app.get("/update/latest")
-def update_latest():
-    user, refused = update_user()
-    if refused:
-        return refused
-    body = program_for(user["key"], user["address"])
-    return jsonify(success=True, version=version_of(body.decode("utf-8")), sha256=hashlib.sha256(body).hexdigest(), size=len(body))
-
-
-@app.get("/update/file")
-def update_file():
-    user, refused = update_user()
-    if refused:
-        return refused
-    response = make_response(program_for(user["key"], user["address"]))
-    response.headers["Content-Type"] = "text/x-python; charset=utf-8"
-    return response
-
-
 @app.get("/<access_path>/update/check")
 def update_check(access_path: str):
     """This copy's version and, in a user's copy, whether the owner offers a newer one."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
     if is_owner_copy():
-        return jsonify(success=True, owner=True, version=APP_VERSION)
+        return jsonify(success=True, owner=True, version=APP_VERSION, control_url=CONTROL_URL, control_port=CONTROL_PORT)
     if request.args.get("light") or updating.is_set():
         return jsonify(success=True, owner=False, version=APP_VERSION, updating=updating.is_set())
     now = time.monotonic()
@@ -6389,90 +6201,6 @@ def update_apply(access_path: str):
     return jsonify(success=True, version=latest["version"], message=f"نُزّل الإصدار {latest['version']}. يُعاد تشغيل البرنامج…")
 
 
-def distribution_payload() -> dict:
-    with distribution_lock:
-        return {
-            "success": True,
-            "password_set": bool(distribution["password_hash"]),
-            "address": distribution["address"],
-            "users": [{"id": row["id"], "name": row["name"], "active": row["active"]} for row in distribution["users"]],
-            "version": version_of(Path(__file__).read_text(encoding="utf-8")) or APP_VERSION,
-        }
-
-
-@app.get("/<access_path>/distribution")
-def distribution_state(access_path: str):
-    if not hmac.compare_digest(access_path, ACCESS_PATH) or not is_owner_copy():
-        abort(404)
-    return jsonify(distribution_payload())
-
-
-@app.post("/<access_path>/distribution")
-def distribution_change(access_path: str):
-    """The owner's «توزيع البرنامج»: panel password, address, and adding, stopping or deleting users."""
-    if not hmac.compare_digest(access_path, ACCESS_PATH) or not is_owner_copy():
-        abort(404)
-    data = request.get_json(silent=True) or {}
-    if not csrf_ok(data):
-        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
-    action = str(data.get("action") or "")
-    with distribution_lock:
-        if action == "password":
-            password = str(data.get("password") or "")
-            if len(password) < 8:
-                return jsonify(success=False, message="كلمة السر ٨ أحرف على الأقل."), 400
-            salt = secrets.token_hex(16)
-            distribution.update(password_salt=salt, password_hash=password_digest(password, salt))
-            save_distribution_unlocked()
-            session["panel_ok"] = distribution["password_hash"][:16]
-            session.permanent = True
-        elif not distribution["password_hash"]:
-            return jsonify(success=False, message="اختر كلمة سر للوحة أولًا."), 400
-        elif action == "address":
-            address = str(data.get("address") or "").strip().rstrip("/")
-            if not re.fullmatch(r"https?://[^\s\"'/]+(/[^\s\"']*)?", address):
-                return jsonify(success=False, message="اكتب العنوان كاملًا، مثل https://example.com"), 400
-            distribution["address"] = address
-            save_distribution_unlocked()
-        elif action == "add":
-            name = re.sub(r"\s+", " ", str(data.get("name") or "")).strip()[:40]
-            if not name:
-                return jsonify(success=False, message="اكتب اسم المستخدم."), 400
-            distribution["users"].append({"id": secrets.token_hex(6), "name": name, "key": secrets.token_urlsafe(24), "active": True})
-            save_distribution_unlocked()
-        elif action in ("stop", "start", "delete"):
-            user_id = str(data.get("id") or "")
-            if not any(row["id"] == user_id for row in distribution["users"]):
-                return jsonify(success=False, message="لم يعد هذا المستخدم موجودًا."), 404
-            if action == "delete":
-                distribution["users"] = [row for row in distribution["users"] if row["id"] != user_id]
-            else:
-                for row in distribution["users"]:
-                    if row["id"] == user_id:
-                        row["active"] = action == "start"
-            save_distribution_unlocked()
-        else:
-            return jsonify(success=False, message="طلب غير معروف."), 400
-    return jsonify(distribution_payload())
-
-
-@app.get("/<access_path>/distribution/<user_id>/program")
-def distribution_program(access_path: str, user_id: str):
-    """The program file to give this user: your address and the user's key are already inside."""
-    if not hmac.compare_digest(access_path, ACCESS_PATH) or not is_owner_copy():
-        abort(404)
-    with distribution_lock:
-        user = next((dict(row) for row in distribution["users"] if row["id"] == user_id), None)
-        address = distribution["address"]
-        ready = bool(distribution["password_hash"])
-    if not user or not address or not ready:
-        abort(404)
-    response = make_response(program_for(user["key"], address))
-    response.headers["Content-Type"] = "text/x-python; charset=utf-8"
-    response.headers["Content-Disposition"] = f'attachment; filename="{Path(__file__).name}"'
-    return response
-
-
 load_sessions()
 load_group_ids()
 load_done_history()
@@ -6482,7 +6210,6 @@ load_action_counts()
 load_jobs()
 threading.Thread(target=save_jobs_in_background, name="jobs-saver", daemon=True).start()
 load_screen()
-load_distribution()
 atexit.register(shutdown_jobs)
 
 
