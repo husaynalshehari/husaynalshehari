@@ -22,6 +22,8 @@ import re
 import secrets
 import shutil
 import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -44,6 +46,12 @@ app.config.update(
 )
 
 ACCESS_PATH = os.getenv("X_ACCESS_PATH", "desk")
+# This copy's version. To publish an update to your users, raise it in your copy (e.g. "1.1").
+APP_VERSION = "1.0"
+# In a copy given to a user: the owner's address to take updates from, and that user's key.
+# The owner's copy fills both in when it hands the program out; both stay empty in the owner's copy.
+UPDATE_SOURCE = ""
+UPDATE_KEY = ""
 ATTEMPT_WINDOW_SECONDS = 300
 MAX_ATTEMPTS_PER_CLIENT = 5
 MAX_REPOSTS_REQUEST = 1000
@@ -567,6 +575,24 @@ EMBEDDED_PAGE = r'''<!doctype html>
       font-weight: 600;
       box-shadow: inset 0 0 0 1px var(--line);
     }
+    a.drop { display: inline-flex; align-items: center; text-decoration: none; }
+    .drop.is-plain { color: var(--ink); }
+    .update-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 10px;
+      padding: 8px 10px;
+      border-radius: 12px;
+      color: var(--ok-ink);
+      background: var(--ok-bg);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .update-bar .btn { flex: 0 0 auto; }
+    .version-line { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 10px; margin: 14px 0 4px; color: var(--muted); font-size: 12px; }
+    .link-button { border: 0; padding: 0; background: none; color: var(--pine); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
 
     @media (min-width: 760px) {
       body { font-size: 15px; }
@@ -610,6 +636,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
       </ol>
     </header>
     <p class="lede">يُفتح تبويب إعادات النشر ويُمرَّر حتى يكتمل العدد أو ينتهي الخط. ترى حالة كل إجراء، ثم تقرر. لا يُمس الحساب قبل «تأكيد التنفيذ».</p>
+
+    <div id="update-bar" class="update-bar" role="status" hidden>
+      <span id="update-text"></span>
+      <button id="update-button" class="btn btn-pine" type="button">تحديث</button>
+    </div>
 
     <div id="notice" class="notice" role="status" hidden></div>
 
@@ -793,6 +824,38 @@ EMBEDDED_PAGE = r'''<!doctype html>
       </div>
     </section>
 
+    <section id="distribution" class="sheet" hidden>
+      <div class="sheet-inner">
+        <h2>توزيع البرنامج</h2>
+        <p class="hint">الإصدار المنشور <b id="dist-version"></b>. لنشر تحديث ارفع رقم APP_VERSION في ملفك، فيظهر زر «تحديث» عند المستخدمين.</p>
+        <label class="field-label" for="dist-password">كلمة سر اللوحة</label>
+        <div class="token-row">
+          <input id="dist-password" type="password" autocomplete="new-password" placeholder="٨ أحرف على الأقل">
+          <button id="dist-password-save" class="btn btn-ghost" type="button">حفظ</button>
+        </div>
+        <p id="dist-password-hint" class="hint"></p>
+        <div id="dist-body" hidden>
+          <label class="field-label" for="dist-address">عنوان استضافتك</label>
+          <div class="token-row">
+            <input id="dist-address" type="text" inputmode="url" spellcheck="false" placeholder="https://example.com">
+            <button id="dist-address-save" class="btn btn-ghost" type="button">حفظ</button>
+          </div>
+          <label class="field-label" for="dist-name">مستخدم جديد</label>
+          <div class="token-row">
+            <input id="dist-name" type="text" maxlength="40" placeholder="الاسم">
+            <button id="dist-add" class="btn btn-ghost" type="button">إضافة</button>
+          </div>
+          <ul id="dist-users" class="saved-list"></ul>
+        </div>
+      </div>
+    </section>
+
+    <p class="version-line">
+      <span>الإصدار {{ app_version }}</span>
+      <span id="update-state"></span>
+      <button id="dist-toggle" class="link-button" type="button" aria-expanded="false" aria-controls="distribution" hidden>توزيع البرنامج</button>
+    </p>
+
     <p class="footnote">الأعداد الكبيرة تأخذ وقتًا لأن كل دفعة تُنتظر حتى تظهر. إذا أغلقت المتصفح أثناء العملية فافتح الصفحة نفسها لاحقًا: يظهر التقدم من حيث بلغ، أو النتيجة إن اكتملت. الجلسات المحفوظة تبقى بعد إعادة تشغيل السكربت.</p>
   </main>
 <script>
@@ -939,7 +1002,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
     try {
-      return await fetch(url, {...options, signal: controller.signal});
+      const response = await fetch(url, {...options, signal: controller.signal});
+      if (response.status === 401) location.reload();
+      return response;
     } finally {
       clearTimeout(timer);
     }
@@ -1344,6 +1409,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       cache: "no-store",
       body: JSON.stringify({...payload, csrf_token: csrf})
     });
+    if (response.status === 401) location.reload();
     const data = await response.json();
     if (!response.ok && !data.message) throw new Error("تعذّر إكمال الطلب.");
     return data;
@@ -1738,6 +1804,176 @@ EMBEDDED_PAGE = r'''<!doctype html>
   });
 
   restoreScreen();
+
+  // Updates. A user's copy shows «تحديث» when the owner offers a newer version; the owner's
+  // copy shows «توزيع البرنامج» instead.
+  const updateBar = document.getElementById("update-bar");
+  const updateText = document.getElementById("update-text");
+  const updateButton = document.getElementById("update-button");
+  const updateState = document.getElementById("update-state");
+  const distToggle = document.getElementById("dist-toggle");
+  const distSection = document.getElementById("distribution");
+  const distVersion = document.getElementById("dist-version");
+  const distPassword = document.getElementById("dist-password");
+  const distPasswordHint = document.getElementById("dist-password-hint");
+  const distBody = document.getElementById("dist-body");
+  const distAddress = document.getElementById("dist-address");
+  const distName = document.getElementById("dist-name");
+  const distUsers = document.getElementById("dist-users");
+  let distAddressSaved = "";
+
+  async function checkUpdate() {
+    try {
+      const response = await fetchWithTimeout(apiRoot + "/update/check", {cache: "no-store"}, 30000);
+      const data = await response.json();
+      if (data.owner) {
+        distToggle.hidden = false;
+        return;
+      }
+      updateState.textContent = data.message || "";
+      if (data.available && !updateButton.disabled) {
+        updateText.textContent = "يتوفر إصدار جديد " + data.latest;
+        updateButton.textContent = "تحديث إلى " + data.latest;
+      }
+      updateBar.hidden = !data.available;
+    } catch (_) {}
+  }
+
+  updateButton.addEventListener("click", async () => {
+    updateButton.disabled = true;
+    updateText.textContent = "جارٍ تنزيل التحديث…";
+    let data;
+    try {
+      data = await postJson("/update/apply", {});
+    } catch (_) {
+      data = {message: "تعذّر الاتصال أثناء التحديث."};
+    }
+    if (!data.success) {
+      updateText.textContent = data.message || "تعذّر التحديث.";
+      updateButton.disabled = false;
+      return;
+    }
+    updateText.textContent = data.message;
+    // Wait until the program runs again with the new version, then open its page.
+    const started = Date.now();
+    while (Date.now() - started < 90000) {
+      await new Promise((done) => setTimeout(done, 1500));
+      try {
+        const response = await fetchWithTimeout(apiRoot + "/update/check?light=1", {cache: "no-store"}, 4000);
+        if ((await response.json()).version === data.version) {
+          location.reload();
+          return;
+        }
+      } catch (_) {}
+    }
+    updateText.textContent = "لم يعد البرنامج للعمل بعد. حدّث الصفحة بعد قليل.";
+  });
+
+  function distButton(label, plain, onClick) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "drop" + (plain ? " is-plain" : "");
+    button.textContent = label;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await onClick();
+      } finally {
+        button.disabled = false;
+      }
+    });
+    return button;
+  }
+
+  function renderDistribution(data) {
+    distVersion.textContent = data.version;
+    distPasswordHint.textContent = data.password_set
+      ? "محفوظة. اكتب كلمة جديدة لتغييرها."
+      : "اخترها أولًا: عنوان استضافتك سيكون داخل البرنامج، وكلمة السر تمنع المستخدمين من فتح لوحتك.";
+    distBody.hidden = !data.password_set;
+    distAddressSaved = data.address || "";
+    if (document.activeElement !== distAddress) distAddress.value = distAddressSaved || location.origin;
+    distUsers.replaceChildren();
+    data.users.forEach((row) => {
+      const item = document.createElement("li");
+      item.className = "saved-session";
+      const info = document.createElement("div");
+      info.className = "pick";
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = row.name;
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      meta.textContent = row.active ? "فعّال" : "موقوف";
+      info.append(who, meta);
+      const download = document.createElement("a");
+      download.className = "drop is-plain";
+      download.textContent = "تنزيل";
+      download.href = apiRoot + "/distribution/" + encodeURIComponent(row.id) + "/program";
+      download.setAttribute("download", "");
+      download.setAttribute("aria-label", "تنزيل البرنامج لـ " + row.name);
+      const toggle = distButton(row.active ? "إيقاف" : "تفعيل", true, () => changeDistribution(
+        {action: row.active ? "stop" : "start", id: row.id},
+        row.active ? "أُوقفت تحديثات " + row.name + "." : "عادت تحديثات " + row.name + "."
+      ));
+      const remove = distButton("حذف", false, async () => {
+        if (!window.confirm("حذف " + row.name + "؟ تتوقف تحديثات نسخته.")) return;
+        await changeDistribution({action: "delete", id: row.id}, "حُذف " + row.name + ".");
+      });
+      item.append(info, download, toggle, remove);
+      distUsers.append(item);
+    });
+  }
+
+  async function loadDistribution() {
+    try {
+      const response = await fetchWithTimeout(apiRoot + "/distribution", {cache: "no-store"});
+      renderDistribution(await response.json());
+    } catch (_) {
+      showNotice("تعذّر تحميل التوزيع.", false);
+    }
+  }
+
+  async function changeDistribution(payload, okMessage) {
+    let data;
+    try {
+      data = await postJson("/distribution", payload);
+    } catch (_) {
+      data = {message: "تعذّر الاتصال."};
+    }
+    if (!data.success) {
+      showNotice(data.message || "تعذّر الحفظ.", false);
+      return false;
+    }
+    renderDistribution(data);
+    if (okMessage) showNotice(okMessage, true);
+    return true;
+  }
+
+  distToggle.addEventListener("click", async () => {
+    const open = distSection.hidden;
+    distSection.hidden = !open;
+    distToggle.setAttribute("aria-expanded", String(open));
+    distToggle.textContent = open ? "إخفاء التوزيع" : "توزيع البرنامج";
+    if (open) {
+      await loadDistribution();
+      distSection.scrollIntoView({behavior: "smooth", block: "start"});
+    }
+  });
+  document.getElementById("dist-password-save").addEventListener("click", async () => {
+    if (await changeDistribution({action: "password", password: distPassword.value}, "حُفظت كلمة سر اللوحة.")) distPassword.value = "";
+  });
+  document.getElementById("dist-address-save").addEventListener("click", () => {
+    changeDistribution({action: "address", address: distAddress.value.trim()}, "حُفظ عنوان استضافتك.");
+  });
+  document.getElementById("dist-add").addEventListener("click", async () => {
+    // The address goes inside the program a user downloads, so it is saved first.
+    if (!distAddressSaved && !(await changeDistribution({action: "address", address: distAddress.value.trim()}, ""))) return;
+    if (await changeDistribution({action: "add", name: distName.value.trim()}, "أُضيف " + distName.value.trim() + ". نزّل له البرنامج من «تنزيل».")) distName.value = "";
+  });
+
+  checkUpdate();
+  setInterval(checkUpdate, 30 * 60 * 1000);
 
 })();
 </script>
@@ -4996,7 +5232,7 @@ def login_page(access_path: str):
         csrf_token = secrets.token_urlsafe(32)
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
-        PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH,
+        PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=APP_VERSION,
     ))
     return response
 
@@ -5058,6 +5294,172 @@ def read_private_json(path: Path) -> dict | None:
             path.replace(broken)
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+# Handing the program out ("توزيع البرنامج"). The owner's copy keeps the panel password, its
+# address as users reach it, and one key per user; a user's copy takes updates with its key.
+DISTRIBUTION_PATH = DATA_DIR / "distribution.json"
+BACKUPS_DIR = DATA_DIR / "backups"
+MAX_PROGRAM_BYTES = 8 * 1024 * 1024
+distribution_lock = threading.Lock()
+distribution: dict = {"password_hash": "", "password_salt": "", "address": "", "users": []}
+# Set while a user's copy installs an update: no new task starts.
+updating = threading.Event()
+update_check_cache: dict = {"at": 0.0, "answer": None}
+
+
+def is_owner_copy() -> bool:
+    """The owner's own copy hands updates out; a copy given to a user takes them."""
+    return not UPDATE_SOURCE
+
+
+def load_distribution() -> None:
+    loaded = read_private_json(DISTRIBUTION_PATH) or {}
+    users = [
+        {"id": str(row["id"]), "name": str(row.get("name") or ""), "key": str(row["key"]), "active": bool(row.get("active", True))}
+        for row in loaded.get("users") or []
+        if isinstance(row, dict) and row.get("id") and row.get("key")
+    ]
+    with distribution_lock:
+        distribution.update({
+            "password_hash": str(loaded.get("password_hash") or ""),
+            "password_salt": str(loaded.get("password_salt") or ""),
+            "address": str(loaded.get("address") or ""),
+            "users": users,
+        })
+
+
+def save_distribution_unlocked() -> None:
+    write_private_json(DISTRIBUTION_PATH, {"version": 1, **distribution})
+
+
+def password_digest(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 200_000).hex()
+
+
+def panel_password_ok(password: str) -> bool:
+    with distribution_lock:
+        expected, salt = distribution["password_hash"], distribution["password_salt"]
+    return bool(expected and salt) and hmac.compare_digest(password_digest(password, salt), expected)
+
+
+def panel_login_mark() -> str:
+    """What a logged-in session holds: changes when the panel password changes."""
+    with distribution_lock:
+        return distribution["password_hash"][:16]
+
+
+def version_of(text: str) -> str:
+    match = re.search(r'^APP_VERSION = "([0-9][0-9.]*)"', text, re.M)
+    return match.group(1) if match else ""
+
+
+def version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", version or "")) or (0,)
+
+
+def program_for(user_key: str, address: str) -> bytes:
+    """This program as a user gets it: the owner's file with the address and the user's key filled in."""
+    text = Path(__file__).read_text(encoding="utf-8")
+    text = re.sub(r'^UPDATE_SOURCE = ".*"$', lambda _: f"UPDATE_SOURCE = {json.dumps(address)}", text, count=1, flags=re.M)
+    text = re.sub(r'^UPDATE_KEY = ".*"$', lambda _: f"UPDATE_KEY = {json.dumps(user_key)}", text, count=1, flags=re.M)
+    return text.encode("utf-8")
+
+
+def ask_update_source(path: str, timeout: float) -> tuple[int, bytes]:
+    """A user's copy asks the owner's copy. Returns (HTTP status, body); status 0 when unreachable."""
+    asking = urllib.request.Request(UPDATE_SOURCE.rstrip("/") + path, headers={"X-Update-Key": UPDATE_KEY, "User-Agent": "x-group-update"})
+    try:
+        with urllib.request.urlopen(asking, timeout=timeout) as answer:
+            return answer.status, answer.read(MAX_PROGRAM_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(4096)
+    except (urllib.error.URLError, OSError, ValueError):
+        return 0, b""
+
+
+def latest_update() -> dict:
+    """The version the owner offers this copy {"version", "sha256"}, or {"message"} saying why not."""
+    status, body = ask_update_source("/update/latest", 15)
+    try:
+        answer = json.loads(body.decode("utf-8")) if body else {}
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        answer = {}
+    if status == 200 and isinstance(answer, dict) and answer.get("version"):
+        return {"version": str(answer["version"]), "sha256": str(answer.get("sha256") or "")}
+    message = answer.get("message") if isinstance(answer, dict) else ""
+    return {"message": str(message or "تعذّر الاتصال بمصدر التحديث.")}
+
+
+def new_program_problem(body: bytes, latest: dict) -> str:
+    """Why a downloaded program must not be installed; "" when it is fine."""
+    if not body or len(body) > MAX_PROGRAM_BYTES:
+        return "لم يصل ملف التحديث كاملًا. أعد المحاولة."
+    if not hmac.compare_digest(hashlib.sha256(body).hexdigest(), latest.get("sha256") or ""):
+        return "لم يصل ملف التحديث كاملًا. أعد المحاولة."
+    try:
+        text = body.decode("utf-8")
+        compile(text, "update.py", "exec")
+    except (UnicodeDecodeError, SyntaxError, ValueError):
+        return "ملف التحديث غير صالح. لم يتغير شيء."
+    if version_of(text) != latest.get("version"):
+        return "رقم إصدار ملف التحديث لا يطابق. لم يتغير شيء."
+    if not re.search(r'^UPDATE_SOURCE = "https?://[^"\s]+"$', text, re.M) or not re.search(r'^UPDATE_KEY = "[^"\s]+"$', text, re.M):
+        return "ملف التحديث بلا عنوان أو مفتاح. لم يتغير شيء."
+    return ""
+
+
+def program_starts(body: bytes) -> bool:
+    """Load the new program once in a separate Python, in a scratch folder, to see that it starts."""
+    trial = BACKUPS_DIR / "trial"
+    shutil.rmtree(trial, ignore_errors=True)
+    try:
+        trial.mkdir(parents=True)
+        program = trial / "program.py"
+        program.write_bytes(body)
+        load = ("import importlib.util, sys; spec = importlib.util.spec_from_file_location('trial', sys.argv[1]); "
+                "spec.loader.exec_module(importlib.util.module_from_spec(spec))")
+        result = subprocess.run([sys.executable, "-c", load, str(program)], cwd=trial, capture_output=True, timeout=90)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        shutil.rmtree(trial, ignore_errors=True)
+
+
+def install_program(body: bytes) -> None:
+    """Keep the running file in data/backups, then put the new one in its place."""
+    script = Path(__file__).resolve()
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(script, BACKUPS_DIR / f"{script.stem}-{APP_VERSION}.py")
+    temporary = script.with_name(script.name + ".new")
+    temporary.write_bytes(body)
+    try:
+        shutil.copymode(script, temporary)
+    except OSError:
+        pass
+    temporary.replace(script)
+
+
+def restart_program() -> None:
+    """Run the program again in this same process, so the new file takes over."""
+    time.sleep(1.5)
+    try:
+        shutdown_jobs()
+    except Exception:
+        pass
+    # Flask's server leaves its listening socket open across exec; close it there so the new
+    # program can listen on the same port.
+    server_fd = os.environ.pop("WERKZEUG_SERVER_FD", "")
+    if server_fd.isdigit():
+        try:
+            os.set_inheritable(int(server_fd), False)
+        except OSError:
+            pass
+    sys.stdout.flush()
+    sys.stderr.flush()
+    command = list(getattr(sys, "orig_argv", None) or [sys.executable, *sys.argv])
+    os.execv(sys.executable, [sys.executable, *command[1:]])
 
 
 def remember_gemini(api_key: str, model: str) -> None:
@@ -5535,6 +5937,8 @@ def group_run_endpoint(access_path: str):
         if not valid_gemini_key(gemini_api_key) or not gemini_model:
             return jsonify(success=False, message="أدخل مفتاح Gemini واسم النموذج قبل التعليق."), 400
         remember_gemini(gemini_api_key, gemini_model or "")
+    if updating.is_set():
+        return jsonify(success=False, message="يجري تحديث البرنامج. انتظر قليلًا ثم أعد المحاولة."), 503
     with jobs_lock:
         running = [job for job in jobs.values() if job.get("status") == "running" and job.get("kind") == "execute"]
     if len(running) >= MAX_PARALLEL_JOBS:
@@ -5582,6 +5986,8 @@ def retry_job_endpoint(access_path: str):
         args = job_run_args.get(job_id)
         if not job.get("resumable") or not args:
             return jsonify(success=False, message="لا يمكن إعادة هذه المهمة. ابدأ مهمة جديدة."), 400
+        if updating.is_set():
+            return jsonify(success=False, message="يجري تحديث البرنامج. انتظر قليلًا ثم أعد المحاولة."), 503
         running = [row for row in jobs.values() if row.get("status") == "running" and row.get("kind") == "execute"]
         if len(running) >= MAX_PARALLEL_JOBS:
             return jsonify(success=False, message=f"أقصى عدد للمهام المتزامنة هو {MAX_PARALLEL_JOBS}. أوقف مهمة أو انتظر انتهائها."), 429
@@ -5797,6 +6203,276 @@ def delete_session_endpoint(access_path: str):
     return jsonify(success=True, message="حُذفت الجلسة.")
 
 
+LOGIN_PAGE = r'''<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>دخول</title>
+  <style>
+    :root { --pine: #0f6b50; --ink: #1c1915; --line: #e4dcd0; --paper: #f3efe6; --sheet: #fffdf8; --clay: #9a3412; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--paper); color: var(--ink); font-family: system-ui, sans-serif; }
+    form { box-sizing: border-box; width: min(320px, calc(100vw - 32px)); padding: 18px; border-radius: 14px; background: var(--sheet); box-shadow: inset 0 0 0 1px var(--line); }
+    h1 { margin: 0 0 10px; font-size: 16px; }
+    input { box-sizing: border-box; width: 100%; height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; font-size: 16px; }
+    button { width: 100%; height: 38px; margin-top: 10px; border: 0; border-radius: 8px; background: var(--pine); color: #fff; font: inherit; font-weight: 600; }
+    p { min-height: 1.4em; margin: 8px 0 0; color: var(--clay); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <form id="login">
+    <h1>كلمة سر اللوحة</h1>
+    <input id="password" type="password" autocomplete="current-password" required autofocus aria-label="كلمة سر اللوحة">
+    <button type="submit">دخول</button>
+    <p id="message" role="status"></p>
+  </form>
+  <script>
+    document.getElementById("login").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const message = document.getElementById("message");
+      message.textContent = "";
+      try {
+        const response = await fetch({{ login_url|tojson }}, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({password: document.getElementById("password").value})
+        });
+        const data = await response.json();
+        if (data.success) {
+          location.reload();
+          return;
+        }
+        message.textContent = data.message || "تعذّر الدخول.";
+      } catch (_) {
+        message.textContent = "تعذّر الاتصال.";
+      }
+    });
+  </script>
+</body>
+</html>
+'''
+
+
+@app.before_request
+def require_panel_login():
+    """Once the owner has a panel password, the panel and everything under it need a login."""
+    mark = panel_login_mark()
+    if not mark or session.get("panel_ok") == mark:
+        return None
+    parts = request.path.split("/")
+    if len(parts) < 2 or not hmac.compare_digest(parts[1], ACCESS_PATH):
+        return None
+    if parts[2:] == ["login"]:
+        return None
+    if request.method == "GET" and parts[2:] in ([], [""]):
+        return render_template_string(LOGIN_PAGE, login_url="/" + ACCESS_PATH + "/login")
+    return jsonify(success=False, message="سجّل الدخول بكلمة سر اللوحة.", login=True), 401
+
+
+@app.post("/<access_path>/login")
+def panel_login(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    if not allow_attempt("login:" + (request.remote_addr or "unknown")):
+        return jsonify(success=False, message="محاولات كثيرة. انتظر بضع دقائق ثم أعد المحاولة."), 429
+    data = request.get_json(silent=True) or {}
+    if not panel_password_ok(str(data.get("password") or "")):
+        return jsonify(success=False, message="كلمة السر غير صحيحة."), 403
+    session["panel_ok"] = panel_login_mark()
+    session.permanent = True
+    return jsonify(success=True)
+
+
+def update_user() -> tuple[dict | None, tuple | None]:
+    """The user asking the owner's copy for updates, or the answer refusing them."""
+    with distribution_lock:
+        ready = is_owner_copy() and distribution["password_hash"] and distribution["address"]
+        key = (request.headers.get("X-Update-Key") or "").strip()
+        user = next((dict(row) for row in distribution["users"] if key and hmac.compare_digest(row["key"], key)), None)
+        address = distribution["address"]
+    if not ready:
+        abort(404)
+    if not user:
+        if not allow_attempt("update:" + (request.remote_addr or "unknown")):
+            return None, (jsonify(success=False, message="محاولات كثيرة. انتظر بضع دقائق."), 429)
+        return None, (jsonify(success=False, message="مفتاح التحديث غير صحيح."), 403)
+    if not user["active"]:
+        return None, (jsonify(success=False, message="أوقف صاحب البرنامج التحديثات لهذه النسخة."), 403)
+    user["address"] = address
+    return user, None
+
+
+@app.get("/update/latest")
+def update_latest():
+    user, refused = update_user()
+    if refused:
+        return refused
+    body = program_for(user["key"], user["address"])
+    return jsonify(success=True, version=version_of(body.decode("utf-8")), sha256=hashlib.sha256(body).hexdigest(), size=len(body))
+
+
+@app.get("/update/file")
+def update_file():
+    user, refused = update_user()
+    if refused:
+        return refused
+    response = make_response(program_for(user["key"], user["address"]))
+    response.headers["Content-Type"] = "text/x-python; charset=utf-8"
+    return response
+
+
+@app.get("/<access_path>/update/check")
+def update_check(access_path: str):
+    """This copy's version and, in a user's copy, whether the owner offers a newer one."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    if is_owner_copy():
+        return jsonify(success=True, owner=True, version=APP_VERSION)
+    if request.args.get("light") or updating.is_set():
+        return jsonify(success=True, owner=False, version=APP_VERSION, updating=updating.is_set())
+    now = time.monotonic()
+    answer = update_check_cache["answer"]
+    if answer is None or now - update_check_cache["at"] > 60:
+        answer = latest_update()
+        update_check_cache.update(at=now, answer=answer)
+    if not answer.get("version"):
+        return jsonify(success=True, owner=False, version=APP_VERSION, message=answer.get("message") or "")
+    newer = version_tuple(answer["version"]) > version_tuple(APP_VERSION)
+    return jsonify(success=True, owner=False, version=APP_VERSION, latest=answer["version"], available=newer)
+
+
+@app.post("/<access_path>/update/apply")
+def update_apply(access_path: str):
+    """«تحديث» in a user's copy: download the owner's newest version, check it, keep the old file,
+    put the new one in place and start again. Nothing changes when any step fails."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH) or is_owner_copy():
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+
+    def busy() -> bool:
+        with jobs_lock:
+            return any(job.get("status") == "running" for job in jobs.values())
+
+    with jobs_lock:
+        if updating.is_set():
+            return jsonify(success=False, message="التحديث جارٍ."), 409
+        updating.set()
+    installed = False
+    try:
+        if busy():
+            return jsonify(success=False, message="انتظر حتى تنتهي المهام الجارية ثم اضغط «تحديث»."), 409
+        latest = latest_update()
+        if not latest.get("version"):
+            return jsonify(success=False, message=latest.get("message") or "تعذّر الاتصال بمصدر التحديث."), 502
+        if version_tuple(latest["version"]) <= version_tuple(APP_VERSION):
+            return jsonify(success=False, message="هذه النسخة على آخر إصدار."), 409
+        status, body = ask_update_source("/update/file", 60)
+        if status != 200:
+            return jsonify(success=False, message=latest_update().get("message") or "تعذّر تنزيل التحديث."), 502
+        problem = new_program_problem(body, latest)
+        if problem:
+            return jsonify(success=False, message=problem), 502
+        if not program_starts(body):
+            return jsonify(success=False, message="الإصدار الجديد لا يعمل على هذه الاستضافة. لم يتغير شيء."), 502
+        if busy():
+            return jsonify(success=False, message="بدأت مهمة أثناء التنزيل. انتظر حتى تنتهي ثم اضغط «تحديث»."), 409
+        install_program(body)
+        installed = True
+    except OSError:
+        return jsonify(success=False, message="تعذّر حفظ ملف التحديث. لم يتغير شيء."), 500
+    finally:
+        if not installed:
+            updating.clear()
+    threading.Thread(target=restart_program, name="restart", daemon=True).start()
+    return jsonify(success=True, version=latest["version"], message=f"نُزّل الإصدار {latest['version']}. يُعاد تشغيل البرنامج…")
+
+
+def distribution_payload() -> dict:
+    with distribution_lock:
+        return {
+            "success": True,
+            "password_set": bool(distribution["password_hash"]),
+            "address": distribution["address"],
+            "users": [{"id": row["id"], "name": row["name"], "active": row["active"]} for row in distribution["users"]],
+            "version": version_of(Path(__file__).read_text(encoding="utf-8")) or APP_VERSION,
+        }
+
+
+@app.get("/<access_path>/distribution")
+def distribution_state(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH) or not is_owner_copy():
+        abort(404)
+    return jsonify(distribution_payload())
+
+
+@app.post("/<access_path>/distribution")
+def distribution_change(access_path: str):
+    """The owner's «توزيع البرنامج»: panel password, address, and adding, stopping or deleting users."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH) or not is_owner_copy():
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    action = str(data.get("action") or "")
+    with distribution_lock:
+        if action == "password":
+            password = str(data.get("password") or "")
+            if len(password) < 8:
+                return jsonify(success=False, message="كلمة السر ٨ أحرف على الأقل."), 400
+            salt = secrets.token_hex(16)
+            distribution.update(password_salt=salt, password_hash=password_digest(password, salt))
+            save_distribution_unlocked()
+            session["panel_ok"] = distribution["password_hash"][:16]
+            session.permanent = True
+        elif not distribution["password_hash"]:
+            return jsonify(success=False, message="اختر كلمة سر للوحة أولًا."), 400
+        elif action == "address":
+            address = str(data.get("address") or "").strip().rstrip("/")
+            if not re.fullmatch(r"https?://[^\s\"'/]+(/[^\s\"']*)?", address):
+                return jsonify(success=False, message="اكتب العنوان كاملًا، مثل https://example.com"), 400
+            distribution["address"] = address
+            save_distribution_unlocked()
+        elif action == "add":
+            name = re.sub(r"\s+", " ", str(data.get("name") or "")).strip()[:40]
+            if not name:
+                return jsonify(success=False, message="اكتب اسم المستخدم."), 400
+            distribution["users"].append({"id": secrets.token_hex(6), "name": name, "key": secrets.token_urlsafe(24), "active": True})
+            save_distribution_unlocked()
+        elif action in ("stop", "start", "delete"):
+            user_id = str(data.get("id") or "")
+            if not any(row["id"] == user_id for row in distribution["users"]):
+                return jsonify(success=False, message="لم يعد هذا المستخدم موجودًا."), 404
+            if action == "delete":
+                distribution["users"] = [row for row in distribution["users"] if row["id"] != user_id]
+            else:
+                for row in distribution["users"]:
+                    if row["id"] == user_id:
+                        row["active"] = action == "start"
+            save_distribution_unlocked()
+        else:
+            return jsonify(success=False, message="طلب غير معروف."), 400
+    return jsonify(distribution_payload())
+
+
+@app.get("/<access_path>/distribution/<user_id>/program")
+def distribution_program(access_path: str, user_id: str):
+    """The program file to give this user: your address and the user's key are already inside."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH) or not is_owner_copy():
+        abort(404)
+    with distribution_lock:
+        user = next((dict(row) for row in distribution["users"] if row["id"] == user_id), None)
+        address = distribution["address"]
+        ready = bool(distribution["password_hash"])
+    if not user or not address or not ready:
+        abort(404)
+    response = make_response(program_for(user["key"], address))
+    response.headers["Content-Type"] = "text/x-python; charset=utf-8"
+    response.headers["Content-Disposition"] = f'attachment; filename="{Path(__file__).name}"'
+    return response
+
+
 load_sessions()
 load_group_ids()
 load_done_history()
@@ -5806,6 +6482,7 @@ load_action_counts()
 load_jobs()
 threading.Thread(target=save_jobs_in_background, name="jobs-saver", daemon=True).start()
 load_screen()
+load_distribution()
 atexit.register(shutdown_jobs)
 
 
