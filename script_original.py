@@ -415,6 +415,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .gemini-fields[hidden] { display: none !important; }
     .gemini-fields .field-label { margin-top: 0; }
     .gemini-edit { height: 32px; min-height: 32px; padding: 0 8px; font-size: 12px; }
+    .gemini-owner { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; }
     .choice {
       display: flex;
       gap: 6px;
@@ -766,6 +767,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             </label>
           </div>
           <div id="gemini-fields" class="gemini-fields" hidden>
+            {% if not owner_copy %}<p class="gemini-owner">يضبط مفتاح Gemini والنموذج صاحب البرنامج.</p>{% endif %}
             <div>
               <label class="field-label" for="gemini-key">مفتاح Gemini</label>
               <input id="gemini-key" type="password" maxlength="256" autocomplete="off" spellcheck="false" readonly
@@ -907,6 +909,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const geminiCost = document.getElementById("gemini-cost");
   const geminiCostValue = document.getElementById("gemini-cost-value");
   const editGemini = document.getElementById("edit-gemini");
+  // A user's copy: the owner sets the Gemini key and model; here they are only shown.
+  const geminiByOwner = {{ (not owner_copy)|tojson }};
+  editGemini.hidden = geminiByOwner;
   function lockGemini(locked) {
     geminiKey.readOnly = locked;
     geminiModel.readOnly = locked;
@@ -1292,13 +1297,18 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (!response.ok) return;
       sessionRows = data.sessions || [];
       renderSessions();
-      if (data.gemini_api_key && document.activeElement !== geminiKey) {
-        geminiKey.value = data.gemini_api_key;
-        localStorage.setItem("x_gemini_key", data.gemini_api_key);
-      }
-      if (data.gemini_model && document.activeElement !== geminiModel) {
-        geminiModel.value = data.gemini_model;
-        localStorage.setItem("x_gemini_model", data.gemini_model);
+      if (geminiByOwner) {
+        geminiKey.value = data.gemini_api_key || "";
+        geminiModel.value = data.gemini_model || "";
+      } else {
+        if (data.gemini_api_key && document.activeElement !== geminiKey) {
+          geminiKey.value = data.gemini_api_key;
+          localStorage.setItem("x_gemini_key", data.gemini_api_key);
+        }
+        if (data.gemini_model && document.activeElement !== geminiModel) {
+          geminiModel.value = data.gemini_model;
+          localStorage.setItem("x_gemini_model", data.gemini_model);
+        }
       }
     } catch (_) {}
   }
@@ -1489,12 +1499,13 @@ EMBEDDED_PAGE = r'''<!doctype html>
 
 
   commentToggle.addEventListener("change", syncGemini);
-  const savedModel = localStorage.getItem("x_gemini_model");
-  const savedKey = localStorage.getItem("x_gemini_key");
+  const savedModel = geminiByOwner ? "" : localStorage.getItem("x_gemini_model");
+  const savedKey = geminiByOwner ? "" : localStorage.getItem("x_gemini_key");
   if (savedModel) geminiModel.value = savedModel;
   if (savedKey) geminiKey.value = savedKey;
   let geminiSaveTimer = 0;
   function rememberGeminiLocal() {
+    if (geminiByOwner) return;
     const key = geminiKey.value.trim();
     const model = geminiModel.value.trim();
     if (key) localStorage.setItem("x_gemini_key", key);
@@ -1628,7 +1639,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
     if (!selectedGroup) { showNotice("اعرض القروبات ثم اختر واحدًا.", false); return; }
     if (!stopId) { showNotice("الصق رابط التغريدة المحددة أو رقمها.", false); stopField.focus(); return; }
     if (!actions.length) { showNotice("اختر إجراءً واحدًا على الأقل.", false); return; }
-    if (actions.includes("comment")) {
+    if (actions.includes("comment") && geminiByOwner) {
+      if (!geminiKey.value.trim()) { showNotice("لا يوجد مفتاح Gemini لهذه النسخة. اطلبه من صاحب البرنامج.", false); return; }
+    } else if (actions.includes("comment")) {
       if (!geminiKey.value.trim()) { lockGemini(false); showNotice("أدخل مفتاح Gemini.", false); geminiKey.focus(); return; }
       if (!geminiModel.value.trim()) { lockGemini(false); showNotice("أدخل اسم النموذج.", false); geminiModel.focus(); return; }
       rememberGeminiLocal();
@@ -5877,14 +5890,20 @@ def group_run_endpoint(access_path: str):
     requested_actions = list(dict.fromkeys(requested_actions))
     gemini_api_key = str(data.get("gemini_api_key") or "").strip()
     gemini_model = normalize_gemini_model(str(data.get("gemini_model") or ""))
+    if not is_owner_copy():
+        # A user's copy uses the Gemini key and model the owner set; what the page sends is ignored.
+        gemini_api_key, gemini_model = "", ""
     if "comment" in requested_actions:
         if not gemini_api_key:
             gemini_api_key = saved_gemini.get("api_key") or ""
         if not gemini_model:
             gemini_model = normalize_gemini_model(saved_gemini.get("model") or "")
         if not valid_gemini_key(gemini_api_key) or not gemini_model:
+            if not is_owner_copy():
+                return jsonify(success=False, message="لا يوجد مفتاح Gemini لهذه النسخة. اطلبه من صاحب البرنامج."), 400
             return jsonify(success=False, message="أدخل مفتاح Gemini واسم النموذج قبل التعليق."), 400
-        remember_gemini(gemini_api_key, gemini_model or "")
+        if is_owner_copy():
+            remember_gemini(gemini_api_key, gemini_model or "")
     if updating.is_set():
         return jsonify(success=False, message="يجري تحديث البرنامج. انتظر قليلًا ثم أعد المحاولة."), 503
     with jobs_lock:
@@ -6037,6 +6056,9 @@ def list_sessions_endpoint(access_path: str):
     with gemini_lock:
         gemini_key = saved_gemini.get("api_key") or ""
         gemini_model = saved_gemini.get("model") or ""
+    if gemini_key and not is_owner_copy():
+        # A user's page only shows that a key is there; the copy itself uses it.
+        gemini_key = f"{gemini_key[:4]}…{gemini_key[-4:]}"
     return jsonify(success=True, sessions=rows, gemini_api_key=gemini_key, gemini_model=gemini_model)
 
 
@@ -6093,6 +6115,8 @@ def save_gemini_endpoint(access_path: str):
     data = request.get_json(silent=True) or {}
     if not csrf_ok(data):
         return jsonify(success=False, message="انتهت صلاحية الصفحة."), 400
+    if not is_owner_copy():
+        return jsonify(success=False, message="يضبط مفتاح Gemini والنموذج صاحب البرنامج."), 403
     api_key = str(data.get("gemini_api_key") or "").strip()
     model = normalize_gemini_model(str(data.get("gemini_model") or ""))
     if api_key and not valid_gemini_key(api_key):
