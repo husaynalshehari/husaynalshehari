@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """«توزيع البرنامج»: the owner's control for handing the group script (gg.py) to users and serving
-them updates. It runs beside the script, as its own program on its own port:
+them updates. Nothing to run: kept beside the script, it is started by the script itself, on its
+own port (5050, or the one in CONTROL_PORT).
 
-    python3 g.py        (port 5050, or the one in CONTROL_PORT)
-
-Users' copies take updates from here with their own key. This page needs the owner's password,
-and the same password guards the script's panel: the script reads it from data/distribution.json.
+Users' copies take updates from here with their own key. This page needs the owner's password;
+the first visit sets it.
 """
 from __future__ import annotations
 
@@ -22,7 +21,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, make_response, render_template_string, request, session
 
-# The program handed out: the script beside this file (another name goes in PROGRAM_FILE).
+# The program handed out: the script that starts this page sets it to itself.
 PROGRAM_PATH = Path(__file__).resolve().with_name(os.getenv("PROGRAM_FILE", "gg.py"))
 DATA_DIR = Path(__file__).resolve().with_name("data")
 STORE_PATH = DATA_DIR / "distribution.json"
@@ -32,6 +31,8 @@ MAX_ATTEMPTS_PER_CLIENT = 5
 app = Flask(__name__)
 app.secret_key = secrets.token_bytes(32)
 app.config.update(
+    # Cookies are kept per host, not per port: its own name keeps the panel's cookie from replacing it.
+    SESSION_COOKIE_NAME="distribution_session",
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Strict",
     SESSION_COOKIE_SECURE=os.getenv("X_APP_SECURE_COOKIE", "0") == "1",
@@ -76,7 +77,6 @@ def save_store_unlocked() -> None:
 
 
 def password_digest(password: str, salt: str) -> str:
-    # The script checks its panel password the same way.
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 200_000).hex()
 
 
@@ -447,8 +447,8 @@ PAGE = r'''<!doctype html>
       document.getElementById("program").textContent = data.program;
       if (!data.version) showNotice("لم يُعثر على " + data.program + " بجانب هذا الملف.", false);
       document.getElementById("password-hint").textContent = data.password_set
-        ? "محفوظة. اكتب كلمة جديدة لتغييرها. هي نفسها كلمة سر لوحة السكربت."
-        : "اخترها أولًا: تحمي هذه الصفحة ولوحة السكربت، لأن المستخدمين سيعرفون عنوان استضافتك.";
+        ? "محفوظة. اكتب كلمة جديدة لتغييرها."
+        : "اخترها أولًا: تحمي هذه الصفحة، لأن المستخدمين سيعرفون عنوانها.";
       document.getElementById("users-part").hidden = !data.password_set;
       savedAddress = data.address || "";
       if (document.activeElement !== address) address.value = savedAddress || location.origin;
@@ -534,10 +534,3 @@ PAGE = r'''<!doctype html>
 
 
 load_store()
-
-
-if __name__ == "__main__":
-    port = int(os.getenv("CONTROL_PORT", "5050"))
-    bind_host = os.getenv("BIND_HOST", "0.0.0.0")
-    print(f"توزيع البرنامج يعمل على المنفذ {port}: http://127.0.0.1:{port}/", flush=True)
-    app.run(host=bind_host, port=port, debug=False, threaded=True)

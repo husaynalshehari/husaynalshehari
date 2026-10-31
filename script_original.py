@@ -13,6 +13,7 @@ import base64
 import gzip
 import hashlib
 import hmac
+import importlib.util
 import json
 import logging
 import math
@@ -35,6 +36,7 @@ from urllib.parse import quote
 from flask import Flask, abort, jsonify, make_response, redirect, render_template_string, request, session
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import Page, sync_playwright
+from werkzeug.serving import make_server
 
 app = Flask(__name__)
 app.secret_key = secrets.token_bytes(32)
@@ -974,9 +976,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
     try {
-      const response = await fetch(url, {...options, signal: controller.signal});
-      if (response.status === 401) location.reload();
-      return response;
+      return await fetch(url, {...options, signal: controller.signal});
     } finally {
       clearTimeout(timer);
     }
@@ -1381,7 +1381,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       cache: "no-store",
       body: JSON.stringify({...payload, csrf_token: csrf})
     });
-    if (response.status === 401) location.reload();
     const data = await response.json();
     if (!response.ok && !data.message) throw new Error("تعذّر إكمال الطلب.");
     return data;
@@ -1778,7 +1777,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   restoreScreen();
 
   // Updates. A user's copy shows «تحديث» when the owner offers a newer version; the owner's
-  // copy shows «توزيع البرنامج», which opens g.py.
+  // copy shows «توزيع البرنامج», which opens g.py's page.
   const updateBar = document.getElementById("update-bar");
   const updateText = document.getElementById("update-text");
   const updateButton = document.getElementById("update-button");
@@ -1790,9 +1789,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
       const response = await fetchWithTimeout(apiRoot + "/update/check", {cache: "no-store"}, 30000);
       const data = await response.json();
       if (data.owner) {
-        // g.py: this host on its own port, unless CONTROL_URL says where.
-        distLink.href = data.control_url || location.protocol + "//" + location.hostname + ":" + data.control_port + "/";
-        distLink.hidden = false;
+        // g.py's page: this host on its own port, unless CONTROL_URL says where.
+        if (data.control_url || data.control_port) {
+          distLink.href = data.control_url || location.protocol + "//" + location.hostname + ":" + data.control_port + "/";
+          distLink.hidden = false;
+        }
         return;
       }
       updateState.textContent = data.message || "";
@@ -5158,17 +5159,16 @@ def read_private_json(path: Path) -> dict | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-# Updates. Users and their keys live in g.py, the owner's separate program beside this
-# one, on its own port ("توزيع البرنامج"); a user's copy takes updates from it with its key.
-# g.py also keeps the owner's password, which guards this panel too.
-DISTRIBUTION_PATH = DATA_DIR / "distribution.json"
+# Updates. Users and their keys live in g.py beside the owner's script ("توزيع البرنامج"),
+# which this script starts on its own port; a user's copy takes updates from it with its key.
+CONTROL_FILE = Path(__file__).resolve().with_name("g.py")
 CONTROL_PORT = int(os.getenv("CONTROL_PORT", "5050"))
 # Where «توزيع البرنامج» opens, when not this host on CONTROL_PORT (e.g. behind a domain).
 CONTROL_URL = os.getenv("CONTROL_URL", "")
 BACKUPS_DIR = DATA_DIR / "backups"
 MAX_PROGRAM_BYTES = 8 * 1024 * 1024
-panel_password_lock = threading.Lock()
-panel_password: dict = {"hash": "", "salt": "", "stamp": None}
+# Set once g.py's page is up.
+distribution_started = threading.Event()
 # Set while a user's copy installs an update: no new task starts.
 updating = threading.Event()
 update_check_cache: dict = {"at": 0.0, "answer": None}
@@ -5179,32 +5179,25 @@ def is_owner_copy() -> bool:
     return not UPDATE_SOURCE
 
 
-def current_panel_password() -> tuple[str, str]:
-    """The owner's password (hash, salt) from g.py's file, read again when it changes."""
+def start_distribution(bind_host: str) -> None:
+    """Serve g.py's page («توزيع البرنامج») from this same program, on CONTROL_PORT, when g.py
+    sits beside the owner's script. It hands out this script."""
+    if not is_owner_copy() or not CONTROL_FILE.is_file():
+        return
     try:
-        stamp = DISTRIBUTION_PATH.stat().st_mtime_ns
-    except OSError:
-        stamp = None
-    with panel_password_lock:
-        if stamp != panel_password["stamp"]:
-            loaded = (read_private_json(DISTRIBUTION_PATH) or {}) if stamp else {}
-            panel_password.update(hash=str(loaded.get("password_hash") or ""), salt=str(loaded.get("password_salt") or ""), stamp=stamp)
-        return panel_password["hash"], panel_password["salt"]
-
-
-def password_digest(password: str, salt: str) -> str:
-    # g.py sets the password the same way.
-    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 200_000).hex()
-
-
-def panel_password_ok(password: str) -> bool:
-    expected, salt = current_panel_password()
-    return bool(expected and salt) and hmac.compare_digest(password_digest(password, salt), expected)
-
-
-def panel_login_mark() -> str:
-    """What a logged-in session holds: changes when the password changes."""
-    return current_panel_password()[0][:16]
+        spec = importlib.util.spec_from_file_location("distribution_page", CONTROL_FILE)
+        control = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(control)
+        control.PROGRAM_PATH = Path(__file__).resolve()
+        server = make_server(bind_host, CONTROL_PORT, control.app, threaded=True)
+    except (Exception, SystemExit) as exc:
+        # Werkzeug exits the program when the port is taken; the script keeps running without the page.
+        reason = "المنفذ مستخدم من برنامج آخر" if isinstance(exc, SystemExit) else str(exc)
+        print(f"لم تبدأ صفحة التوزيع ({CONTROL_FILE.name}) على المنفذ {CONTROL_PORT}: {reason}", flush=True)
+        return
+    threading.Thread(target=server.serve_forever, name="distribution", daemon=True).start()
+    distribution_started.set()
+    print(f"صفحة التوزيع ({CONTROL_FILE.name}) على المنفذ {CONTROL_PORT}", flush=True)
 
 
 def version_of(text: str) -> str:
@@ -6053,93 +6046,14 @@ def delete_session_endpoint(access_path: str):
     return jsonify(success=True, message="حُذفت الجلسة.")
 
 
-LOGIN_PAGE = r'''<!doctype html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>دخول</title>
-  <style>
-    :root { --pine: #0f6b50; --ink: #1c1915; --line: #e4dcd0; --paper: #f3efe6; --sheet: #fffdf8; --clay: #9a3412; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--paper); color: var(--ink); font-family: system-ui, sans-serif; }
-    form { box-sizing: border-box; width: min(320px, calc(100vw - 32px)); padding: 18px; border-radius: 14px; background: var(--sheet); box-shadow: inset 0 0 0 1px var(--line); }
-    h1 { margin: 0 0 10px; font-size: 16px; }
-    input { box-sizing: border-box; width: 100%; height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; font-size: 16px; }
-    button { width: 100%; height: 38px; margin-top: 10px; border: 0; border-radius: 8px; background: var(--pine); color: #fff; font: inherit; font-weight: 600; }
-    p { min-height: 1.4em; margin: 8px 0 0; color: var(--clay); font-size: 13px; }
-  </style>
-</head>
-<body>
-  <form id="login">
-    <h1>كلمة سر اللوحة</h1>
-    <input id="password" type="password" autocomplete="current-password" required autofocus aria-label="كلمة سر اللوحة">
-    <button type="submit">دخول</button>
-    <p id="message" role="status"></p>
-  </form>
-  <script>
-    document.getElementById("login").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const message = document.getElementById("message");
-      message.textContent = "";
-      try {
-        const response = await fetch({{ login_url|tojson }}, {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({password: document.getElementById("password").value})
-        });
-        const data = await response.json();
-        if (data.success) {
-          location.reload();
-          return;
-        }
-        message.textContent = data.message || "تعذّر الدخول.";
-      } catch (_) {
-        message.textContent = "تعذّر الاتصال.";
-      }
-    });
-  </script>
-</body>
-</html>
-'''
-
-
-@app.before_request
-def require_panel_login():
-    """Once the owner has a panel password, the panel and everything under it need a login."""
-    mark = panel_login_mark()
-    if not mark or session.get("panel_ok") == mark:
-        return None
-    parts = request.path.split("/")
-    if len(parts) < 2 or not hmac.compare_digest(parts[1], ACCESS_PATH):
-        return None
-    if parts[2:] == ["login"]:
-        return None
-    if request.method == "GET" and parts[2:] in ([], [""]):
-        return render_template_string(LOGIN_PAGE, login_url="/" + ACCESS_PATH + "/login")
-    return jsonify(success=False, message="سجّل الدخول بكلمة سر اللوحة.", login=True), 401
-
-
-@app.post("/<access_path>/login")
-def panel_login(access_path: str):
-    if not hmac.compare_digest(access_path, ACCESS_PATH):
-        abort(404)
-    if not allow_attempt("login:" + (request.remote_addr or "unknown")):
-        return jsonify(success=False, message="محاولات كثيرة. انتظر بضع دقائق ثم أعد المحاولة."), 429
-    data = request.get_json(silent=True) or {}
-    if not panel_password_ok(str(data.get("password") or "")):
-        return jsonify(success=False, message="كلمة السر غير صحيحة."), 403
-    session["panel_ok"] = panel_login_mark()
-    session.permanent = True
-    return jsonify(success=True)
-
-
 @app.get("/<access_path>/update/check")
 def update_check(access_path: str):
     """This copy's version and, in a user's copy, whether the owner offers a newer one."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
     if is_owner_copy():
-        return jsonify(success=True, owner=True, version=APP_VERSION, control_url=CONTROL_URL, control_port=CONTROL_PORT)
+        return jsonify(success=True, owner=True, version=APP_VERSION, control_url=CONTROL_URL,
+                       control_port=CONTROL_PORT if distribution_started.is_set() else 0)
     if request.args.get("light") or updating.is_set():
         return jsonify(success=True, owner=False, version=APP_VERSION, updating=updating.is_set())
     now = time.monotonic()
@@ -6229,4 +6143,5 @@ if __name__ == "__main__":
         except OSError:
             pass
         print("For public use, configure HTTPS and set PUBLIC_BASE_URL.", flush=True)
+    start_distribution(bind_host)
     app.run(host=bind_host, port=port, debug=False, threaded=True)
