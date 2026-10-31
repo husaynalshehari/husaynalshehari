@@ -1886,19 +1886,9 @@ SCROLL_INBOX_JS = r"""
 }
 """
 
-GROUP_READ_TWEETS_JS = r"""
-(arg) => {
-  let stopId = "";
-  let dir = 0;
-  let factor = 1;
-  if (arg && typeof arg === "object") {
-    stopId = String(arg.stopId || "");
-    dir = arg.dir === 1 || arg.dir === -1 ? arg.dir : 0;
-    factor = Number(arg.factor) > 1 ? Number(arg.factor) : 1;
-  } else {
-    stopId = String(arg || "");
-  }
-  const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+# Shared start of the group chat's scripts below: finds elements in the page and its shadow
+# roots, and the element that really scrolls the chat.
+CHAT_FIND_JS = r"""
   const roots = [];
   const walk = (root) => {
     if (!root || roots.includes(root)) return;
@@ -1912,6 +1902,55 @@ GROUP_READ_TWEETS_JS = r"""
     for (const root of roots) if (root.querySelectorAll) out.push(...root.querySelectorAll(selector));
     return out;
   };
+  // How much of the element shows on the screen, in square pixels.
+  const shownArea = (el) => {
+    if (el.checkVisibility && !el.checkVisibility({opacityProperty: true, visibilityProperty: true, checkOpacity: true, checkVisibilityCSS: true})) return 0;
+    const rect = el.getBoundingClientRect();
+    const width = Math.min(rect.right, innerWidth) - Math.max(rect.left, 0);
+    const height = Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0);
+    return width > 0 && height > 0 ? width * height : 0;
+  };
+  // The match that shows most on the screen (the page can also hold a hidden copy of the
+  // chat), else the first match.
+  const query = (selector) => {
+    const all = queryAll(selector);
+    let best = null;
+    let bestArea = 0;
+    for (const el of all) {
+      const area = shownArea(el);
+      if (area > bestArea) {
+        best = el;
+        bestArea = area;
+      }
+    }
+    return best || all[0] || null;
+  };
+  // The element that really scrolls the chat: X's scroller itself, one of its parents, or the
+  // page (X's phone layout can scroll one of these instead of the scroller).
+  const scrollerOf = (start) => {
+    for (let node = start; node && node.nodeType === 1; node = node.parentElement || (node.parentNode && node.parentNode.host) || null) {
+      if (/(auto|scroll|overlay)/.test(getComputedStyle(node).overflowY) && node.scrollHeight > node.clientHeight + 10) return node;
+    }
+    const page = document.scrollingElement;
+    if (page && page.scrollHeight > page.clientHeight + 10) return page;
+    return start;
+  };
+"""
+
+GROUP_READ_TWEETS_JS = r"""
+(arg) => {
+  let stopId = "";
+  let dir = 0;
+  let factor = 1;
+  if (arg && typeof arg === "object") {
+    stopId = String(arg.stopId || "");
+    dir = arg.dir === 1 || arg.dir === -1 ? arg.dir : 0;
+    factor = Number(arg.factor) > 1 ? Number(arg.factor) : 1;
+  } else {
+    stopId = String(arg || "");
+  }
+  const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
+""" + CHAT_FIND_JS + r"""
   const collectDeep = (root, selector, out) => {
     if (!root || !root.querySelectorAll) return;
     root.querySelectorAll(selector).forEach((node) => out.push(node));
@@ -1919,9 +1958,9 @@ GROUP_READ_TWEETS_JS = r"""
       if (node.shadowRoot) collectDeep(node.shadowRoot, selector, out);
     });
   };
-  const list = queryAll('[data-testid="dm-message-list"]')[0]
-    || queryAll('[data-testid="dm-conversation-content"]')[0]
-    || queryAll('[data-testid="dm-message-scroller"]')[0];
+  const list = query('[data-testid="dm-message-list"]')
+    || query('[data-testid="dm-conversation-content"]')
+    || query('[data-testid="dm-message-scroller"]');
   if (!list) return {tweets: [], pending: 0};
   const bubbles = [];
   collectDeep(list, '[data-testid^="message-"]', bubbles);
@@ -2026,7 +2065,7 @@ GROUP_READ_TWEETS_JS = r"""
     collectDeep(bubble, '[data-testid="tweetText"], article, [data-testid="card.wrapper"], [data-testid="tweetPhoto"]', cardish);
     if (!foundHere && cardish.length) pending += 1;
   }
-  const scroller = queryAll('[data-testid="dm-message-scroller"]')[0] || list;
+  const scroller = scrollerOf(query('[data-testid="dm-message-scroller"]') || list);
   const ids = messages.map((el) => el.getAttribute("data-testid") || "");
   const fingerprint = ids.slice(0, 8).concat(ids.slice(-8)).join("|");
   let loading = false;
@@ -2077,23 +2116,10 @@ GROUP_READ_TWEETS_JS = r"""
 
 GROUP_CHAT_SCROLL_JS = r"""
 (action) => {
-  const roots = [];
-  const walk = (root) => {
-    if (!root || roots.includes(root)) return;
-    roots.push(root);
-    const nodes = root.querySelectorAll ? root.querySelectorAll("*") : [];
-    for (const node of nodes) if (node.shadowRoot) walk(node.shadowRoot);
-  };
-  walk(document);
-  const query = (selector) => {
-    for (const root of roots) {
-      const found = root.querySelector && root.querySelector(selector);
-      if (found) return found;
-    }
-    return null;
-  };
+""" + CHAT_FIND_JS + r"""
   const list = query('[data-testid="dm-message-list"]') || query('[data-testid="dm-conversation-content"]');
-  const scroller = query('[data-testid="dm-message-scroller"]') || list;
+  const start = query('[data-testid="dm-message-scroller"]') || list;
+  const scroller = start ? scrollerOf(start) : null;
   const spinner = list && (list.querySelector('[data-testid="dm-message-list-spinner-slot"], [data-testid="dm-message-list-spinner"], [data-testid*="spinner"]') || list.querySelector('[role="progressbar"]'));
   let spinnerVisible = false;
   if (spinner) {
@@ -3754,14 +3780,105 @@ def group_chat_state(page) -> dict:
         return {}
 
 
+CHAT_SPOT_JS = r"""
+() => {
+""" + CHAT_FIND_JS + r"""
+  const start = query('[data-testid="dm-message-scroller"]') || query('[data-testid="dm-message-list"]');
+  if (!start) return null;
+  // The chat's part of the screen: its scroller, else its list, else what really scrolls it.
+  const area = [start, query('[data-testid="dm-message-list"]'), scrollerOf(start)].find((el) => el && shownArea(el) >= 1600);
+  if (!area) return null;
+  const rect = area.getBoundingClientRect();
+  const left = Math.max(rect.left, 0);
+  const top = Math.max(rect.top, 0);
+  const width = Math.min(rect.right, innerWidth) - left;
+  const height = Math.min(rect.bottom, innerHeight) - top;
+  const inside = (node) => {
+    for (let el = node; el; el = el.parentElement || (el.parentNode && el.parentNode.host) || null) {
+      if (el === area) return true;
+    }
+    return false;
+  };
+  const spots = [[0.45, Math.min(0.42, 640 / height)], [0.5, 0.5], [0.5, 0.25], [0.5, 0.75], [0.25, 0.5], [0.75, 0.5]]
+    .map(([fx, fy]) => ({x: Math.round(left + width * fx), y: Math.round(top + height * fy)}));
+  for (const spot of spots) {
+    let hit = document.elementFromPoint(spot.x, spot.y);
+    while (hit && hit.shadowRoot) {
+      const deeper = hit.shadowRoot.elementFromPoint(spot.x, spot.y);
+      if (!deeper || deeper === hit) break;
+      hit = deeper;
+    }
+    if (hit && inside(hit)) return spot;
+  }
+  return spots[0];
+}
+"""
+
+
 def focus_group_scroller(page) -> None:
-    locator = page.locator('[data-testid="dm-message-scroller"]').first
+    """Put the mouse over the part of the chat that shows on the screen, on a spot nothing covers."""
     try:
-        box = locator.bounding_box()
+        spot = page.evaluate(CHAT_SPOT_JS)
     except Exception:
-        box = None
-    if box and box.get("height", 0) >= 40:
-        page.mouse.move(box["x"] + box["width"] * 0.45, box["y"] + min(box["height"] * 0.42, 640))
+        spot = None
+    if spot:
+        page.mouse.move(spot["x"], spot["y"])
+
+
+CHAT_UNSTICK_JS = r"""
+(pixels) => {
+""" + CHAT_FIND_JS + r"""
+  const start = query('[data-testid="dm-message-scroller"]') || query('[data-testid="dm-message-list"]');
+  if (!start) return false;
+  const scroller = scrollerOf(start);
+  const room = scroller.scrollHeight - scroller.clientHeight;
+  // Step down from the top; the mouse wheel then takes the chat back up to it.
+  if (room > 10) scroller.scrollTop = Math.min(room, Math.max(120, pixels));
+  if (start.scrollHeight - start.clientHeight > 10) return false;
+  // The chat's own scroller cannot scroll (the loaded messages fit it): tell it it was scrolled up anyway.
+  for (const target of new Set([start, scroller])) {
+    try { target.dispatchEvent(new WheelEvent("wheel", {deltaY: -Math.max(120, pixels), bubbles: true, cancelable: true})); } catch (error) {}
+    try { target.dispatchEvent(new Event("scroll", {bubbles: true})); } catch (error) {}
+  }
+  // Whether the loaded messages fit a chat made to scroll by itself: only a shorter screen lets it scroll.
+  return /(auto|scroll|overlay)/.test(getComputedStyle(start).overflowY);
+}
+"""
+
+# A screen taller than this is made this short for a moment when the chat's messages fit it.
+SHORT_SCREEN_HEIGHT = 900
+
+
+def unstick_group_chat(page, pixels: int) -> None:
+    """For a climb that stopped at the oldest loaded messages while X loads no older ones: step
+    down a little and wheel back up to the top, so X sees its chat being scrolled up. When the
+    loaded messages fit the chat (on the tall phone screen nothing in it can scroll), this is done
+    on a short screen, and the screen gets its height back after."""
+    try:
+        fits = bool(page.evaluate(CHAT_UNSTICK_JS, pixels))
+    except Exception:
+        return
+    size = page.viewport_size or {}
+    short = fits and int(size.get("height") or 0) > SHORT_SCREEN_HEIGHT
+    try:
+        if short:
+            page.set_viewport_size({"width": int(size["width"]), "height": SHORT_SCREEN_HEIGHT})
+            page.wait_for_timeout(600)
+            page.evaluate(CHAT_UNSTICK_JS, pixels)
+        page.wait_for_timeout(300)
+        focus_group_scroller(page)
+        page.mouse.wheel(0, -2 * pixels)
+        page.wait_for_timeout(1500 if short else 300)
+    except Exception as exc:
+        if browser_closed_error(exc):
+            raise
+    finally:
+        if short:
+            try:
+                page.set_viewport_size({"width": int(size["width"]), "height": int(size["height"])})
+                page.wait_for_timeout(500)
+            except Exception:
+                pass
 
 
 def tweet_url(raw_url: str, status_id: str) -> str:
@@ -3794,21 +3911,7 @@ SCAN_STOP_JS = r"""
   } else {
     wanted = String(arg || "");
   }
-  const roots = [];
-  const walk = (root) => {
-    if (!root || roots.includes(root)) return;
-    roots.push(root);
-    const nodes = root.querySelectorAll ? root.querySelectorAll("*") : [];
-    for (const node of nodes) if (node.shadowRoot) walk(node.shadowRoot);
-  };
-  walk(document);
-  const query = (selector) => {
-    for (const root of roots) {
-      const found = root.querySelector && root.querySelector(selector);
-      if (found) return found;
-    }
-    return null;
-  };
+""" + CHAT_FIND_JS + r"""
   const list = query('[data-testid="dm-message-list"]') || query('[data-testid="dm-conversation-content"]') || query('[data-testid="dm-message-scroller"]');
   if (!list) return {hit: false, pending: 0, oldest: "", count: 0, hitTop: 0};
   const all = [...list.querySelectorAll('[data-testid^="message-"]')].filter((el) => {
@@ -3834,7 +3937,7 @@ SCAN_STOP_JS = r"""
     if (card && !/status\/\d{6,25}/.test(blob)) pending += 1;
   }
   const oldest = messages.length ? (messages[0].getAttribute("data-testid") || "") : "";
-  const scroller = query('[data-testid="dm-message-scroller"]') || list;
+  const scroller = scrollerOf(query('[data-testid="dm-message-scroller"]') || list);
   let loading = false;
   const spinner = list.querySelector('[data-testid="dm-message-list-spinner-slot"], [data-testid="dm-message-list-spinner"], [data-testid*="spinner"], [role="progressbar"]');
   if (spinner) {
@@ -3875,23 +3978,10 @@ SCAN_STOP_JS = r"""
 
 STEP_OLDER_JS = r"""
 (pixels) => {
-  const roots = [];
-  const walk = (root) => {
-    if (!root || roots.includes(root)) return;
-    roots.push(root);
-    const nodes = root.querySelectorAll ? root.querySelectorAll("*") : [];
-    for (const node of nodes) if (node.shadowRoot) walk(node.shadowRoot);
-  };
-  walk(document);
-  const query = (selector) => {
-    for (const root of roots) {
-      const found = root.querySelector && root.querySelector(selector);
-      if (found) return found;
-    }
-    return null;
-  };
-  const scroller = query('[data-testid="dm-message-scroller"]') || query('[data-testid="dm-message-list"]');
-  if (!scroller) return {ok: false};
+""" + CHAT_FIND_JS + r"""
+  const start = query('[data-testid="dm-message-scroller"]') || query('[data-testid="dm-message-list"]');
+  if (!start) return {ok: false};
+  const scroller = scrollerOf(start);
   const before = scroller.scrollTop;
   const atTop = before <= 48;
   if (!atTop) scroller.scrollTop = Math.max(0, before - Math.max(80, pixels));
@@ -4056,6 +4146,18 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
             height = int(state.get("scrollHeight") or 0)
             moved = last_top >= 0 and abs(top_now - last_top) > 8
             grew = height > last_height + 24 or bool(oldest and last_oldest and oldest != last_oldest)
+            if not moved and not grew and top_now <= 48:
+                # At the oldest loaded messages and X has not loaded older ones.
+                unstick_group_chat(page, step)
+                state = scan_stop(0)
+                if state.get("hit"):
+                    spotted = True
+                    hit_top = float(state.get("hitTop") or 0)
+                    break
+                top_now = int(state.get("scrollTop") or 0)
+                oldest = str(state.get("oldest") or "")
+                height = int(state.get("scrollHeight") or 0)
+                grew = height > last_height + 24 or bool(oldest and last_oldest and oldest != last_oldest)
             if moved or grew:
                 quiet = 0
             else:
@@ -4190,6 +4292,8 @@ def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", 
         if loading:
             page.wait_for_timeout(2000)
         elif at_edge and not moved:
+            client = int(payload.get("clientHeight") or 0) or 800
+            unstick_group_chat(page, max(250, min(500, int(client * 0.2))))
             page.wait_for_timeout(2000)
         else:
             page.wait_for_timeout(2000)
