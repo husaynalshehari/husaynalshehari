@@ -720,7 +720,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <input id="phone-screen" type="checkbox" checked>
             <label for="phone-screen" title="شاشة جوال، وطولها أثناء الجمع داخل القروب">شاشة جوال</label>
             <span class="opt-value">
-              <input id="phone-height" class="wait-sec wide" type="number" min="600" max="25000" step="1" value="4000" inputmode="numeric" aria-label="طول شاشة الجوال أثناء الجمع بالبكسل">
+              <input id="phone-height" class="wait-sec wide" type="number" min="600" max="25000" step="1" value="10000" inputmode="numeric" aria-label="طول شاشة الجوال أثناء الجمع بالبكسل">
               بكسل
             </span>
           </div>
@@ -861,7 +861,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const accountProfiles = document.getElementById("account-profiles");
   function rememberWaits() {
     try {
-      localStorage.setItem("x_wait_settings_v3", JSON.stringify({
+      localStorage.setItem("x_wait_settings_v4", JSON.stringify({
         groupsOn: waitGroups.checked, groupsSec: waitGroupsSec.value,
         groupOn: groupWaitOn.checked, groupSec: groupWaitSec.value,
         tweetOn: tweetWaitOn.checked, tweetMin: tweetWaitMin.value, tweetMax: tweetWaitMax.value,
@@ -872,9 +872,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
   }
   try {
     // "_v2": choices saved before the current defaults (30 s waits ticked) are not restored.
-    // "_v3": from v2 everything is kept except the phone screen, which takes its new default (ticked, 4000).
-    const latest = localStorage.getItem("x_wait_settings_v3");
-    const savedWaits = JSON.parse(latest || localStorage.getItem("x_wait_settings_v2") || "null");
+    // "_v3": from v2 everything is kept except the phone screen, which takes its new default (ticked).
+    // "_v4": from v3 everything is kept except the phone's collecting height, which takes its new default (10000).
+    const latest = localStorage.getItem("x_wait_settings_v4");
+    const before = latest || localStorage.getItem("x_wait_settings_v3");
+    const savedWaits = JSON.parse(before || localStorage.getItem("x_wait_settings_v2") || "null");
     if (savedWaits) {
       waitGroups.checked = !!savedWaits.groupsOn;
       if (savedWaits.groupsSec) waitGroupsSec.value = savedWaits.groupsSec;
@@ -884,10 +886,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (savedWaits.tweetMin !== undefined && savedWaits.tweetMin !== "") tweetWaitMin.value = savedWaits.tweetMin;
       if (savedWaits.tweetMax !== undefined && savedWaits.tweetMax !== "") tweetWaitMax.value = savedWaits.tweetMax;
       accountProfilesOn.checked = !!savedWaits.profilesOn;
-      if (latest) {
-        phoneScreen.checked = !!savedWaits.phone;
-        if (savedWaits.phoneHeight) phoneHeight.value = savedWaits.phoneHeight;
-      }
+      if (before) phoneScreen.checked = !!savedWaits.phone;
+      if (latest && savedWaits.phoneHeight) phoneHeight.value = savedWaits.phoneHeight;
       if (savedWaits.profiles) accountProfiles.value = savedWaits.profiles;
     }
   } catch (_) {}
@@ -1647,7 +1647,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
         tweet_wait_max: tweetWaitOn.checked ? secondsFrom(tweetWaitMax, 0, 120, 0) : 0,
         account_profiles: accountProfilesOn.checked ? secondsFrom(accountProfiles, 1, 5, 1) : 1,
         phone_screen: phoneScreen.checked,
-        phone_height: secondsFrom(phoneHeight, 600, 25000, 4000)
+        phone_height: secondsFrom(phoneHeight, 600, 25000, 10000)
       });
       if (!started.success || !started.job_id || !started.job_key) {
         showNotice(started.message || "تعذّر بدء التنفيذ.", false);
@@ -1657,7 +1657,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       followTask({
         id: started.job_id,
         key: started.job_key,
-        title: selectedGroup + (account ? " · " + account : "") + (phoneScreen.checked ? " · جوال " + secondsFrom(phoneHeight, 600, 25000, 4000) : ""),
+        title: selectedGroup + (account ? " · " + account : "") + (phoneScreen.checked ? " · جوال " + secondsFrom(phoneHeight, 600, 25000, 10000) : ""),
         startedAt: Date.now()
       });
       showNotice("بدأت مهمة «" + selectedGroup + "». يمكن بدء مهمة أخرى على نفس الحساب أو حساب مختلف.", true);
@@ -3205,7 +3205,7 @@ PROFILES_DIR = DATA_DIR / "profiles"
 # "شاشة جوال" on the page: that task's browser is phone-wide at every step, and while it opens the
 # chat and collects from the group (where the normal page is 25000 tall) it has the height chosen
 # there; elsewhere it keeps NORMAL_VIEWPORT_HEIGHT. Set per worker thread, like browser_restart.
-PHONE_SCREEN = {"width": 412, "height": 4000}
+PHONE_SCREEN = {"width": 412, "height": 10000}
 task_screen = threading.local()
 # Page height while opening the chat and collecting from the group, and for everything else.
 COLLECT_VIEWPORT_HEIGHT = 25000
