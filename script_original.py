@@ -31,6 +31,7 @@ import urllib.error
 import urllib.request
 from collections import defaultdict, deque
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import quote
 
 from flask import Flask, abort, jsonify, make_response, redirect, render_template_string, request, session
@@ -217,6 +218,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       gap: 8px;
     }
     .brand { display: flex; gap: 12px; align-items: center; min-width: 0; }
+    a.content-link { margin-inline-start: auto; display: inline-flex; align-items: center; text-decoration: none; white-space: nowrap; }
     .mark {
       flex: 0 0 auto;
       width: 22px;
@@ -629,6 +631,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <p class="eyebrow">من قروب الدردشة</p>
           <h1>تنفيذ على تغريدات القروب</h1>
         </div>
+        {% if content_ready %}<a class="btn btn-ghost content-link" href="{{ api_root }}/content">إنشاء محتوى</a>{% endif %}
       </div>
       <ol class="counts" aria-label="الإجراءات الناجحة">
         <li>الرتويت <b id="count-repost">0</b></li>
@@ -5131,6 +5134,7 @@ def login_page(access_path: str):
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
         PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(),
+        content_ready=content_ready.is_set(),
     ))
     return response
 
@@ -6262,6 +6266,40 @@ load_jobs()
 threading.Thread(target=save_jobs_in_background, name="jobs-saver", daemon=True).start()
 load_screen()
 atexit.register(shutdown_jobs)
+
+
+# «إنشاء محتوى»: content.py beside the script adds its page to this panel.
+content_ready = threading.Event()
+
+
+def content_accounts() -> list[dict]:
+    with sessions_lock:
+        return [{"id": row["id"], "username": row.get("username") or "", "token": row["token"]} for row in saved_sessions]
+
+
+def attach_content() -> None:
+    content_file = Path(__file__).resolve().with_name("content.py")
+    if not content_file.is_file():
+        return
+    try:
+        spec = importlib.util.spec_from_file_location("content_page", content_file)
+        content = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(content)
+        content.attach(app, ACCESS_PATH, SimpleNamespace(
+            data_dir=DATA_DIR,
+            accounts=content_accounts,
+            current_token=lambda: screen_payload()["auth_token"],
+            # Any free browser profile of the account, so a running task does not hold it up.
+            run_browser=lambda token, work: run_on_fresh_browser(token, work, MAX_PROFILES_PER_ACCOUNT),
+            goto_x=goto_x,
+        ))
+    except Exception as exc:
+        print(f"لم تُضف صفحة إنشاء المحتوى ({content_file.name}): {exc}", flush=True)
+        return
+    content_ready.set()
+
+
+attach_content()
 
 
 if __name__ == "__main__":
