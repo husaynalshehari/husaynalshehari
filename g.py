@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""«توزيع البرنامج»: the owner's control for handing the group script to users and serving them
-updates. It runs beside the script, as its own program on its own port:
+"""«توزيع البرنامج»: the owner's control for handing the group script (gg.py) to users and serving
+them updates. It runs beside the script, as its own program on its own port:
 
-    python3 distribution.py        (port 5050, or the one in CONTROL_PORT)
+    python3 g.py        (port 5050, or the one in CONTROL_PORT)
 
 Users' copies take updates from here with their own key. This page needs the owner's password,
 and the same password guards the script's panel: the script reads it from data/distribution.json.
@@ -22,8 +22,8 @@ from pathlib import Path
 
 from flask import Flask, jsonify, make_response, render_template_string, request, session
 
-# The program handed out: the script beside this file.
-PROGRAM_PATH = Path(__file__).resolve().with_name(os.getenv("PROGRAM_FILE", "script_original.py"))
+# The program handed out: the script beside this file (another name goes in PROGRAM_FILE).
+PROGRAM_PATH = Path(__file__).resolve().with_name(os.getenv("PROGRAM_FILE", "gg.py"))
 DATA_DIR = Path(__file__).resolve().with_name("data")
 STORE_PATH = DATA_DIR / "distribution.json"
 ATTEMPT_WINDOW_SECONDS = 300

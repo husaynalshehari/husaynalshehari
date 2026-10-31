@@ -1778,7 +1778,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   restoreScreen();
 
   // Updates. A user's copy shows «تحديث» when the owner offers a newer version; the owner's
-  // copy shows «توزيع البرنامج», which opens distribution.py.
+  // copy shows «توزيع البرنامج», which opens g.py.
   const updateBar = document.getElementById("update-bar");
   const updateText = document.getElementById("update-text");
   const updateButton = document.getElementById("update-button");
@@ -1790,7 +1790,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       const response = await fetchWithTimeout(apiRoot + "/update/check", {cache: "no-store"}, 30000);
       const data = await response.json();
       if (data.owner) {
-        // distribution.py: this host on its own port, unless CONTROL_URL says where.
+        // g.py: this host on its own port, unless CONTROL_URL says where.
         distLink.href = data.control_url || location.protocol + "//" + location.hostname + ":" + data.control_port + "/";
         distLink.hidden = false;
         return;
@@ -5158,9 +5158,9 @@ def read_private_json(path: Path) -> dict | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-# Updates. Users and their keys live in distribution.py, the owner's separate program beside this
+# Updates. Users and their keys live in g.py, the owner's separate program beside this
 # one, on its own port ("توزيع البرنامج"); a user's copy takes updates from it with its key.
-# distribution.py also keeps the owner's password, which guards this panel too.
+# g.py also keeps the owner's password, which guards this panel too.
 DISTRIBUTION_PATH = DATA_DIR / "distribution.json"
 CONTROL_PORT = int(os.getenv("CONTROL_PORT", "5050"))
 # Where «توزيع البرنامج» opens, when not this host on CONTROL_PORT (e.g. behind a domain).
@@ -5180,7 +5180,7 @@ def is_owner_copy() -> bool:
 
 
 def current_panel_password() -> tuple[str, str]:
-    """The owner's password (hash, salt) from distribution.py's file, read again when it changes."""
+    """The owner's password (hash, salt) from g.py's file, read again when it changes."""
     try:
         stamp = DISTRIBUTION_PATH.stat().st_mtime_ns
     except OSError:
@@ -5193,7 +5193,7 @@ def current_panel_password() -> tuple[str, str]:
 
 
 def password_digest(password: str, salt: str) -> str:
-    # distribution.py sets the password the same way.
+    # g.py sets the password the same way.
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 200_000).hex()
 
 
@@ -5217,7 +5217,7 @@ def version_tuple(version: str) -> tuple[int, ...]:
 
 
 def ask_update_source(path: str, timeout: float) -> tuple[int, bytes]:
-    """A user's copy asks the owner's distribution.py. Returns (HTTP status, body); status 0 when unreachable."""
+    """A user's copy asks the owner's g.py. Returns (HTTP status, body); status 0 when unreachable."""
     asking = urllib.request.Request(UPDATE_SOURCE.rstrip("/") + path, headers={"X-Update-Key": UPDATE_KEY, "User-Agent": "x-group-update"})
     try:
         with urllib.request.urlopen(asking, timeout=timeout) as answer:
