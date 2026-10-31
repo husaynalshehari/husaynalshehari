@@ -5277,19 +5277,25 @@ owner_sync_lock = threading.Lock()
 owner_sync_state = {"at": 0.0}
 
 
-def apply_owner_gemini(key: str) -> None:
-    """Use the Gemini key the owner set for this copy; when the owner deleted it, drop it here too."""
+def apply_owner_gemini(key: str, model: str = "") -> None:
+    """Use the Gemini key and model the owner set for this copy; when the owner deleted the key, drop
+    it here too. With no model from the owner, the copy keeps its own."""
+    model = normalize_gemini_model(model) or ""
     with gemini_lock:
         current, managed = saved_gemini.get("api_key") or "", bool(saved_gemini.get("managed"))
+        changed = False
         if key and valid_gemini_key(key):
-            if key == current and managed:
-                return
-            saved_gemini.update(api_key=key, managed=True)
+            if key != current or not managed:
+                saved_gemini.update(api_key=key, managed=True)
+                changed = True
         elif managed and current:
             saved_gemini.update(api_key="", managed=False)
-        else:
-            return
-        persist_gemini_unlocked()
+            changed = True
+        if model and model != saved_gemini.get("model"):
+            saved_gemini["model"] = model
+            changed = True
+        if changed:
+            persist_gemini_unlocked()
 
 
 def sync_with_owner() -> None:
@@ -5314,7 +5320,7 @@ def sync_with_owner() -> None:
                 answer = {}
             if not isinstance(answer, dict) or not answer.get("success"):
                 return
-            apply_owner_gemini(str(answer.get("gemini_key") or ""))
+            apply_owner_gemini(str(answer.get("gemini_key") or ""), str(answer.get("gemini_model") or ""))
             wanted = str(answer.get("reset_id") or "")
             if not wanted or wanted == done:
                 return

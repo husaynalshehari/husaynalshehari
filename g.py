@@ -51,8 +51,9 @@ def load_user(row: dict) -> dict:
         "name": str(row.get("name") or ""),
         "key": str(row["key"]),
         "active": bool(row.get("active", True)),
-        # The Gemini key the owner set for this user's copy ("" = none).
+        # The Gemini key and model the owner set for this user's copy ("" = none).
         "gemini_key": str(row.get("gemini_key") or ""),
+        "gemini_model": str(row.get("gemini_model") or ""),
         # Changes each time the owner resets this user's cost; the copy resets when it sees a new one.
         "reset_id": str(row.get("reset_id") or ""),
         # The copy's last report: its comments, cost, the reset it last made, and when.
@@ -163,6 +164,7 @@ def user_payload(row: dict) -> dict:
         "name": row["name"],
         "active": row["active"],
         "gemini_key": f"{key[:4]}…{key[-4:]}" if key else "",
+        "gemini_model": row["gemini_model"],
         "comments": row["usage"]["comments"],
         "cost": row["usage"]["cost"],
         "reported_at": row["usage"]["at"],
@@ -278,7 +280,7 @@ def control_change():
                 return jsonify(success=False, message="اكتب اسم المستخدم."), 400
             store["users"].append(load_user({"id": secrets.token_hex(6), "name": name, "key": secrets.token_urlsafe(24)}))
             save_store_unlocked()
-        elif action in ("stop", "start", "delete", "gemini", "gemini_delete", "cost_reset"):
+        elif action in ("stop", "start", "delete", "gemini", "gemini_delete", "gemini_model", "cost_reset"):
             user_id = str(data.get("id") or "")
             user = next((row for row in store["users"] if row["id"] == user_id), None)
             if not user:
@@ -295,6 +297,14 @@ def control_change():
                 user["gemini_key"] = api_key
             elif action == "gemini_delete":
                 user["gemini_key"] = ""
+            elif action == "gemini_model":
+                model = str(data.get("model") or "").strip()
+                if model.lower().startswith("models/"):
+                    model = model.split("/", 1)[1].strip()
+                # The same check as the script's own model field.
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}", model):
+                    return jsonify(success=False, message="اكتب اسم النموذج، مثل gemini-3.5-flash"), 400
+                user["gemini_model"] = model
             else:
                 user["reset_id"] = secrets.token_hex(6)
             save_store_unlocked()
@@ -358,7 +368,7 @@ def user_sync():
                 comments, cost = user["usage"]["comments"], user["usage"]["cost"]
             user["usage"] = {"comments": comments, "cost": round(cost, 6), "reset_id": str(data.get("reset_id") or "")[:32], "at": time.time()}
             save_store_unlocked()
-            answer = {"success": True, "gemini_key": user["gemini_key"], "reset_id": user["reset_id"]}
+            answer = {"success": True, "gemini_key": user["gemini_key"], "gemini_model": user["gemini_model"], "reset_id": user["reset_id"]}
     if not ready:
         return jsonify(success=False, message="غير متاح الآن."), 404
     if not user:
@@ -494,7 +504,7 @@ PAGE = r'''<!doctype html>
     .manage .cost { margin: 2px 0 0; font-size: 20px; font-weight: 700; direction: ltr; text-align: end; }
     .manage .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .manage .close { width: 100%; margin-top: 14px; }
-    #manage-key { direction: ltr; text-align: start; }
+    #manage-key, #manage-model { direction: ltr; text-align: start; }
   </style>
 </head>
 <body>
@@ -523,6 +533,12 @@ PAGE = r'''<!doctype html>
         <div class="actions">
           <button id="manage-key-delete" type="button" class="drop">حذف المفتاح</button>
         </div>
+        <label for="manage-model">النموذج</label>
+        <div class="row">
+          <input id="manage-model" type="text" autocomplete="off" spellcheck="false" maxlength="80" placeholder="gemini-3.5-flash">
+          <button id="manage-model-save" type="button">حفظ</button>
+        </div>
+        <p id="manage-model-now" class="hint"></p>
         <label>التكلفة</label>
         <p id="manage-cost" class="cost"></p>
         <p id="manage-cost-note" class="hint"></p>
@@ -644,6 +660,7 @@ PAGE = r'''<!doctype html>
     const dialog = document.getElementById("manage");
     const manageKey = document.getElementById("manage-key");
     const manageNotice = document.getElementById("manage-notice");
+    const manageModel = document.getElementById("manage-model");
     let userRows = [];
     let managed = "";
 
@@ -666,6 +683,10 @@ PAGE = r'''<!doctype html>
         ? "المفتاح الحالي: " + row.gemini_key + ". تصل نسخته خلال دقيقتين، أو عند فتحه صفحته."
         : "لا يوجد مفتاح منك لهذا المستخدم.";
       document.getElementById("manage-key-delete").hidden = !row.gemini_key;
+      if (document.activeElement !== manageModel) manageModel.value = row.gemini_model;
+      document.getElementById("manage-model-now").textContent = row.gemini_model
+        ? "تستخدم نسخته هذا النموذج."
+        : "لم تحدد نموذجًا: تبقى نسخته على نموذجها الحالي.";
       document.getElementById("manage-cost").textContent = row.reported_at ? "$" + row.cost.toFixed(3) : "—";
       document.getElementById("manage-cost-note").textContent = (row.reported_at
         ? "التعليقات " + row.comments + " · آخر تحديث من نسخته " + ago(row.reported_at) + "."
@@ -687,6 +708,9 @@ PAGE = r'''<!doctype html>
 
     document.getElementById("manage-key-save").addEventListener("click", async () => {
       if (await change({action: "gemini", id: managed, api_key: manageKey.value.trim()}, "حُفظ مفتاح Gemini لهذا المستخدم.")) manageKey.value = "";
+    });
+    document.getElementById("manage-model-save").addEventListener("click", async () => {
+      if (await change({action: "gemini_model", id: managed, model: manageModel.value.trim()}, "حُفظ النموذج. يصل نسخته خلال دقيقتين، أو عند فتحه صفحته.")) manageModel.blur();
     });
     document.getElementById("manage-key-delete").addEventListener("click", async () => {
       if (!window.confirm("حذف مفتاح Gemini من نسخة هذا المستخدم؟")) return;
