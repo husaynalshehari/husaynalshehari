@@ -6,6 +6,8 @@ script itself (same address and port), which then shows «إنشاء محتوى�
 2. A click on a kept account: extract its posts of the last days (all of them, the most liked or the
    most viewed; with or without "only those with photos"). Each post's link and photos are kept in
    data/content/<user>/ until that account is extracted again.
+3. Ticked kept posts are sent to a Gemini picture model («توليد»), which makes one new post from their
+   idea: a short text and one or two pictures, kept in data/content_generated/<user>/ until the next one.
 """
 from __future__ import annotations
 
@@ -18,8 +20,11 @@ import secrets
 import shutil
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from flask import abort, jsonify, render_template_string, request, send_from_directory, session
 
@@ -29,6 +34,30 @@ TOP_POSTS = 10
 EXTRACT_SECONDS = 240
 EXTRACT_MAX_POSTS = 400
 MODES = {"all": "الجميع", "likes": "الأكثر إعجابًا", "views": "الأكثر مشاهدة"}
+# «توليد»: the Gemini models offered on the page (the first is picked by default). Each answers with
+# text and pictures; max_photos is the most photos it is sent (Google's limit on reference pictures).
+GENERATE_MODELS: dict[str, dict] = {
+    "gemini-nano-banana-2.1": {"label": "Nano Banana 2.1 · الأحدث", "max_photos": 10},
+    "gemini-3.1-flash-image": {"label": "Nano Banana 2 · سريع", "max_photos": 10},
+    "gemini-3.1-flash-lite-image": {"label": "Nano Banana 2 Lite · الأرخص", "max_photos": 14},
+    "gemini-3-pro-image": {"label": "Nano Banana Pro · أعلى جودة", "max_photos": 6},
+}
+# The photos sent in one request stay under this (the API takes about 20 MB once encoded).
+GENERATE_MAX_BYTES = 14 * 1024 * 1024
+# How long one request may take: a picture model can take a minute or more.
+GENERATE_SECONDS = 240
+GENERATE_PROMPT = (
+    "You write viral posts for X (Twitter). Below are posts from one account, each with its text and photos.\n"
+    "Take the idea behind them and create ONE new post:\n"
+    "- The text: short (one or two sentences, at most 200 characters), thrilling, viral and mysterious. "
+    "It hints without telling everything, so people stop and want to know more. "
+    "Write it in the same language as the posts. No hashtags, no links.\n"
+    "- One or two images for it: edit the photos or create new ones from their idea. "
+    "Do not return a photo unchanged.\n"
+    "Answer with the post text only (no title, no introduction, no explanation), and the image(s)."
+)
+IMAGE_TYPES = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif"}
+EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 # A 1×1 picture the profile gets in place of each post photo (see extract_posts).
 BLANK_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
 
@@ -124,6 +153,108 @@ def username_from(value: str) -> str:
     return name if re.fullmatch(r"[A-Za-z0-9_]{1,15}", name) else ""
 
 
+class GenerateError(Exception):
+    """A generation that cannot go on; the message is shown on the page."""
+
+
+def gemini_problem(status: int, detail: str, busy: bool) -> str:
+    """What to show for a request Gemini turned down."""
+    if re.search(r"api key not valid|api_key_invalid|invalid api key", detail, re.I):
+        return "مفتاح Gemini المحفوظ غير صالح."
+    if status == 404 or re.search(r"not found|is not supported", detail, re.I):
+        return "هذا النموذج غير متاح لمفتاح Gemini المحفوظ. اختر نموذجًا آخر."
+    if re.search(r"quota|billing", detail, re.I):
+        return "حصة مفتاح Gemini لا تسمح بهذا الطلب الآن: انتهت الحصة، أو أن الفوترة غير مفعّلة على المفتاح."
+    if busy:
+        return "Gemini مشغول الآن. أعد المحاولة بعد قليل أو اختر نموذجًا آخر."
+    return "رفض Gemini الطلب" + (f": {detail}" if detail else ".")
+
+
+def ask_gemini(api_key: str, model: str, parts: list[dict], report) -> dict:
+    """One request answered with text and pictures. A busy Gemini is asked again a few times."""
+    body = json.dumps({
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }).encode("utf-8")
+    waits = (5, 12, 20, 30)
+    for attempt in range(len(waits) + 1):
+        ask = urllib.request.Request(
+            "https://generativelanguage.googleapis.com/v1beta/models/" + quote(model, safe="") + ":generateContent",
+            data=body,
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(ask, timeout=GENERATE_SECONDS) as answer:
+                return json.loads(answer.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            status = getattr(exc, "code", 0) or 0
+            detail = ""
+            try:
+                detail = str((json.loads(exc.read().decode("utf-8", "replace")).get("error") or {}).get("message") or "")
+            except Exception:
+                pass
+            detail = re.sub(r"\s+", " ", detail).strip()[:300]
+            if api_key:
+                detail = detail.replace(api_key, "…")
+            busy = status in (429, 500, 502, 503, 504) or bool(
+                re.search(r"high demand|try again later|unavailable|overloaded|resource exhausted|rate limit", detail, re.I))
+            # "limit: 0": this key has no quota at all for the model, so asking again is no use.
+            if busy and attempt < len(waits) and not re.search(r"limit:\s*0\b", detail):
+                report(f"Gemini مشغول الآن، إعادة المحاولة بعد {waits[attempt]} ثانية…")
+                time.sleep(waits[attempt])
+                continue
+            raise GenerateError(gemini_problem(status, detail, busy)) from None
+        except urllib.error.URLError as exc:
+            # Not connected, so the request did not go out: asked again.
+            if attempt < 2:
+                report("تعذّر الاتصال بـ Gemini، إعادة المحاولة…")
+                time.sleep(waits[attempt])
+                continue
+            raise GenerateError("تعذّر الاتصال بـ Gemini.") from exc
+        # Cut off after the request went out: not asked again, as Gemini may still make (and charge
+        # for) its pictures.
+        except TimeoutError as exc:
+            raise GenerateError(f"لم يرد Gemini خلال {GENERATE_SECONDS // 60} دقائق. أعد المحاولة أو اختر نموذجًا أسرع.") from exc
+        except OSError as exc:
+            raise GenerateError("انقطع الاتصال بـ Gemini أثناء التوليد. أعد المحاولة.") from exc
+        except ValueError as exc:
+            raise GenerateError("وصل من Gemini رد غير مفهوم. أعد المحاولة.") from exc
+    raise GenerateError("Gemini مشغول الآن. أعد المحاولة بعد قليل أو اختر نموذجًا آخر.")
+
+
+def clean_post(raw: str) -> str:
+    text = (raw or "").replace("**", "").strip()
+    text = re.sub(r"^(?:النص|المنشور الجديد|المنشور|نص المنشور|post|text|caption)\s*[:：]\s*", "", text, flags=re.I)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    # Quotes around the whole post only; quotes inside it stay.
+    if len(text) > 1 and text[0] in "\"'«“" and text[-1] in "\"'»”":
+        text = text[1:-1].strip()
+    return text[:1000]
+
+
+def read_answer(payload: dict) -> tuple[str, list[tuple[str, bytes]], str]:
+    """The post's text, its pictures as (type, bytes), and why Gemini stopped."""
+    candidate = (payload.get("candidates") or [{}])[0] or {}
+    texts: list[str] = []
+    pictures: list[tuple[str, bytes]] = []
+    for part in (candidate.get("content") or {}).get("parts") or []:
+        # Thinking models also send their drafts (text and pictures) marked "thought".
+        if not isinstance(part, dict) or part.get("thought"):
+            continue
+        if part.get("text"):
+            texts.append(str(part["text"]))
+        data = part.get("inlineData") or part.get("inline_data") or {}
+        kind = str(data.get("mimeType") or data.get("mime_type") or "")
+        if data.get("data") and kind.startswith("image/"):
+            try:
+                pictures.append((kind, base64.b64decode(data["data"])))
+            except ValueError:
+                pass
+    blocked = str((payload.get("promptFeedback") or {}).get("blockReason") or "")
+    return clean_post("\n".join(texts)), pictures, blocked or str(candidate.get("finishReason") or "")
+
+
 def attach(app, access_path: str, tools) -> None:
     """Add the page and its requests to the script's app, under the panel's own address.
 
@@ -137,6 +268,10 @@ def attach(app, access_path: str, tools) -> None:
     checking = threading.Lock()
     # Each account's last extraction: "running", "done" or "failed", with its message.
     extractions: dict[str, dict] = {}
+    # «توليد»: one at a time (each is paid for), and each account's last one, as above.
+    generated_root = Path(tools.data_dir) / "content_generated"
+    generating = threading.Lock()
+    generations: dict[str, dict] = {}
 
     def read_saved() -> list[dict]:
         try:
@@ -174,6 +309,19 @@ def attach(app, access_path: str, tools) -> None:
             return {}
         return loaded if isinstance(loaded, dict) else {}
 
+    def generated_folder(username: str) -> Path:
+        return generated_root / username.lower()
+
+    def read_generated(username: str) -> dict:
+        try:
+            loaded = json.loads((generated_folder(username) / "result.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def listed(username: str) -> bool:
+        return any(str(row["username"]).lower() == username.lower() for row in read_saved())
+
     def state() -> dict:
         current = tools.current_token()
         accounts = tools.accounts()
@@ -208,7 +356,7 @@ def attach(app, access_path: str, tools) -> None:
         csrf_token = session.get("csrf_token")
         if not csrf_token:
             csrf_token = session["csrf_token"] = secrets.token_urlsafe(32)
-        return render_template_string(PAGE, csrf_token=csrf_token, api_root="/" + access_path, panel="/" + access_path)
+        return render_template_string(PAGE, csrf_token=csrf_token, api_root="/" + access_path, panel="/" + access_path, models=GENERATE_MODELS)
 
     def content_state(access: str):
         allowed(access)
@@ -257,8 +405,11 @@ def attach(app, access_path: str, tools) -> None:
             write_saved([row for row in read_saved() if str(row["username"]).lower() != username])
             if username_from(username):
                 shutil.rmtree(folder(username), ignore_errors=True)
+                shutil.rmtree(generated_folder(username), ignore_errors=True)
             if extractions.get(username, {}).get("status") != "running":
                 extractions.pop(username, None)
+            if generations.get(username, {}).get("status") != "running":
+                generations.pop(username, None)
         return jsonify({**state(), "message": "حُذف الحساب من القائمة مع منشوراته المحفوظة."})
 
     def extract_posts(token: str, username: str, days: int, mode: str, photos_only: bool, progress) -> list[dict]:
@@ -451,13 +602,144 @@ def attach(app, access_path: str, tools) -> None:
         threading.Thread(target=run_extraction, args=(account["token"], kept, days, mode, photos_only), name="content-extract", daemon=True).start()
         return jsonify(success=True, message="بدأ الاستخراج.", job=extractions[kept.lower()])
 
+    def generate(api_key: str, username: str, model: str, post_ids: list[str], progress) -> dict:
+        """Send the ticked posts (text and photos) to Gemini; returns the new post."""
+        by_id = {str(row.get("status_id")): row for row in read_posts(username).get("posts") or []}
+        chosen = [by_id[status_id] for status_id in post_ids if status_id in by_id]
+        if not chosen:
+            raise GenerateError("المنشورات المحددة لم تعد محفوظة. حدّدها من جديد.")
+        # Every post's first photo before any post's second one, within the model's limit and the size.
+        order = []
+        for depth in range(4):
+            for index, row in enumerate(chosen):
+                names = row.get("images") or []
+                if depth < len(names):
+                    order.append((index, names[depth]))
+        picked: dict[tuple[int, str], bytes] = {}
+        size = 0
+        for index, name in order:
+            if len(picked) >= GENERATE_MODELS[model]["max_photos"]:
+                break
+            try:
+                data = (folder(username) / name).read_bytes()
+            except OSError:
+                continue
+            if size + len(data) > GENERATE_MAX_BYTES:
+                continue
+            picked[(index, name)] = data
+            size += len(data)
+        parts: list[dict] = [{"text": GENERATE_PROMPT}]
+        for index, row in enumerate(chosen):
+            parts.append({"text": f"Post {index + 1}:\n" + (str(row.get("text") or "").strip() or "(no text)")})
+            for name in row.get("images") or []:
+                data = picked.get((index, name))
+                if data is not None:
+                    kind = IMAGE_TYPES.get(name.rsplit(".", 1)[-1].lower(), "image/jpeg")
+                    parts.append({"inlineData": {"mimeType": kind, "data": base64.b64encode(data).decode("ascii")}})
+        total = sum(len(row.get("images") or []) for row in chosen)
+        sent = f"أُرسل {len(chosen)} منشورًا و{len(picked)} صورة" + (f" من {total}" if len(picked) < total else "")
+        label = GENERATE_MODELS[model]["label"].split(" · ")[0]
+        text, pictures, reason = "", [], ""
+        for attempt in range(2):
+            progress(f"جارٍ التوليد بـ {label}… {sent}. قد يستغرق دقيقة أو أكثر.")
+            text, pictures, reason = read_answer(ask_gemini(api_key, model, parts, progress))
+            # Now and then the answer comes without a picture: asked once more.
+            if pictures or reason not in ("", "STOP"):
+                break
+        if not pictures:
+            if reason not in ("", "STOP", "MAX_TOKENS"):
+                raise GenerateError(f"رفض Gemini توليد الصور لهذه المنشورات ({reason}). جرّب منشورات أو نموذجًا آخر.")
+            raise GenerateError("لم يُرجع Gemini صورة. أعد المحاولة أو اختر نموذجًا آخر.")
+        return {"model": model, "text": text, "pictures": pictures[:2], "posts": [str(row["status_id"]) for row in chosen],
+                "photos_sent": len(picked), "photos_total": total}
+
+    def save_generated(username: str, result: dict) -> None:
+        """Put the new post in place of the account's last one."""
+        fresh = generated_root / f".{username.lower()}.new"
+        shutil.rmtree(fresh, ignore_errors=True)
+        fresh.mkdir(parents=True)
+        names = []
+        for number, (kind, data) in enumerate(result["pictures"], 1):
+            name = f"{number}.{EXTENSIONS.get(kind, 'png')}"
+            (fresh / name).write_bytes(data)
+            names.append(name)
+        kept = {"username": username, "model": result["model"], "text": result["text"], "images": names, "posts": result["posts"],
+                "photos_sent": result["photos_sent"], "photos_total": result["photos_total"], "created_at": time.time()}
+        (fresh / "result.json").write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
+        shutil.rmtree(generated_folder(username), ignore_errors=True)
+        fresh.rename(generated_folder(username))
+
+    def run_generation(api_key: str, username: str, model: str, post_ids: list[str]) -> None:
+        key = username.lower()
+
+        def progress(message: str) -> None:
+            generations[key] = {"status": "running", "message": message}
+
+        try:
+            result = generate(api_key, username, model, post_ids, progress)
+            with store_lock:
+                # Deleted from the list while it ran: nothing is kept for it.
+                if not listed(username):
+                    generations.pop(key, None)
+                    return
+                save_generated(username, result)
+            pictures = len(result["pictures"])
+            generations[key] = {"status": "done", "message": "اكتمل التوليد: نص و" + ("صورة." if pictures == 1 else "صورتان.")}
+        except GenerateError as exc:
+            kept = " بقي آخر منشور مولَّد كما هو." if read_generated(username) else ""
+            generations[key] = {"status": "failed", "message": f"{exc}{kept}"}
+        except Exception:
+            kept = " بقي آخر منشور مولَّد كما هو." if read_generated(username) else ""
+            generations[key] = {"status": "failed", "message": f"تعذّر التوليد.{kept}"}
+        finally:
+            generating.release()
+
+    def content_generate(access: str):
+        """«توليد»: send the ticked posts to the chosen Gemini model; the page follows it."""
+        allowed(access)
+        data = request.get_json(silent=True) or {}
+        if not csrf_ok(data):
+            return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+        username = username_from(str(data.get("username") or ""))
+        with store_lock:
+            kept = next((row["username"] for row in read_saved() if str(row["username"]).lower() == username.lower()), "") if username else ""
+        if not kept:
+            return jsonify(success=False, message="هذا الحساب ليس في القائمة."), 404
+        model = str(data.get("model") or "")
+        if model not in GENERATE_MODELS:
+            return jsonify(success=False, message="اختر نموذج Gemini."), 400
+        posts = data.get("posts") if isinstance(data.get("posts"), list) else []
+        post_ids = list(dict.fromkeys(str(value) for value in posts if re.fullmatch(r"\d{1,25}", str(value))))[:100]
+        known = {str(row.get("status_id")) for row in read_posts(kept).get("posts") or []}
+        post_ids = [status_id for status_id in post_ids if status_id in known]
+        if not post_ids:
+            return jsonify(success=False, message="حدّد منشورًا واحدًا على الأقل."), 400
+        gemini_key = getattr(tools, "gemini_key", None)
+        if gemini_key is None:
+            return jsonify(success=False, message="حدّث ملف السكربت لاستخدام التوليد."), 400
+        api_key = gemini_key()
+        if not api_key:
+            return jsonify(success=False, message="لا يوجد مفتاح Gemini محفوظ في اللوحة."), 400
+        if not generating.acquire(blocking=False):
+            return jsonify(success=False, message="يعمل الآن توليد آخر. انتظر حتى ينتهي."), 409
+        generations[kept.lower()] = {"status": "running", "message": "جارٍ إرسال المنشورات إلى Gemini…"}
+        threading.Thread(target=run_generation, args=(api_key, kept, model, post_ids), name="content-generate", daemon=True).start()
+        return jsonify(success=True, message="بدأ التوليد.", job=generations[kept.lower()])
+
+    def content_generated_media(access: str, username: str, name: str):
+        allowed(access)
+        if not username_from(username) or not re.fullmatch(r"[12]\.(png|jpg|webp)", name):
+            abort(404)
+        return send_from_directory(generated_folder(username), name)
+
     def content_posts(access: str, username: str):
         """An account's kept posts, and how its extraction is going."""
         allowed(access)
         username = username_from(username)
         if not username:
             abort(404)
-        return jsonify(success=True, job=extractions.get(username.lower(), {}), kept=read_posts(username))
+        return jsonify(success=True, job=extractions.get(username.lower(), {}), kept=read_posts(username),
+                       gen_job=generations.get(username.lower(), {}), generated=read_generated(username))
 
     def content_media(access: str, username: str, name: str):
         allowed(access)
@@ -472,6 +754,8 @@ def attach(app, access_path: str, tools) -> None:
     app.add_url_rule("/<access>/content/extract", "content_extract", content_extract, methods=["POST"])
     app.add_url_rule("/<access>/content/posts/<username>", "content_posts", content_posts, methods=["GET"])
     app.add_url_rule("/<access>/content/media/<username>/<name>", "content_media", content_media, methods=["GET"])
+    app.add_url_rule("/<access>/content/generate", "content_generate", content_generate, methods=["POST"])
+    app.add_url_rule("/<access>/content/generated/<username>/<name>", "content_generated_media", content_generated_media, methods=["GET"])
 
 
 PAGE = r'''<!doctype html>
@@ -541,6 +825,24 @@ PAGE = r'''<!doctype html>
     .post-text { margin: 4px 0 0; font-size: 13px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
     .photos { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
     .photos img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; display: block; }
+    .pick-all { display: flex; align-items: center; gap: 8px; width: fit-content; margin-top: 10px; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .pick-all span { color: var(--muted); font-weight: 400; }
+    .pick-all input, .pick input { flex: none; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; accent-color: var(--pine); }
+    .post-meta .pick { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+    .posts li { cursor: pointer; }
+    .posts li.is-picked { background: var(--ok-bg); box-shadow: inset 0 0 0 1.5px var(--pine); }
+    .generate-bar { position: sticky; bottom: 0; z-index: 1; margin: 10px -14px 0; padding: 10px 14px; background: var(--sheet);
+      box-shadow: 0 -1px 0 var(--line), 0 -8px 16px rgba(28, 25, 21, 0.06); }
+    .generate-bar .notice { margin: 0 0 8px; }
+    .gen-row { display: flex; gap: 6px; }
+    .gen-row select { flex: 1; min-width: 0; min-height: 36px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px;
+      background: var(--sheet); color: var(--ink); font: inherit; font-size: 16px; }
+    .generated { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: var(--ok-bg); box-shadow: inset 0 0 0 1px rgba(15, 107, 80, 0.25); }
+    .gen-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 10px; font-size: 13px; }
+    .gen-head span { color: var(--muted); font-size: 12px; }
+    .gen-text { margin: 6px 0 8px; font-size: 15px; line-height: 1.6; white-space: pre-wrap; }
+    .gen-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 6px; margin-bottom: 8px; }
+    .gen-images img { width: 100%; border-radius: 10px; display: block; }
   </style>
 </head>
 <body>
@@ -581,7 +883,25 @@ PAGE = r'''<!doctype html>
         <button id="extract-go" class="go wide" type="button">استخراج</button>
         <div id="extract-notice" class="notice" role="status" hidden></div>
         <p id="kept-title" class="hint"></p>
+        <section id="generated" class="generated" hidden>
+          <div class="gen-head"><b>المنشور المولَّد</b><span id="generated-meta"></span></div>
+          <p id="generated-text" class="gen-text" dir="auto"></p>
+          <div id="generated-images" class="gen-images"></div>
+          <button id="generated-copy" type="button">نسخ النص</button>
+        </section>
+        <label id="pick-all-row" class="pick-all" hidden><input id="pick-all" type="checkbox"> تحديد الكل <span id="picked-count"></span></label>
         <ul id="posts" class="posts"></ul>
+        <div id="generate-bar" class="generate-bar" hidden>
+          <div id="gen-notice" class="notice" role="status" hidden></div>
+          <div class="gen-row">
+            <select id="gen-model" aria-label="نموذج Gemini">
+              {%- for id, model in models.items() %}
+              <option value="{{ id }}">{{ model.label }}</option>
+              {%- endfor %}
+            </select>
+            <button id="gen-go" class="go" type="button" disabled>توليد</button>
+          </div>
+        </div>
         <button id="extract-close" class="wide" type="button" style="margin-top: 12px">إغلاق</button>
       </div>
     </dialog>
@@ -672,8 +992,19 @@ PAGE = r'''<!doctype html>
     const daysField = document.getElementById("days");
     const postsList = document.getElementById("posts");
     const MODES = {all: "الجميع", likes: "الأكثر إعجابًا", views: "الأكثر مشاهدة", images: "التي فيها صور"};
+    const MODELS = {{ models|tojson }};
+    const pickAll = document.getElementById("pick-all");
+    const genGo = document.getElementById("gen-go");
+    const genModel = document.getElementById("gen-model");
+    const genNotice = document.getElementById("gen-notice");
+    const generatedBox = document.getElementById("generated");
     let current = "";
     let polling = 0;
+    // The extraction the list shows, the posts ticked in it, and the generated post on show.
+    let listShows = "";
+    const ticked = new Set();
+    let generatingNow = false;
+    let resultShows = "";
 
     function openExtract(row) {
       current = row.username;
@@ -686,6 +1017,8 @@ PAGE = r'''<!doctype html>
       document.getElementById("extract-title").replaceChildren("استخراج من ", titleName, " (", titleHandle, ")");
       extractNotice.hidden = true;
       extractGo.disabled = false;
+      genNotice.hidden = true;
+      generatingNow = false;
       dialog.showModal();
       loadPosts();
     }
@@ -704,11 +1037,33 @@ PAGE = r'''<!doctype html>
         ? "المحفوظ: " + posts.length + " منشورًا · " + (MODES[kept.mode] || "") + (kept.photos_only ? " · فيها صور فقط" : "") + " · آخر " + kept.days + " أيام · استُخرج "
           + new Date(kept.extracted_at * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"})
         : "لا توجد منشورات محفوظة لهذا الحساب.";
+      // The same posts as on show: the list, and what is ticked in it, stay as they are.
+      const shows = current + "|" + (kept.extracted_at || "");
+      if (shows === listShows) return;
+      listShows = shows;
+      ticked.clear();
       postsList.replaceChildren();
       posts.forEach((post) => {
         const item = document.createElement("li");
         const meta = document.createElement("div");
         meta.className = "post-meta";
+        const pick = document.createElement("label");
+        pick.className = "pick";
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.dataset.id = post.status_id;
+        box.setAttribute("aria-label", "تحديد المنشور");
+        box.addEventListener("change", () => {
+          if (box.checked) ticked.add(post.status_id);
+          else ticked.delete(post.status_id);
+          showTicks();
+        });
+        // A tap anywhere on the card ticks it too, except on its links.
+        item.addEventListener("click", (event) => {
+          if (event.target.closest("a, label")) return;
+          box.checked = !box.checked;
+          box.dispatchEvent(new Event("change"));
+        });
         const info = document.createElement("span");
         info.textContent = new Date(post.date).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"})
           + " · إعجاب " + Number(post.likes).toLocaleString("en-US") + " · مشاهدة " + Number(post.views).toLocaleString("en-US");
@@ -717,7 +1072,8 @@ PAGE = r'''<!doctype html>
         open.target = "_blank";
         open.rel = "noopener";
         open.textContent = "فتح المنشور";
-        meta.append(info, open);
+        pick.append(box, info);
+        meta.append(pick, open);
         item.append(meta);
         if (post.text) {
           const text = document.createElement("p");
@@ -744,6 +1100,63 @@ PAGE = r'''<!doctype html>
         }
         postsList.append(item);
       });
+      document.getElementById("pick-all-row").hidden = !posts.length;
+      document.getElementById("generate-bar").hidden = !posts.length;
+      showTicks();
+    }
+
+    function showTicks() {
+      const boxes = [...postsList.querySelectorAll("input[data-id]")];
+      boxes.forEach((box) => {
+        box.checked = ticked.has(box.dataset.id);
+        box.closest("li").classList.toggle("is-picked", box.checked);
+      });
+      pickAll.checked = boxes.length > 0 && ticked.size === boxes.length;
+      pickAll.indeterminate = ticked.size > 0 && ticked.size < boxes.length;
+      document.getElementById("picked-count").textContent = "(" + ticked.size + " من " + boxes.length + ")";
+      genGo.textContent = ticked.size ? "توليد (" + ticked.size + ")" : "توليد";
+      genGo.disabled = !ticked.size || generatingNow;
+    }
+
+    pickAll.addEventListener("change", () => {
+      ticked.clear();
+      if (pickAll.checked) postsList.querySelectorAll("input[data-id]").forEach((box) => ticked.add(box.dataset.id));
+      showTicks();
+    });
+
+    function showGenJob(job) {
+      generatingNow = job.status === "running";
+      genNotice.hidden = !job.status;
+      if (job.status) {
+        genNotice.textContent = job.message;
+        genNotice.className = "notice " + (job.status === "failed" ? "is-bad" : "is-ok");
+      }
+      showTicks();
+    }
+
+    // The account's last generated post. Returns true when it is a new one.
+    function showGenerated(result) {
+      generatedBox.hidden = !result.created_at;
+      const shows = current + "|" + (result.created_at || "");
+      if (!result.created_at || shows === resultShows) return false;
+      resultShows = shows;
+      document.getElementById("generated-text").textContent = result.text || "(بلا نص)";
+      document.getElementById("generated-meta").textContent = ((MODELS[result.model] || {}).label || result.model)
+        + " · " + new Date(result.created_at * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"})
+        + " · من " + (result.posts || []).length + " منشورات";
+      const images = document.getElementById("generated-images");
+      images.replaceChildren();
+      (result.images || []).forEach((name) => {
+        const link = document.createElement("a");
+        link.href = apiRoot + "/content/generated/" + encodeURIComponent(result.username) + "/" + encodeURIComponent(name) + "?v=" + result.created_at;
+        link.target = "_blank";
+        const image = document.createElement("img");
+        image.src = link.href;
+        image.alt = "صورة مولَّدة";
+        link.append(image);
+        images.append(link);
+      });
+      return true;
     }
 
     async function loadPosts() {
@@ -757,8 +1170,13 @@ PAGE = r'''<!doctype html>
       if (username !== current) return;
       showJob(data.job || {});
       showKept(data.kept || {});
+      const wasGenerating = generatingNow;
+      showGenJob(data.gen_job || {});
+      if (showGenerated(data.generated || {}) && wasGenerating && !generatingNow) {
+        generatedBox.scrollIntoView({block: "start", behavior: "smooth"});
+      }
       clearTimeout(polling);
-      if ((data.job || {}).status === "running") {
+      if ((data.job || {}).status === "running" || (data.gen_job || {}).status === "running") {
         polling = setTimeout(() => {
           if (dialog.open) loadPosts();
         }, 2000);
@@ -790,6 +1208,72 @@ PAGE = r'''<!doctype html>
       }
       showJob(data.job);
       loadPosts();
+    });
+    genGo.addEventListener("click", async () => {
+      const posts = [...ticked];
+      if (!posts.length) return;
+      generatingNow = true;
+      showTicks();
+      let data;
+      try {
+        const response = await fetch(apiRoot + "/content/generate", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          cache: "no-store",
+          body: JSON.stringify({csrf_token: csrf, username: current, model: genModel.value, posts})
+        });
+        data = await response.json();
+      } catch (_) {
+        data = {message: "تعذّر الاتصال."};
+      }
+      if (!data.success) {
+        showGenJob({status: "failed", message: data.message || "تعذّر بدء التوليد."});
+        return;
+      }
+      showGenJob(data.job);
+      loadPosts();
+    });
+
+    // The model picked last time, on this browser.
+    try {
+      const saved = localStorage.getItem("content-generate-model");
+      if (saved && MODELS[saved]) genModel.value = saved;
+    } catch (_) {}
+    genModel.addEventListener("change", () => {
+      try {
+        localStorage.setItem("content-generate-model", genModel.value);
+      } catch (_) {}
+    });
+
+    // Pages opened over plain http (a server IP) have no navigator.clipboard, so fall back to execCommand.
+    async function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch (_) {}
+      }
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.cssText = "position: fixed; top: 0; left: 0; opacity: 0; font-size: 16px;";
+      document.body.appendChild(area);
+      area.select();
+      area.setSelectionRange(0, text.length);
+      let copied = false;
+      try {
+        copied = document.execCommand("copy");
+      } catch (_) {}
+      area.remove();
+      return copied;
+    }
+    document.getElementById("generated-copy").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const copied = await copyText(document.getElementById("generated-text").textContent);
+      button.textContent = copied ? "نُسخ النص" : "تعذّر النسخ";
+      setTimeout(() => {
+        button.textContent = "نسخ النص";
+      }, 1500);
     });
     document.getElementById("extract-close").addEventListener("click", () => dialog.close());
 

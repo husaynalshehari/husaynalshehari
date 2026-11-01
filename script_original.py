@@ -6277,6 +6277,12 @@ def content_accounts() -> list[dict]:
         return [{"id": row["id"], "username": row.get("username") or "", "token": row["token"]} for row in saved_sessions]
 
 
+def content_gemini_key() -> str:
+    """The Gemini key saved on the panel (the owner's, on users' copies)."""
+    with gemini_lock:
+        return str(saved_gemini.get("api_key") or "")
+
+
 def attach_content() -> None:
     content_file = Path(__file__).resolve().with_name("content.py")
     if not content_file.is_file():
@@ -6292,6 +6298,7 @@ def attach_content() -> None:
             # Any free browser profile of the account, so a running task does not hold it up.
             run_browser=lambda token, work: run_on_fresh_browser(token, work, MAX_PROFILES_PER_ACCOUNT),
             goto_x=goto_x,
+            gemini_key=content_gemini_key,
         ))
     except Exception as exc:
         print(f"لم تُضف صفحة إنشاء المحتوى ({content_file.name}): {exc}", flush=True)
