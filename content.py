@@ -71,7 +71,7 @@ GENERATE_DIFFERENT = (
     "or another subject many people care about, and another image:\n"
 )
 # How many posts one «توليد» makes (offered on the page; the first is the default).
-GENERATE_COUNTS = (3, 2)
+GENERATE_COUNTS = (3, 2, 1)
 IMAGE_TYPES = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif"}
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 # A 1×1 picture the profile gets in place of each post photo (see extract_posts).
@@ -705,8 +705,8 @@ def attach(app, access_path: str, tools) -> None:
                 break
         if not pictures:
             if reason not in ("", "STOP", "MAX_TOKENS"):
-                raise GenerateError(f"رفض Gemini توليد صورته ({reason}).", fatal=False)
-            raise GenerateError("لم يُرجع Gemini صورة له.", fatal=False)
+                raise GenerateError(f"رفض Gemini توليد الصورة ({reason}).", fatal=False)
+            raise GenerateError("لم يُرجع Gemini صورة.", fatal=False)
         return text, pictures[:2]
 
     def save_generated(username: str, result: dict) -> None:
@@ -742,16 +742,17 @@ def attach(app, access_path: str, tools) -> None:
             sent = f"أُرسل {len(info['posts'])} منشورًا و{info['photos_sent']} صورة" + (
                 f" من {info['photos_total']}" if info["photos_sent"] < info["photos_total"] else "")
             for number in range(1, count + 1):
-                step = f"المنشور {number} من {count}"
+                # One post alone is just "the post"; of two or three, "post 2 of 3".
+                step = f"المنشور {number} من {count}" if count > 1 else ""
 
                 def progress(message: str, step=step) -> None:
-                    generations[key] = {"status": "running", "message": f"{step}: {message}"}
+                    generations[key] = {"status": "running", "message": f"{step}: {message}" if step else message}
 
-                generations[key] = {"status": "running", "message": f"جارٍ توليد {step} بـ {label}… {sent}. قد يستغرق دقيقة أو أكثر."}
+                generations[key] = {"status": "running", "message": f"جارٍ توليد {step or 'المنشور'} بـ {label}… {sent}. قد يستغرق دقيقة أو أكثر."}
                 try:
                     text, pictures = generate_one(api_key, model, parts, made, progress)
                 except GenerateError as exc:
-                    problem, last = f"{step}: {exc}", exc
+                    problem, last = (f"{step}: {exc}" if step else str(exc)), exc
                     if exc.fatal:
                         break
                     continue
@@ -764,13 +765,14 @@ def attach(app, access_path: str, tools) -> None:
                                               "batch": batch, "number": len(made) + 1, "of": count})
                 made.append(text)
             if len(made) == count:
-                generations[key] = {"status": "done", "message": "اكتمل التوليد: " + ("منشوران." if count == 2 else f"{count} منشورات.")}
+                generations[key] = {"status": "done", "message": "اكتمل التوليد: " + {1: "منشور واحد.", 2: "منشوران."}.get(count, f"{count} منشورات.")}
             elif made:
                 generations[key] = {"status": "done", "message": f"اكتمل {len(made)} من {count}. لم يكتمل الباقي: {problem}"}
             elif last is not None and last.fatal:
                 generations[key] = {"status": "failed", "message": str(last)}
             else:
-                generations[key] = {"status": "failed", "message": f"لم يكتمل أي منشور. {problem} جرّب منشورات أو نموذجًا آخر."}
+                before = "لم يكتمل أي منشور. " if count > 1 else ""
+                generations[key] = {"status": "failed", "message": f"{before}{problem} جرّب منشورات أو نموذجًا آخر."}
         except GenerateError as exc:
             generations[key] = {"status": "failed", "message": str(exc)}
         except Exception:
@@ -1000,7 +1002,7 @@ PAGE = r'''<!doctype html>
           <div class="gen-row">
             <select id="gen-count" class="gen-count" aria-label="عدد المنشورات">
               {%- for count in counts %}
-              <option value="{{ count }}">{{ "منشوران" if count == 2 else count ~ " منشورات" }}</option>
+              <option value="{{ count }}">{{ {1: "منشور واحد", 2: "منشوران"}.get(count, count ~ " منشورات") }}</option>
               {%- endfor %}
             </select>
             <button id="gen-go" class="go" type="button" disabled>توليد</button>
