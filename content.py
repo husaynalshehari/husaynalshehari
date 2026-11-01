@@ -51,24 +51,20 @@ GENERATE_SECONDS = 240
 GENERATE_PROMPT = (
     "You write viral posts for X (Twitter). Below are posts from one account, each with its text and photos.\n"
     "Take the idea behind them and create ONE new post:\n"
-    "- Its subject: something many people suffer from or care about (a real, common problem, worry or need), "
-    "close to the idea of the posts. Not a random mystery, and not about a trivial thing.\n"
-    "- The text: short (one or two short sentences, at most 120 characters), mysterious and thrilling. "
-    "It raises a question about that subject and does not answer it. Write it in the same language as the posts.\n"
-    "- The secret of the mystery is in the image: its answer is a meaningful detail in the image, about that "
-    "subject, that the reader only catches when they open the image and look closely. "
-    "The text must not reveal or describe that detail.\n"
-    "- The text asks nothing of the reader: no 'open the image', 'look', 'zoom in' or 'focus', and no asking "
-    "to like, comment, share, repost or follow. No arrows or pointing emojis (such as 👇 ⬇️ 👀), "
-    "no hashtags, no links.\n"
-    "- One or two images with that detail in them: edit the photos or create new ones from their idea. "
-    "Do not return a photo unchanged.\n"
+    "- The text: short (one or two sentences, at most 200 characters), thrilling, viral and mysterious. "
+    "It hints without telling everything, so people stop and want to know more. "
+    "Write it in the same language as the posts. No hashtags, no links.\n"
+    "- Controversial and realistic: about a real matter people disagree on, so it sparks debate, and true to "
+    "real life (no made-up facts). No insults or attacks on people or groups.\n"
+    "- One or two images for it: edit the photos or create new ones from their idea. "
+    "Do not return a photo unchanged. The images look real, like real photos.\n"
+    "- No person in the images: no people, faces or bodies, even when the photos have them.\n"
     "Answer with the post text only (no title, no introduction, no explanation), and the image(s)."
 )
 # Sent after the posts for the second and third post of one «توليد», with the texts made before it.
 GENERATE_DIFFERENT = (
-    "Posts already made from these. Yours must be clearly different from them: another angle of the subject "
-    "or another subject many people care about, and another image:\n"
+    "Posts already made from these. Yours must be clearly different from them: another angle or another "
+    "idea from these posts, and another image:\n"
 )
 # How many posts one «توليد» makes (offered on the page; the first is the default).
 GENERATE_COUNTS = (3, 2, 1)
