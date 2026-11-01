@@ -46,13 +46,18 @@ GENERATE_MODELS: dict[str, dict] = {
 GENERATE_MAX_BYTES = 14 * 1024 * 1024
 # How long one request may take: a picture model can take a minute or more.
 GENERATE_SECONDS = 240
+# What Gemini is asked to make from the ticked posts (their texts and photos follow it).
 GENERATE_PROMPT = (
     "You write viral posts for X (Twitter). Below are posts from one account, each with its text and photos.\n"
     "Take the idea behind them and create ONE new post:\n"
-    "- The text: short (one or two sentences, at most 200 characters), thrilling, viral and mysterious. "
-    "It hints without telling everything, so people stop and want to know more. "
-    "Write it in the same language as the posts. No hashtags, no links.\n"
-    "- One or two images for it: edit the photos or create new ones from their idea. "
+    "- The text: short (one or two short sentences, at most 120 characters), mysterious and thrilling. "
+    "It raises a question and does not answer it. Write it in the same language as the posts.\n"
+    "- The secret of the mystery is in the image: its answer is a detail in the image that the reader only "
+    "catches when they open the image and look closely. The text must not reveal or describe that detail.\n"
+    "- The text asks nothing of the reader: no 'open the image', 'look', 'zoom in' or 'focus', and no asking "
+    "to like, comment, share, repost or follow. No arrows or pointing emojis (such as 👇 ⬇️ 👀), "
+    "no hashtags, no links.\n"
+    "- One or two images with that detail in them: edit the photos or create new ones from their idea. "
     "Do not return a photo unchanged.\n"
     "Answer with the post text only (no title, no introduction, no explanation), and the image(s)."
 )
