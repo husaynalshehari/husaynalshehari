@@ -65,7 +65,7 @@ GENERATE_PROMPT = (
     "something odd or funny that does not belong, or a short provocative label or number added on the photo. "
     "It feels natural, not like a planned joke.\n"
     "- No person in the images: no people, faces or bodies, even when the photos have them.\n"
-    "Answer with the post text only (no title, no introduction, no explanation), and the image(s)."
+    "Answer with the post text only, between <post> and </post> (no title, no notes, no translation), and the image(s)."
 )
 # Sent after the posts for the second and third post of one «توليد», with the texts made before it.
 GENERATE_DIFFERENT = (
@@ -246,10 +246,38 @@ def ask_gemini(api_key: str, model: str, parts: list[dict], report) -> dict:
     raise GenerateError("Gemini مشغول الآن. أعد المحاولة بعد قليل أو اختر نموذجًا آخر.")
 
 
+# A label the model may put before the post ("Post Text:", "المنشور:"), and the start of a note it may
+# add around it (a warning, "Here is…", a translation): neither is part of the post.
+POST_LABEL = re.compile(r"^\s*[*#>•\-]*\s*(?:post\s*text|post|text|caption|tweet|نص المنشور|المنشور الجديد|المنشور|النص|التغريدة)\s*[:：]\s*", re.I)
+NOTE_START = re.compile(r"^\s*(?:[#*⚠>•\-(\[]|note\b|please\b|here\b|translation\b|ملاحظة|تنبيه|ترجمة)", re.I)
+
+
 def clean_post(raw: str) -> str:
-    text = (raw or "").replace("**", "").strip()
-    text = re.sub(r"^(?:النص|المنشور الجديد|المنشور|نص المنشور|post|text|caption)\s*[:：]\s*", "", text, flags=re.I)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    """The post's own text from the model's answer, without the notes, labels or translation it may add."""
+    text = (raw or "").replace("**", "")
+    tagged = re.search(r"<post>(.*?)(</post>|$)", text, re.S | re.I)
+    if tagged and tagged.group(2):
+        # Between <post> and </post>, as asked: that is the post.
+        text = tagged.group(1).strip()
+    else:
+        # No (closing) tag: the post's lines, skipping notes and a label before them, up to the
+        # first empty line, note or label after them.
+        kept: list[str] = []
+        for line in (tagged.group(1) if tagged else text).replace("</post>", "").split("\n"):
+            line = line.strip()
+            labelled = POST_LABEL.match(line)
+            if not line or labelled or NOTE_START.match(line):
+                if kept:
+                    break
+                if labelled and line[labelled.end():].strip():
+                    kept.append(line[labelled.end():].strip())
+                continue
+            kept.append(line)
+        text = "\n".join(kept)
+    text = POST_LABEL.sub("", text, count=1).strip()
+    # An English translation in brackets after an Arabic post.
+    if re.search(r"[\u0600-\u06FF]", text):
+        text = re.sub(r"\s*\([A-Za-z][^()]*\)\s*$", "", text)
     # Quotes around the whole post only; quotes inside it stay.
     if len(text) > 1 and text[0] in "\"'«“" and text[-1] in "\"'»”":
         text = text[1:-1].strip()
@@ -275,7 +303,8 @@ def read_answer(payload: dict) -> tuple[str, list[tuple[str, bytes]], str]:
             except ValueError:
                 pass
     blocked = str((payload.get("promptFeedback") or {}).get("blockReason") or "")
-    return clean_post("\n".join(texts)), pictures, blocked or str(candidate.get("finishReason") or "")
+    # Each text part on its own: a note sent as a part of its own stays apart from the post.
+    return clean_post("\n\n".join(texts)), pictures, blocked or str(candidate.get("finishReason") or "")
 
 
 def attach(app, access_path: str, tools) -> None:
