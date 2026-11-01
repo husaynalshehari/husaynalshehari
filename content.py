@@ -3,12 +3,13 @@ script itself (same address and port), which then shows «إنشاء محتوى�
 
 1. The saved account, and the X accounts to work with. «تحقق» opens the account's profile with the
    saved account and keeps its username with the account's name.
-2. A click on a kept account: extract its posts of the last days (all of them, the most liked, the
-   most viewed, or those with photos). Each post's link and photos are kept in data/content/<user>/
-   until that account is extracted again.
+2. A click on a kept account: extract its posts of the last days (all of them, the most liked or the
+   most viewed; with or without "only those with photos"). Each post's link and photos are kept in
+   data/content/<user>/ until that account is extracted again.
 """
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import os
@@ -27,7 +28,9 @@ TOP_POSTS = 10
 # A profile is scrolled at most this long, and for at most this many posts.
 EXTRACT_SECONDS = 240
 EXTRACT_MAX_POSTS = 400
-MODES = {"all": "الجميع", "likes": "الأكثر إعجابًا", "views": "الأكثر مشاهدة", "images": "التي فيها صور"}
+MODES = {"all": "الجميع", "likes": "الأكثر إعجابًا", "views": "الأكثر مشاهدة"}
+# A 1×1 picture the profile gets in place of each post photo (see extract_posts).
+BLANK_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
 
 # Reads the open profile: the account's name and username, or why there is none yet.
 PROFILE_JS = r"""
@@ -75,6 +78,12 @@ POSTS_JS = r"""
     const like = article.querySelector('[data-testid="like"], [data-testid="unlike"]');
     const views = article.querySelector('a[href$="/analytics"]');
     const text = article.querySelector('[data-testid="tweetText"]');
+    // This post's photos, not a quoted post's: those sit in a role="link" box, or link to that post.
+    const own = (link) => ((link.getAttribute("href") || "").match(/\/status\/(\d+)\/photo\/\d+/) || [])[1] === match[2];
+    const photos = [...new Set([...article.querySelectorAll('[data-testid="tweetPhoto"] img')]
+      .filter((img) => /\/media\//.test(img.src) && !img.closest('div[role="link"]'))
+      .filter((img) => { const link = img.closest('a[href*="/photo/"]'); return !link || own(link); })
+      .map((img) => img.src))];
     posts.push({
       status_id: match[2],
       url: "https://x.com/" + match[1] + "/status/" + match[2],
@@ -85,10 +94,9 @@ POSTS_JS = r"""
       likes: count(like && (like.getAttribute("aria-label") || like.innerText)) || 0,
       views: count(views && (views.getAttribute("aria-label") || views.innerText)) || 0,
       text: text ? text.innerText.slice(0, 500) : "",
-      // A quoted post sits in a role="link" box: its photos are not this post's.
-      photos: [...article.querySelectorAll('[data-testid="tweetPhoto"] img')]
-        .filter((img) => !img.closest('div[role="link"]') && /\/media\//.test(img.src))
-        .map((img) => img.src),
+      // The link to the post's own /photo/N is there even when its photo is not.
+      has_photos: photos.length > 0 || [...article.querySelectorAll('a[href*="/photo/"]')].some(own),
+      photos,
     });
   }
   const body = (document.body && document.body.innerText) || "";
@@ -253,14 +261,44 @@ def attach(app, access_path: str, tools) -> None:
                 extractions.pop(username, None)
         return jsonify({**state(), "message": "حُذف الحساب من القائمة مع منشوراته المحفوظة."})
 
-    def extract_posts(token: str, username: str, days: int, mode: str, progress) -> list[dict]:
+    def extract_posts(token: str, username: str, days: int, mode: str, photos_only: bool, progress) -> list[dict]:
         """Scroll the profile back to the start of the period and pick its posts; each with its photos
         downloaded (as (file name, bytes) in "files")."""
         since = time.time() - days * 86400
 
+        def photo(route):
+            # X takes a photo that fails to load off the page, address and all, and the script's
+            # browser blocks photos (to stay fast). So the profile's photos get a blank picture
+            # (nothing is downloaded) and keep their addresses. A photo opened as a page of its own,
+            # to be saved, goes out as usual.
+            try:
+                if route.request.resource_type == "image":
+                    route.fulfill(status=200, content_type="image/png", body=BLANK_PNG)
+                else:
+                    route.continue_()
+            except Exception:
+                pass
+
         def work(page):
+            page.context.route("https://pbs.twimg.com/media/**", photo)
             tools.goto_x(page, f"https://x.com/{username}")
             seen: dict[str, dict] = {}
+
+            def merge(rows: list[dict]) -> int:
+                """Add the posts read from the page; returns how many were new."""
+                added = 0
+                for row in rows:
+                    known = seen.get(row["status_id"])
+                    if known is None:
+                        seen[row["status_id"]] = row
+                        added += 1
+                        continue
+                    # Seen again: a photo shows only once it starts loading, so it may be there now.
+                    known["photos"] += [src for src in row["photos"] if src not in known["photos"]]
+                    known["has_photos"] = known["has_photos"] or row["has_photos"]
+                    known["likes"], known["views"] = max(known["likes"], row["likes"]), max(known["views"], row["views"])
+                return added
+
             quiet = 0
             first_by = time.monotonic() + 20
             end = time.monotonic() + EXTRACT_SECONDS
@@ -277,11 +315,7 @@ def attach(app, access_path: str, tools) -> None:
                         raise LookupError("لم تظهر أي منشورات في الملف الشخصي.")
                     page.wait_for_timeout(1000)
                     continue
-                added = 0
-                for row in found.get("posts") or []:
-                    if row["status_id"] not in seen:
-                        seen[row["status_id"]] = row
-                        added += 1
+                added = merge(found.get("posts") or [])
                 # The account's own posts come newest first; the pinned one and reposts can be older.
                 own = [when(row["date"]) for row in seen.values() if not row["repost"] and not row["pinned"]]
                 progress(f"جارٍ الاستخراج… وُجد {sum(1 for at in own if at >= since)} منشورًا ضمن المدة.")
@@ -292,16 +326,22 @@ def attach(app, access_path: str, tools) -> None:
                     break
                 page.evaluate("() => window.scrollBy(0, Math.round(window.innerHeight * 0.9))")
                 page.wait_for_timeout(1500)
+            # Once more after a moment, for the photos of the posts that showed last.
+            page.wait_for_timeout(1000)
+            try:
+                merge((page.evaluate(POSTS_JS, username) or {}).get("posts") or [])
+            except Exception:
+                pass
             posts = sorted(
                 (row for row in seen.values() if not row["repost"] and when(row["date"]) >= since),
                 key=lambda row: when(row["date"]), reverse=True,
             )
+            if photos_only:
+                posts = [row for row in posts if row["has_photos"]]
             if mode == "likes":
                 posts = sorted(posts, key=lambda row: row["likes"], reverse=True)[:TOP_POSTS]
             elif mode == "views":
                 posts = sorted(posts, key=lambda row: row["views"], reverse=True)[:TOP_POSTS]
-            elif mode == "images":
-                posts = [row for row in posts if row["photos"]]
             total = sum(len(row["photos"]) for row in posts)
             if not total:
                 return posts
@@ -336,7 +376,7 @@ def attach(app, access_path: str, tools) -> None:
 
         return tools.run_browser(token, work)
 
-    def save_posts(username: str, days: int, mode: str, posts: list[dict]) -> int:
+    def save_posts(username: str, days: int, mode: str, photos_only: bool, posts: list[dict]) -> int:
         """Put the new posts in place of the account's kept ones. Returns how many photos were saved."""
         fresh = media_root / f".{username.lower()}.new"
         shutil.rmtree(fresh, ignore_errors=True)
@@ -349,27 +389,28 @@ def attach(app, access_path: str, tools) -> None:
                 images.append(name)
             pictures += len(images)
             rows.append({**{key: row[key] for key in ("url", "status_id", "date", "likes", "views", "text")}, "images": images})
-        kept = {"username": username, "days": days, "mode": mode, "extracted_at": time.time(), "posts": rows}
+        kept = {"username": username, "days": days, "mode": mode, "photos_only": photos_only, "extracted_at": time.time(), "posts": rows}
         (fresh / "posts.json").write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
         shutil.rmtree(folder(username), ignore_errors=True)
         fresh.rename(folder(username))
         return pictures
 
-    def run_extraction(token: str, username: str, days: int, mode: str) -> None:
+    def run_extraction(token: str, username: str, days: int, mode: str, photos_only: bool) -> None:
         key = username.lower()
 
         def progress(message: str) -> None:
             extractions[key] = {"status": "running", "message": message}
 
         try:
-            posts = extract_posts(token, username, days, mode, progress)
+            posts = extract_posts(token, username, days, mode, photos_only, progress)
             with store_lock:
                 # Deleted from the list while it ran: nothing is kept for it.
                 if not any(str(row["username"]).lower() == key for row in read_saved()):
                     extractions.pop(key, None)
                     return
-                pictures = save_posts(username, days, mode, posts)
-            message = f"اكتمل: حُفظ {len(posts)} منشورًا و{pictures} صورة." if posts else f"اكتمل: لا توجد منشورات مطابقة في آخر {days} أيام."
+                pictures = save_posts(username, days, mode, photos_only, posts)
+            nothing = "اكتمل: لا توجد منشورات" + (" فيها صور" if photos_only else "") + f" في آخر {days} أيام."
+            message = f"اكتمل: حُفظ {len(posts)} منشورًا و{pictures} صورة." if posts else nothing
             extractions[key] = {"status": "done", "message": message}
         except LookupError as exc:
             extractions[key] = {"status": "failed", "message": f"{exc} بقيت المحفوظات السابقة كما هي."}
@@ -396,6 +437,9 @@ def attach(app, access_path: str, tools) -> None:
         if not 1 <= days <= 90:
             return jsonify(success=False, message="اكتب عدد الأيام من 1 إلى 90."), 400
         mode = str(data.get("mode") or "")
+        photos_only = bool(data.get("photos_only"))
+        if mode == "images":  # a page opened before this choice was split in two
+            mode, photos_only = "all", True
         if mode not in MODES:
             return jsonify(success=False, message="اختر أي المنشورات تُستخرج."), 400
         account = next((row for row in tools.accounts() if row["id"] == str(data.get("account") or "")), None)
@@ -404,7 +448,7 @@ def attach(app, access_path: str, tools) -> None:
         if not checking.acquire(blocking=False):
             return jsonify(success=False, message="يعمل الآن تحقق أو استخراج. انتظر حتى ينتهي."), 409
         extractions[kept.lower()] = {"status": "running", "message": "جارٍ فتح الملف الشخصي…"}
-        threading.Thread(target=run_extraction, args=(account["token"], kept, days, mode), name="content-extract", daemon=True).start()
+        threading.Thread(target=run_extraction, args=(account["token"], kept, days, mode, photos_only), name="content-extract", daemon=True).start()
         return jsonify(success=True, message="بدأ الاستخراج.", job=extractions[kept.lower()])
 
     def content_posts(access: str, username: str):
@@ -478,11 +522,17 @@ PAGE = r'''<!doctype html>
     .box h2 { font-size: 15px; margin-bottom: 10px; }
     .days { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
     .days input { width: 72px; text-align: center; }
-    .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 10px 0; }
-    .modes label { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 10px; background: var(--paper);
+    .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; margin: 10px 0 6px; padding: 3px; border-radius: 12px;
+      background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); }
+    .modes label { position: relative; display: flex; align-items: center; justify-content: center; min-height: 36px; padding: 4px;
+      border-radius: 9px; color: var(--muted); font-size: 13px; font-weight: 600; text-align: center; cursor: pointer; }
+    .modes label:has(input:checked) { background: var(--sheet); color: var(--pine-deep); box-shadow: inset 0 0 0 1.5px var(--pine); }
+    .modes label:has(input:focus-visible) { outline: 2px solid var(--pine); outline-offset: 1px; }
+    .modes input { position: absolute; inset: 0; width: 100%; height: 100%; min-height: 0; margin: 0; padding: 0; opacity: 0; cursor: pointer; }
+    .photos-only { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; padding: 8px 10px; border-radius: 10px; background: var(--paper);
       box-shadow: inset 0 0 0 1px var(--line); font-size: 13px; font-weight: 600; cursor: pointer; }
-    .modes label:has(input:checked) { background: var(--ok-bg); box-shadow: inset 0 0 0 1.5px var(--pine); }
-    .modes input { flex: none; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; accent-color: var(--pine); }
+    .photos-only:has(input:checked) { background: var(--ok-bg); box-shadow: inset 0 0 0 1.5px var(--pine); }
+    .photos-only input { flex: none; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; accent-color: var(--pine); }
     .wide { width: 100%; }
     .posts { margin-top: 8px; }
     .posts li { display: block; padding: 8px 10px; border-radius: 10px; background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); }
@@ -523,11 +573,11 @@ PAGE = r'''<!doctype html>
           <span>أيام</span>
         </div>
         <div class="modes" role="radiogroup" aria-label="أي المنشورات">
-          <label><input type="radio" name="mode" value="all" checked> الجميع</label>
-          <label><input type="radio" name="mode" value="likes"> الأكثر إعجابًا</label>
-          <label><input type="radio" name="mode" value="views"> الأكثر مشاهدة</label>
-          <label><input type="radio" name="mode" value="images"> التي فيها صور</label>
+          <label><input type="radio" name="mode" value="all" checked>الجميع</label>
+          <label><input type="radio" name="mode" value="likes">الأكثر إعجابًا</label>
+          <label><input type="radio" name="mode" value="views">الأكثر مشاهدة</label>
         </div>
+        <label class="photos-only"><input id="photos-only" type="checkbox"> التي فيها صور فقط</label>
         <button id="extract-go" class="go wide" type="button">استخراج</button>
         <div id="extract-notice" class="notice" role="status" hidden></div>
         <p id="kept-title" class="hint"></p>
@@ -651,7 +701,7 @@ PAGE = r'''<!doctype html>
     function showKept(kept) {
       const posts = kept.posts || [];
       document.getElementById("kept-title").textContent = kept.extracted_at
-        ? "المحفوظ: " + posts.length + " منشورًا · " + (MODES[kept.mode] || "") + " · آخر " + kept.days + " أيام · استُخرج "
+        ? "المحفوظ: " + posts.length + " منشورًا · " + (MODES[kept.mode] || "") + (kept.photos_only ? " · فيها صور فقط" : "") + " · آخر " + kept.days + " أيام · استُخرج "
           + new Date(kept.extracted_at * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"})
         : "لا توجد منشورات محفوظة لهذا الحساب.";
       postsList.replaceChildren();
@@ -726,7 +776,8 @@ PAGE = r'''<!doctype html>
           method: "POST",
           headers: {"Content-Type": "application/json"},
           cache: "no-store",
-          body: JSON.stringify({csrf_token: csrf, account: picked, username: current, days: Number(daysField.value), mode})
+          body: JSON.stringify({csrf_token: csrf, account: picked, username: current, days: Number(daysField.value), mode,
+            photos_only: document.getElementById("photos-only").checked})
         });
         data = await response.json();
       } catch (_) {
