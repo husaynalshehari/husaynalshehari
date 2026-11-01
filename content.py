@@ -51,10 +51,13 @@ GENERATE_SECONDS = 240
 GENERATE_PROMPT = (
     "You write viral posts for X (Twitter). Below are posts from one account, each with its text and photos.\n"
     "Take the idea behind them and create ONE new post:\n"
+    "- Its subject: something many people suffer from or care about (a real, common problem, worry or need), "
+    "close to the idea of the posts. Not a random mystery, and not about a trivial thing.\n"
     "- The text: short (one or two short sentences, at most 120 characters), mysterious and thrilling. "
-    "It raises a question and does not answer it. Write it in the same language as the posts.\n"
-    "- The secret of the mystery is in the image: its answer is a detail in the image that the reader only "
-    "catches when they open the image and look closely. The text must not reveal or describe that detail.\n"
+    "It raises a question about that subject and does not answer it. Write it in the same language as the posts.\n"
+    "- The secret of the mystery is in the image: its answer is a meaningful detail in the image, about that "
+    "subject, that the reader only catches when they open the image and look closely. "
+    "The text must not reveal or describe that detail.\n"
     "- The text asks nothing of the reader: no 'open the image', 'look', 'zoom in' or 'focus', and no asking "
     "to like, comment, share, repost or follow. No arrows or pointing emojis (such as 👇 ⬇️ 👀), "
     "no hashtags, no links.\n"
@@ -62,6 +65,13 @@ GENERATE_PROMPT = (
     "Do not return a photo unchanged.\n"
     "Answer with the post text only (no title, no introduction, no explanation), and the image(s)."
 )
+# Sent after the posts for the second and third post of one «توليد», with the texts made before it.
+GENERATE_DIFFERENT = (
+    "Posts already made from these. Yours must be clearly different from them: another angle of the subject "
+    "or another subject many people care about, and another image:\n"
+)
+# How many posts one «توليد» makes (offered on the page; the first is the default).
+GENERATE_COUNTS = (3, 2)
 IMAGE_TYPES = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif"}
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 # A 1×1 picture the profile gets in place of each post photo (see extract_posts).
@@ -160,7 +170,12 @@ def username_from(value: str) -> str:
 
 
 class GenerateError(Exception):
-    """A generation that cannot go on; the message is shown on the page."""
+    """A generation that cannot go on; the message is shown on the page. fatal=False: only this post
+    failed (no picture, or refused), so the next one of the same «توليد» is still tried."""
+
+    def __init__(self, message: str, fatal: bool = True):
+        super().__init__(message)
+        self.fatal = fatal
 
 
 def gemini_problem(status: int, detail: str, busy: bool) -> str:
@@ -395,7 +410,7 @@ def attach(app, access_path: str, tools) -> None:
         csrf_token = session.get("csrf_token")
         if not csrf_token:
             csrf_token = session["csrf_token"] = secrets.token_urlsafe(32)
-        return render_template_string(PAGE, csrf_token=csrf_token, api_root="/" + access_path, panel="/" + access_path, models=GENERATE_MODELS)
+        return render_template_string(PAGE, csrf_token=csrf_token, api_root="/" + access_path, panel="/" + access_path, models=GENERATE_MODELS, counts=GENERATE_COUNTS)
 
     def content_state(access: str):
         allowed(access)
@@ -641,8 +656,8 @@ def attach(app, access_path: str, tools) -> None:
         threading.Thread(target=run_extraction, args=(account["token"], kept, days, mode, photos_only), name="content-extract", daemon=True).start()
         return jsonify(success=True, message="بدأ الاستخراج.", job=extractions[kept.lower()])
 
-    def generate(api_key: str, username: str, model: str, post_ids: list[str], progress) -> dict:
-        """Send the ticked posts (text and photos) to Gemini; returns the new post."""
+    def request_parts(username: str, model: str, post_ids: list[str]) -> tuple[list[dict], dict]:
+        """The request made of the ticked posts (their texts and photos), and what went into it."""
         by_id = {str(row.get("status_id")): row for row in read_posts(username).get("posts") or []}
         chosen = [by_id[status_id] for status_id in post_ids if status_id in by_id]
         if not chosen:
@@ -676,24 +691,27 @@ def attach(app, access_path: str, tools) -> None:
                     kind = IMAGE_TYPES.get(name.rsplit(".", 1)[-1].lower(), "image/jpeg")
                     parts.append({"inlineData": {"mimeType": kind, "data": base64.b64encode(data).decode("ascii")}})
         total = sum(len(row.get("images") or []) for row in chosen)
-        sent = f"أُرسل {len(chosen)} منشورًا و{len(picked)} صورة" + (f" من {total}" if len(picked) < total else "")
-        label = GENERATE_MODELS[model]["label"].split(" · ")[0]
+        return parts, {"posts": [str(row["status_id"]) for row in chosen], "photos_sent": len(picked), "photos_total": total}
+
+    def generate_one(api_key: str, model: str, parts: list[dict], made_before: list[str], progress) -> tuple[str, list]:
+        """One post from the request: its text and pictures. The texts made before it are added, so it differs."""
+        if made_before:
+            parts = parts + [{"text": GENERATE_DIFFERENT + "\n".join(f"{n}. {text}" for n, text in enumerate(made_before, 1))}]
         text, pictures, reason = "", [], ""
         for attempt in range(2):
-            progress(f"جارٍ التوليد بـ {label}… {sent}. قد يستغرق دقيقة أو أكثر.")
             text, pictures, reason = read_answer(ask_gemini(api_key, model, parts, progress))
             # Now and then the answer comes without a picture: asked once more.
             if pictures or reason not in ("", "STOP"):
                 break
         if not pictures:
             if reason not in ("", "STOP", "MAX_TOKENS"):
-                raise GenerateError(f"رفض Gemini توليد الصور لهذه المنشورات ({reason}). جرّب منشورات أو نموذجًا آخر.")
-            raise GenerateError("لم يُرجع Gemini صورة. أعد المحاولة أو اختر نموذجًا آخر.")
-        return {"model": model, "text": text, "pictures": pictures[:2], "posts": [str(row["status_id"]) for row in chosen],
-                "photos_sent": len(picked), "photos_total": total}
+                raise GenerateError(f"رفض Gemini توليد صورته ({reason}).", fatal=False)
+            raise GenerateError("لم يُرجع Gemini صورة له.", fatal=False)
+        return text, pictures[:2]
 
     def save_generated(username: str, result: dict) -> None:
-        """Keep the new post with the account's other generated ones, in a folder of its own."""
+        """Keep the new post with the account's other generated ones, in a folder of its own. "batch",
+        "number" and "of" say which «توليد» made it, and which of its posts it is."""
         made_at = time.time()
         stamp = str(int(made_at * 1000))
         fresh = generated_folder(username) / f".{stamp}.new"
@@ -705,27 +723,54 @@ def attach(app, access_path: str, tools) -> None:
             (fresh / name).write_bytes(data)
             names.append(name)
         kept = {"username": username, "model": result["model"], "text": result["text"], "images": names, "posts": result["posts"],
-                "photos_sent": result["photos_sent"], "photos_total": result["photos_total"], "created_at": made_at}
+                "photos_sent": result["photos_sent"], "photos_total": result["photos_total"], "created_at": made_at,
+                "batch": result["batch"], "number": result["number"], "of": result["of"]}
         (fresh / "result.json").write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
         with generated_lock:
             fresh.rename(generated_folder(username) / stamp)
 
-    def run_generation(api_key: str, username: str, model: str, post_ids: list[str]) -> None:
+    def run_generation(api_key: str, username: str, model: str, post_ids: list[str], count: int) -> None:
+        """Make count posts one after the other, each kept as soon as it is made."""
         key = username.lower()
-
-        def progress(message: str) -> None:
-            generations[key] = {"status": "running", "message": message}
-
+        label = GENERATE_MODELS[model]["label"].split(" · ")[0]
+        batch = str(int(time.time() * 1000))
+        made: list[str] = []
+        problem = ""
+        last: GenerateError | None = None
         try:
-            result = generate(api_key, username, model, post_ids, progress)
-            with store_lock:
-                # Deleted from the list while it ran: nothing is kept for it.
-                if not listed(username):
-                    generations.pop(key, None)
-                    return
-                save_generated(username, result)
-            pictures = len(result["pictures"])
-            generations[key] = {"status": "done", "message": "اكتمل التوليد: نص و" + ("صورة." if pictures == 1 else "صورتان.")}
+            parts, info = request_parts(username, model, post_ids)
+            sent = f"أُرسل {len(info['posts'])} منشورًا و{info['photos_sent']} صورة" + (
+                f" من {info['photos_total']}" if info["photos_sent"] < info["photos_total"] else "")
+            for number in range(1, count + 1):
+                step = f"المنشور {number} من {count}"
+
+                def progress(message: str, step=step) -> None:
+                    generations[key] = {"status": "running", "message": f"{step}: {message}"}
+
+                generations[key] = {"status": "running", "message": f"جارٍ توليد {step} بـ {label}… {sent}. قد يستغرق دقيقة أو أكثر."}
+                try:
+                    text, pictures = generate_one(api_key, model, parts, made, progress)
+                except GenerateError as exc:
+                    problem, last = f"{step}: {exc}", exc
+                    if exc.fatal:
+                        break
+                    continue
+                with store_lock:
+                    # Deleted from the list while it ran: nothing more is kept for it.
+                    if not listed(username):
+                        generations.pop(key, None)
+                        return
+                    save_generated(username, {**info, "model": model, "text": text, "pictures": pictures,
+                                              "batch": batch, "number": len(made) + 1, "of": count})
+                made.append(text)
+            if len(made) == count:
+                generations[key] = {"status": "done", "message": "اكتمل التوليد: " + ("منشوران." if count == 2 else f"{count} منشورات.")}
+            elif made:
+                generations[key] = {"status": "done", "message": f"اكتمل {len(made)} من {count}. لم يكتمل الباقي: {problem}"}
+            elif last is not None and last.fatal:
+                generations[key] = {"status": "failed", "message": str(last)}
+            else:
+                generations[key] = {"status": "failed", "message": f"لم يكتمل أي منشور. {problem} جرّب منشورات أو نموذجًا آخر."}
         except GenerateError as exc:
             generations[key] = {"status": "failed", "message": str(exc)}
         except Exception:
@@ -753,6 +798,12 @@ def attach(app, access_path: str, tools) -> None:
         post_ids = [status_id for status_id in post_ids if status_id in known]
         if not post_ids:
             return jsonify(success=False, message="حدّد منشورًا واحدًا على الأقل."), 400
+        try:
+            count = int(data.get("count") or GENERATE_COUNTS[0])
+        except (TypeError, ValueError):
+            count = 0
+        if count not in GENERATE_COUNTS:
+            return jsonify(success=False, message="اختر عدد المنشورات."), 400
         gemini_key = getattr(tools, "gemini_key", None)
         if gemini_key is None:
             return jsonify(success=False, message="حدّث ملف السكربت لاستخدام التوليد."), 400
@@ -762,7 +813,7 @@ def attach(app, access_path: str, tools) -> None:
         if not generating.acquire(blocking=False):
             return jsonify(success=False, message="يعمل الآن توليد آخر. انتظر حتى ينتهي."), 409
         generations[kept.lower()] = {"status": "running", "message": "جارٍ إرسال المنشورات إلى Gemini…"}
-        threading.Thread(target=run_generation, args=(api_key, kept, model, post_ids), name="content-generate", daemon=True).start()
+        threading.Thread(target=run_generation, args=(api_key, kept, model, post_ids, count), name="content-generate", daemon=True).start()
         return jsonify(success=True, message="بدأ التوليد.", job=generations[kept.lower()])
 
     def content_generated_media(access: str, username: str, made: str, name: str):
@@ -874,6 +925,9 @@ PAGE = r'''<!doctype html>
       box-shadow: 0 -1px 0 var(--line), 0 -8px 16px rgba(28, 25, 21, 0.06); }
     .generate-bar .notice { margin: 0 0 8px; }
     .gen-row { display: flex; gap: 6px; }
+    .gen-row + .gen-row { margin-top: 6px; }
+    .gen-row .gen-count { flex: 0 0 auto; }
+    .gen-row button { flex: 1; }
     .gen-row select { flex: 1; min-width: 0; min-height: 36px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px;
       background: var(--sheet); color: var(--ink); font: inherit; font-size: 16px; }
     .generated { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: var(--ok-bg); box-shadow: inset 0 0 0 1px rgba(15, 107, 80, 0.25); }
@@ -940,6 +994,13 @@ PAGE = r'''<!doctype html>
             <select id="gen-model" aria-label="نموذج Gemini">
               {%- for id, model in models.items() %}
               <option value="{{ id }}">{{ model.label }}</option>
+              {%- endfor %}
+            </select>
+          </div>
+          <div class="gen-row">
+            <select id="gen-count" class="gen-count" aria-label="عدد المنشورات">
+              {%- for count in counts %}
+              <option value="{{ count }}">{{ "منشوران" if count == 2 else count ~ " منشورات" }}</option>
               {%- endfor %}
             </select>
             <button id="gen-go" class="go" type="button" disabled>توليد</button>
@@ -1039,6 +1100,7 @@ PAGE = r'''<!doctype html>
     const pickAll = document.getElementById("pick-all");
     const genGo = document.getElementById("gen-go");
     const genModel = document.getElementById("gen-model");
+    const genCount = document.getElementById("gen-count");
     const genNotice = document.getElementById("gen-notice");
     const generatedBox = document.getElementById("generated");
     const olderBox = document.getElementById("generated-older");
@@ -1049,7 +1111,6 @@ PAGE = r'''<!doctype html>
     const ticked = new Set();
     let generatingNow = false;
     let resultShows = "";
-    let newestShows = "";
 
     function openExtract(row) {
       current = row.username;
@@ -1226,21 +1287,19 @@ PAGE = r'''<!doctype html>
       return card;
     }
 
-    // The account's generated posts: the newest on top, the earlier ones folded under it.
-    // Returns true when a new one came on top.
+    // The account's generated posts: those of the last «توليد» on top, the earlier ones folded under them.
     function showGenerated(list) {
       const shows = current + "|" + list.map((row) => row.id).join(",");
-      if (shows === resultShows) return false;
+      if (shows === resultShows) return;
       resultShows = shows;
-      generatedBox.replaceChildren(...list.slice(0, 1).map((row) => generatedCard(row, "آخر منشور مولَّد")));
-      const older = list.slice(1);
+      const batchOf = (row) => row.batch || row.id;
+      const last = list.length ? batchOf(list[0]) : "";
+      const latest = list.filter((row) => batchOf(row) === last).sort((a, b) => (a.number || 0) - (b.number || 0));
+      generatedBox.replaceChildren(...latest.map((row) => generatedCard(row, row.of > 1 ? "المنشور " + row.number + " من " + row.of : "آخر منشور مولَّد")));
+      const older = list.filter((row) => batchOf(row) !== last);
       olderBox.hidden = !older.length;
       olderBox.querySelector("summary").textContent = "المنشورات المولَّدة السابقة (" + older.length + ")";
       document.getElementById("generated-older-list").replaceChildren(...older.map((row) => generatedCard(row, "")));
-      const newest = current + "|" + ((list[0] || {}).id || "");
-      const fresh = list.length > 0 && newest !== newestShows;
-      newestShows = newest;
-      return fresh;
     }
 
     async function loadPosts() {
@@ -1256,7 +1315,8 @@ PAGE = r'''<!doctype html>
       showKept(data.kept || {});
       const wasGenerating = generatingNow;
       showGenJob(data.gen_job || {});
-      if (showGenerated(Array.isArray(data.generated) ? data.generated : []) && wasGenerating && !generatingNow) {
+      showGenerated(Array.isArray(data.generated) ? data.generated : []);
+      if (wasGenerating && !generatingNow && (data.gen_job || {}).status === "done") {
         generatedBox.scrollIntoView({block: "start", behavior: "smooth"});
       }
       clearTimeout(polling);
@@ -1304,7 +1364,7 @@ PAGE = r'''<!doctype html>
           method: "POST",
           headers: {"Content-Type": "application/json"},
           cache: "no-store",
-          body: JSON.stringify({csrf_token: csrf, username: current, model: genModel.value, posts})
+          body: JSON.stringify({csrf_token: csrf, username: current, model: genModel.value, count: Number(genCount.value), posts})
         });
         data = await response.json();
       } catch (_) {
@@ -1326,6 +1386,15 @@ PAGE = r'''<!doctype html>
     genModel.addEventListener("change", () => {
       try {
         localStorage.setItem("content-generate-model", genModel.value);
+      } catch (_) {}
+    });
+    try {
+      const saved = localStorage.getItem("content-generate-count");
+      if (saved && [...genCount.options].some((option) => option.value === saved)) genCount.value = saved;
+    } catch (_) {}
+    genCount.addEventListener("change", () => {
+      try {
+        localStorage.setItem("content-generate-count", genCount.value);
       } catch (_) {}
     });
 
