@@ -7,7 +7,8 @@ script itself (same address and port), which then shows «إنشاء محتوى�
    most viewed; with or without "only those with photos"). Each post's link and photos are kept in
    data/content/<user>/ until that account is extracted again.
 3. Ticked kept posts are sent to a Gemini picture model («توليد»), which makes one new post from their
-   idea: a short text and one or two pictures, kept in data/content_generated/<user>/ until the next one.
+   idea: a short text and one or two pictures. Every generated post is kept, each in its own folder
+   data/content_generated/<user>/<time>/.
 """
 from __future__ import annotations
 
@@ -277,6 +278,7 @@ def attach(app, access_path: str, tools) -> None:
     generated_root = Path(tools.data_dir) / "content_generated"
     generating = threading.Lock()
     generations: dict[str, dict] = {}
+    generated_lock = threading.Lock()
 
     def read_saved() -> list[dict]:
         try:
@@ -317,12 +319,44 @@ def attach(app, access_path: str, tools) -> None:
     def generated_folder(username: str) -> Path:
         return generated_root / username.lower()
 
-    def read_generated(username: str) -> dict:
+    def move_old_generated(username: str) -> None:
+        """The one post kept before (straight in the account's folder) gets a folder of its own, as the others."""
+        base = generated_folder(username)
+        if not (base / "result.json").is_file():
+            return
         try:
-            loaded = json.loads((generated_folder(username) / "result.json").read_text(encoding="utf-8"))
+            loaded = json.loads((base / "result.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {}
-        return loaded if isinstance(loaded, dict) else {}
+            loaded = {}
+        if not isinstance(loaded, dict):
+            loaded = {}
+        try:
+            made_at = float(loaded.get("created_at") or 0) or time.time()
+        except (TypeError, ValueError):
+            made_at = time.time()
+        target = base / str(int(made_at * 1000))
+        target.mkdir(parents=True, exist_ok=True)
+        for name in [*(loaded.get("images") or []), "result.json"]:
+            if re.fullmatch(r"[12]\.(png|jpg|webp)|result\.json", str(name)) and (base / str(name)).is_file():
+                (base / str(name)).replace(target / str(name))
+
+    def read_generated(username: str) -> list[dict]:
+        """The account's generated posts, newest first. Each has its folder's name as "id"."""
+        with generated_lock:
+            move_old_generated(username)
+            try:
+                folders = [entry for entry in generated_folder(username).iterdir() if entry.is_dir() and re.fullmatch(r"\d{10,16}", entry.name)]
+            except OSError:
+                return []
+            found = []
+            for entry in folders:
+                try:
+                    loaded = json.loads((entry / "result.json").read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(loaded, dict):
+                    found.append({**loaded, "id": entry.name})
+        return sorted(found, key=lambda row: str(row["id"]).zfill(16), reverse=True)
 
     def listed(username: str) -> bool:
         return any(str(row["username"]).lower() == username.lower() for row in read_saved())
@@ -659,8 +693,10 @@ def attach(app, access_path: str, tools) -> None:
                 "photos_sent": len(picked), "photos_total": total}
 
     def save_generated(username: str, result: dict) -> None:
-        """Put the new post in place of the account's last one."""
-        fresh = generated_root / f".{username.lower()}.new"
+        """Keep the new post with the account's other generated ones, in a folder of its own."""
+        made_at = time.time()
+        stamp = str(int(made_at * 1000))
+        fresh = generated_folder(username) / f".{stamp}.new"
         shutil.rmtree(fresh, ignore_errors=True)
         fresh.mkdir(parents=True)
         names = []
@@ -669,10 +705,10 @@ def attach(app, access_path: str, tools) -> None:
             (fresh / name).write_bytes(data)
             names.append(name)
         kept = {"username": username, "model": result["model"], "text": result["text"], "images": names, "posts": result["posts"],
-                "photos_sent": result["photos_sent"], "photos_total": result["photos_total"], "created_at": time.time()}
+                "photos_sent": result["photos_sent"], "photos_total": result["photos_total"], "created_at": made_at}
         (fresh / "result.json").write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
-        shutil.rmtree(generated_folder(username), ignore_errors=True)
-        fresh.rename(generated_folder(username))
+        with generated_lock:
+            fresh.rename(generated_folder(username) / stamp)
 
     def run_generation(api_key: str, username: str, model: str, post_ids: list[str]) -> None:
         key = username.lower()
@@ -691,11 +727,9 @@ def attach(app, access_path: str, tools) -> None:
             pictures = len(result["pictures"])
             generations[key] = {"status": "done", "message": "اكتمل التوليد: نص و" + ("صورة." if pictures == 1 else "صورتان.")}
         except GenerateError as exc:
-            kept = " بقي آخر منشور مولَّد كما هو." if read_generated(username) else ""
-            generations[key] = {"status": "failed", "message": f"{exc}{kept}"}
+            generations[key] = {"status": "failed", "message": str(exc)}
         except Exception:
-            kept = " بقي آخر منشور مولَّد كما هو." if read_generated(username) else ""
-            generations[key] = {"status": "failed", "message": f"تعذّر التوليد.{kept}"}
+            generations[key] = {"status": "failed", "message": "تعذّر التوليد."}
         finally:
             generating.release()
 
@@ -731,11 +765,11 @@ def attach(app, access_path: str, tools) -> None:
         threading.Thread(target=run_generation, args=(api_key, kept, model, post_ids), name="content-generate", daemon=True).start()
         return jsonify(success=True, message="بدأ التوليد.", job=generations[kept.lower()])
 
-    def content_generated_media(access: str, username: str, name: str):
+    def content_generated_media(access: str, username: str, made: str, name: str):
         allowed(access)
-        if not username_from(username) or not re.fullmatch(r"[12]\.(png|jpg|webp)", name):
+        if not username_from(username) or not re.fullmatch(r"\d{10,16}", made) or not re.fullmatch(r"[12]\.(png|jpg|webp)", name):
             abort(404)
-        return send_from_directory(generated_folder(username), name)
+        return send_from_directory(generated_folder(username) / made, name)
 
     def content_posts(access: str, username: str):
         """An account's kept posts, and how its extraction is going."""
@@ -760,7 +794,7 @@ def attach(app, access_path: str, tools) -> None:
     app.add_url_rule("/<access>/content/posts/<username>", "content_posts", content_posts, methods=["GET"])
     app.add_url_rule("/<access>/content/media/<username>/<name>", "content_media", content_media, methods=["GET"])
     app.add_url_rule("/<access>/content/generate", "content_generate", content_generate, methods=["POST"])
-    app.add_url_rule("/<access>/content/generated/<username>/<name>", "content_generated_media", content_generated_media, methods=["GET"])
+    app.add_url_rule("/<access>/content/generated/<username>/<made>/<name>", "content_generated_media", content_generated_media, methods=["GET"])
 
 
 PAGE = r'''<!doctype html>
@@ -848,6 +882,11 @@ PAGE = r'''<!doctype html>
     .gen-text { margin: 6px 0 8px; font-size: 15px; line-height: 1.6; white-space: pre-wrap; }
     .gen-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 6px; margin-bottom: 8px; }
     .gen-images img { width: 100%; border-radius: 10px; display: block; }
+    .older { margin-top: 8px; }
+    .older summary { padding: 6px 0; color: var(--pine-deep); font-size: 13px; font-weight: 600; cursor: pointer; }
+    .older .generated { margin-top: 6px; background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); }
+    .older .gen-text { font-size: 14px; }
+    .older .gen-images { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
   </style>
 </head>
 <body>
@@ -888,12 +927,11 @@ PAGE = r'''<!doctype html>
         <button id="extract-go" class="go wide" type="button">استخراج</button>
         <div id="extract-notice" class="notice" role="status" hidden></div>
         <p id="kept-title" class="hint"></p>
-        <section id="generated" class="generated" hidden>
-          <div class="gen-head"><b>المنشور المولَّد</b><span id="generated-meta"></span></div>
-          <p id="generated-text" class="gen-text" dir="auto"></p>
-          <div id="generated-images" class="gen-images"></div>
-          <button id="generated-copy" type="button">نسخ النص</button>
-        </section>
+        <div id="generated"></div>
+        <details id="generated-older" class="older" hidden>
+          <summary></summary>
+          <div id="generated-older-list"></div>
+        </details>
         <label id="pick-all-row" class="pick-all" hidden><input id="pick-all" type="checkbox"> تحديد الكل <span id="picked-count"></span></label>
         <ul id="posts" class="posts"></ul>
         <div id="generate-bar" class="generate-bar" hidden>
@@ -1003,6 +1041,7 @@ PAGE = r'''<!doctype html>
     const genModel = document.getElementById("gen-model");
     const genNotice = document.getElementById("gen-notice");
     const generatedBox = document.getElementById("generated");
+    const olderBox = document.getElementById("generated-older");
     let current = "";
     let polling = 0;
     // The extraction the list shows, the posts ticked in it, and the generated post on show.
@@ -1010,6 +1049,7 @@ PAGE = r'''<!doctype html>
     const ticked = new Set();
     let generatingNow = false;
     let resultShows = "";
+    let newestShows = "";
 
     function openExtract(row) {
       current = row.username;
@@ -1139,29 +1179,68 @@ PAGE = r'''<!doctype html>
       showTicks();
     }
 
-    // The account's last generated post. Returns true when it is a new one.
-    function showGenerated(result) {
-      generatedBox.hidden = !result.created_at;
-      const shows = current + "|" + (result.created_at || "");
-      if (!result.created_at || shows === resultShows) return false;
-      resultShows = shows;
-      document.getElementById("generated-text").textContent = result.text || "(بلا نص)";
-      document.getElementById("generated-meta").textContent = ((MODELS[result.model] || {}).label || result.model)
+    // One generated post: its text («نسخ النص»), its pictures, and what made it.
+    function generatedCard(result, title) {
+      const card = document.createElement("section");
+      card.className = "generated";
+      const head = document.createElement("div");
+      head.className = "gen-head";
+      if (title) {
+        const name = document.createElement("b");
+        name.textContent = title;
+        head.append(name);
+      }
+      const meta = document.createElement("span");
+      meta.textContent = ((MODELS[result.model] || {}).label || result.model)
         + " · " + new Date(result.created_at * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"})
         + " · من " + (result.posts || []).length + " منشورات";
-      const images = document.getElementById("generated-images");
-      images.replaceChildren();
+      head.append(meta);
+      const text = document.createElement("p");
+      text.className = "gen-text";
+      text.dir = "auto";
+      text.textContent = result.text || "(بلا نص)";
+      const images = document.createElement("div");
+      images.className = "gen-images";
       (result.images || []).forEach((name) => {
         const link = document.createElement("a");
-        link.href = apiRoot + "/content/generated/" + encodeURIComponent(result.username) + "/" + encodeURIComponent(name) + "?v=" + result.created_at;
+        link.href = apiRoot + "/content/generated/" + encodeURIComponent(current) + "/" + encodeURIComponent(result.id) + "/" + encodeURIComponent(name);
         link.target = "_blank";
         const image = document.createElement("img");
         image.src = link.href;
         image.alt = "صورة مولَّدة";
+        image.loading = "lazy";
         link.append(image);
         images.append(link);
       });
-      return true;
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.textContent = "نسخ النص";
+      copy.addEventListener("click", async () => {
+        const copied = await copyText(result.text || "");
+        copy.textContent = copied ? "نُسخ النص" : "تعذّر النسخ";
+        setTimeout(() => {
+          copy.textContent = "نسخ النص";
+        }, 1500);
+      });
+      card.append(head, text, images, copy);
+      return card;
+    }
+
+    // The account's generated posts: the newest on top, the earlier ones folded under it.
+    // Returns true when a new one came on top.
+    function showGenerated(list) {
+      const shows = current + "|" + list.map((row) => row.id).join(",");
+      if (shows === resultShows) return false;
+      resultShows = shows;
+      generatedBox.replaceChildren(...list.slice(0, 1).map((row) => generatedCard(row, "آخر منشور مولَّد")));
+      const older = list.slice(1);
+      olderBox.hidden = !older.length;
+      olderBox.querySelector("summary").textContent = "المنشورات المولَّدة السابقة (" + older.length + ")";
+      document.getElementById("generated-older-list").replaceChildren(...older.map((row) => generatedCard(row, "")));
+      const newest = current + "|" + ((list[0] || {}).id || "");
+      const fresh = list.length > 0 && newest !== newestShows;
+      newestShows = newest;
+      return fresh;
     }
 
     async function loadPosts() {
@@ -1177,7 +1256,7 @@ PAGE = r'''<!doctype html>
       showKept(data.kept || {});
       const wasGenerating = generatingNow;
       showGenJob(data.gen_job || {});
-      if (showGenerated(data.generated || {}) && wasGenerating && !generatingNow) {
+      if (showGenerated(Array.isArray(data.generated) ? data.generated : []) && wasGenerating && !generatingNow) {
         generatedBox.scrollIntoView({block: "start", behavior: "smooth"});
       }
       clearTimeout(polling);
@@ -1272,14 +1351,6 @@ PAGE = r'''<!doctype html>
       area.remove();
       return copied;
     }
-    document.getElementById("generated-copy").addEventListener("click", async (event) => {
-      const button = event.currentTarget;
-      const copied = await copyText(document.getElementById("generated-text").textContent);
-      button.textContent = copied ? "نُسخ النص" : "تعذّر النسخ";
-      setTimeout(() => {
-        button.textContent = "نسخ النص";
-      }, 1500);
-    });
     document.getElementById("extract-close").addEventListener("click", () => dialog.close());
 
     function refresh() {
