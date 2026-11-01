@@ -25,6 +25,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import traceback
 import threading
 import time
 import urllib.error
@@ -5134,7 +5135,7 @@ def login_page(access_path: str):
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
         PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(),
-        content_ready=content_ready.is_set(),
+        content_ready=content_ready.is_set() or CONTENT_FILE.is_file(),
     ))
     return response
 
@@ -6269,7 +6270,10 @@ atexit.register(shutdown_jobs)
 
 
 # «إنشاء محتوى»: content.py beside the script adds its page to this panel.
+CONTENT_FILE = Path(__file__).resolve().with_name("content.py")
 content_ready = threading.Event()
+# Why content.py could not be added when the script started ("" if it was, or was not there).
+content_problem = ""
 
 
 def content_accounts() -> list[dict]:
@@ -6283,12 +6287,24 @@ def content_gemini_key() -> str:
         return str(saved_gemini.get("api_key") or "")
 
 
+def content_error(exc: BaseException) -> str:
+    """The error, with the line of content.py it came from."""
+    if isinstance(exc, SyntaxError):
+        message, line = exc.msg, exc.lineno
+    else:
+        message, line = str(exc), None
+        for frame in traceback.extract_tb(exc.__traceback__):
+            if Path(frame.filename).name == CONTENT_FILE.name:
+                line = frame.lineno
+    return f"{type(exc).__name__}: {message}" + (f" (line {line})" if line else "")
+
+
 def attach_content() -> None:
-    content_file = Path(__file__).resolve().with_name("content.py")
-    if not content_file.is_file():
+    global content_problem
+    if not CONTENT_FILE.is_file():
         return
     try:
-        spec = importlib.util.spec_from_file_location("content_page", content_file)
+        spec = importlib.util.spec_from_file_location("content_page", CONTENT_FILE)
         content = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(content)
         content.attach(app, ACCESS_PATH, SimpleNamespace(
@@ -6301,12 +6317,65 @@ def attach_content() -> None:
             gemini_key=content_gemini_key,
         ))
     except Exception as exc:
-        print(f"لم تُضف صفحة إنشاء المحتوى ({content_file.name}): {exc}", flush=True)
+        content_problem = content_error(exc)
+        print(f"لم تُضف صفحة إنشاء المحتوى ({CONTENT_FILE.name}): {content_problem}", flush=True)
         return
     content_ready.set()
 
 
+CONTENT_UNAVAILABLE_PAGE = """<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>إنشاء محتوى</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f3efe6; color: #1c1915; font-family: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif; }
+    main { width: min(560px, 100%); margin: 0 auto; padding: 16px; }
+    h1 { margin: 0; font-size: 18px; }
+    .why { margin-top: 12px; padding: 12px 14px; border-radius: 14px; background: #fbf1ee; color: #8d3a32; line-height: 1.7; }
+    .why p { margin: 0; }
+    .why pre { margin: 8px 0; padding: 8px 10px; border-radius: 8px; background: #fff; direction: ltr; text-align: left;
+      white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+    .hint { color: #6e675e; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+    a { color: #0f6b50; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>إنشاء محتوى</h1>
+    <div class="why">
+      <p>{{ reason }}</p>
+      {% if problem %}<pre>{{ problem }}</pre>{% endif %}
+      {% if fix %}<p>{{ fix }}</p>{% endif %}
+    </div>
+    <p class="hint">مجلد gg.py الذي يعمل الآن: <bdi dir="ltr">{{ here }}</bdi><br>Python <bdi dir="ltr">{{ python }}</bdi></p>
+    <a href="{{ panel }}">العودة للوحة</a>
+  </main>
+</body>
+</html>"""
+
+
+def content_unavailable(access: str):
+    """«إنشاء محتوى» when its page could not be added: why, and what to do."""
+    if not hmac.compare_digest(access, ACCESS_PATH):
+        abort(404)
+    problem = fix = ""
+    if not CONTENT_FILE.is_file():
+        reason = "لا يوجد ملف content.py بجانب gg.py في هذا المجلد."
+    elif content_problem:
+        reason, problem, fix = "تعذّر تحميل content.py عند تشغيل gg.py:", content_problem, "أعد تنزيل content.py ثم أعد تشغيل gg.py."
+    else:
+        reason = "وُضع content.py بعد تشغيل gg.py. أعد تشغيل gg.py لتظهر صفحة إنشاء المحتوى."
+    return render_template_string(CONTENT_UNAVAILABLE_PAGE, reason=reason, problem=problem, fix=fix, here=str(CONTENT_FILE.parent),
+                                  python=sys.version.split()[0], panel="/" + ACCESS_PATH), 503
+
+
 attach_content()
+if not content_ready.is_set():
+    # The button shows whenever content.py is beside the script; without its page it says why.
+    app.add_url_rule("/<access>/content", "content_unavailable", content_unavailable, methods=["GET"])
 
 
 if __name__ == "__main__":
