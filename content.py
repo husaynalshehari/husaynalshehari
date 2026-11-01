@@ -60,6 +60,10 @@ GENERATE_PROMPT = (
     "No hashtags, no links.\n"
     "- One or two images for it: edit the photos or create new ones from their idea. Do not return a photo unchanged. "
     "They look like real casual phone photos, like the posts' photos: not staged and not like an ad.\n"
+    "- Each image has one detail, tied to the post's idea, that makes people react and comment, the way the posts' "
+    "photos do: a spontaneous 'dumb' slip people will rush to correct (wrong numbers, a wrong label, a misspelled word), "
+    "something odd or funny that does not belong, or a short provocative label or number added on the photo. "
+    "It feels natural, not like a planned joke.\n"
     "- No person in the images: no people, faces or bodies, even when the photos have them.\n"
     "Answer with the post text only (no title, no introduction, no explanation), and the image(s)."
 )
