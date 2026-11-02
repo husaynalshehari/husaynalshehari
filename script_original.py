@@ -386,15 +386,19 @@ EMBEDDED_PAGE = r'''<!doctype html>
       background: var(--paper);
       box-shadow: inset 0 0 0 1px var(--line);
     }
+    /* Three names on top of each other, filling column after column, scrolled sideways. */
     #group-list {
-      flex-direction: row;
-      flex-wrap: nowrap;
+      display: grid;
+      grid-auto-flow: column;
+      grid-template-rows: repeat(3, auto);
+      grid-auto-columns: max-content;
+      justify-content: start;
       overflow-x: auto;
+      overflow-y: hidden;
       gap: 6px;
       margin-top: 6px;
       padding-bottom: 2px;
     }
-    #group-list li { flex: 0 0 auto; }
     #group-list .pick {
       flex: none;
       min-height: 30px;
@@ -406,6 +410,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
       background: var(--sheet);
     }
     #group-list .pick .who { max-width: none; overflow: visible; }
+    /* Each name as wide as its column, so the columns line up. */
+    #group-list li { display: flex; }
+    #group-list .pick { width: 100%; align-items: center; }
     .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 6px; }
     .gemini-fields {
       display: grid;
@@ -1567,6 +1574,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
 
   function renderGroups() {
     groupBox.hidden = groupNames.length === 0;
+    // Three rows, or fewer when there are fewer groups (no empty rows under them).
+    groupList.style.gridTemplateRows = "repeat(" + Math.max(1, Math.min(3, groupNames.length)) + ", auto)";
     groupList.replaceChildren();
     groupNames.forEach((name) => {
       const item = document.createElement("li");
