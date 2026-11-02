@@ -430,6 +430,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
       background: transparent;
     }
     .gemini-fields[hidden] { display: none !important; }
+    .reply-voice { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; }
+    .reply-voice[hidden] { display: none !important; }
+    .voice-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+    .voices { display: flex; gap: 4px; }
     .gemini-fields .field-label { margin-top: 0; }
     .gemini-edit { height: 32px; min-height: 32px; padding: 0 8px; font-size: 12px; }
     .gemini-owner { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; }
@@ -775,6 +779,15 @@ EMBEDDED_PAGE = r'''<!doctype html>
               </span>
             </label>
           </div>
+          <div id="reply-voice" class="reply-voice" hidden>
+            <span class="voice-label">صيغة الرد</span>
+            <div class="voices" role="radiogroup" aria-label="صيغة الرد">
+              <label class="choice"><input type="radio" name="reply-voice" value="male"><span class="choice-title">مذكر</span></label>
+              <label class="choice"><input type="radio" name="reply-voice" value="female"><span class="choice-title">مؤنث</span></label>
+              <label class="choice"><input type="radio" name="reply-voice" value="neutral" checked><span class="choice-title">عام</span></label>
+            </div>
+            {% if owner_copy %}<button id="show-gemini" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Gemini</button>{% endif %}
+          </div>
           <div id="gemini-fields" class="gemini-fields" hidden>
             {% if not owner_copy %}<p class="gemini-owner">يضبط مفتاح Gemini والنموذج صاحب البرنامج.</p>{% endif %}
             <div>
@@ -911,6 +924,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const geminiCost = document.getElementById("gemini-cost");
   const geminiCostValue = document.getElementById("gemini-cost-value");
   const editGemini = document.getElementById("edit-gemini");
+  const replyVoice = document.getElementById("reply-voice");
+  // The owner's copy only: opens the Gemini key and model fields.
+  const showGemini = document.getElementById("show-gemini");
   // A user's copy: the owner sets the Gemini key and model; here they are only shown.
   const geminiByOwner = {{ (not owner_copy)|tojson }};
   editGemini.hidden = geminiByOwner;
@@ -1344,7 +1360,17 @@ EMBEDDED_PAGE = r'''<!doctype html>
   }
 
   function syncGemini() {
-    geminiFields.hidden = !commentToggle.checked;
+    replyVoice.hidden = !commentToggle.checked;
+    if (!commentToggle.checked) openGemini(false);
+  }
+
+  function openGemini(open) {
+    geminiFields.hidden = !open;
+    if (showGemini) showGemini.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function selectedVoice() {
+    return (document.querySelector('input[name="reply-voice"]:checked') || {}).value || "neutral";
   }
 
   // Total comments written by the model, and their price, read from the server.
@@ -1501,6 +1527,18 @@ EMBEDDED_PAGE = r'''<!doctype html>
 
 
   commentToggle.addEventListener("change", syncGemini);
+  if (showGemini) showGemini.addEventListener("click", () => openGemini(geminiFields.hidden));
+  // The reply's voice chosen last time, on this browser.
+  try {
+    const voice = localStorage.getItem("x_reply_voice");
+    const box = document.querySelector('input[name="reply-voice"][value="' + voice + '"]');
+    if (box) box.checked = true;
+  } catch (_) {}
+  document.querySelectorAll('input[name="reply-voice"]').forEach((box) => box.addEventListener("change", () => {
+    try {
+      localStorage.setItem("x_reply_voice", selectedVoice());
+    } catch (_) {}
+  }));
   const savedModel = geminiByOwner ? "" : localStorage.getItem("x_gemini_model");
   const savedKey = geminiByOwner ? "" : localStorage.getItem("x_gemini_key");
   if (savedModel) geminiModel.value = savedModel;
@@ -1646,8 +1684,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
     if (actions.includes("comment") && geminiByOwner) {
       if (!geminiKey.value.trim()) { showNotice("لا يوجد مفتاح Gemini لهذه النسخة. اطلبه من صاحب البرنامج.", false); return; }
     } else if (actions.includes("comment")) {
-      if (!geminiKey.value.trim()) { lockGemini(false); showNotice("أدخل مفتاح Gemini.", false); geminiKey.focus(); return; }
-      if (!geminiModel.value.trim()) { lockGemini(false); showNotice("أدخل اسم النموذج.", false); geminiModel.focus(); return; }
+      if (!geminiKey.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل مفتاح Gemini.", false); geminiKey.focus(); return; }
+      if (!geminiModel.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل اسم النموذج.", false); geminiModel.focus(); return; }
       rememberGeminiLocal();
     }
     repostButton.disabled = true;
@@ -1660,6 +1698,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
         actions,
         gemini_api_key: geminiKey.value.trim(),
         gemini_model: geminiModel.value.trim(),
+        reply_voice: selectedVoice(),
         group_wait: groupWaitOn.checked ? secondsFrom(groupWaitSec, 0, 300, 30) : null,
         account_profiles: accountProfilesOn.checked ? secondsFrom(accountProfiles, 1, 5, 1) : 1,
         phone_screen: phoneScreen.checked,
@@ -2764,11 +2803,21 @@ def reset_gemini_cost(reset_id: str = "") -> None:
         write_private_json(GEMINI_USAGE_PATH, dict(gemini_usage))
 
 
-def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: str) -> str:
+# «صيغة الرد» on the page: how the comment speaks of the one writing it (the account's owner).
+REPLY_VOICES = {
+    "male": "You write as a man: when you speak of yourself, use masculine forms (in Arabic: مبسوط، متأكد).",
+    "female": "You write as a woman: when you speak of yourself, use feminine forms (in Arabic: مبسوطة، متأكدة).",
+    "neutral": "The reply must suit a man or a woman: never use words that show the writer's gender "
+               "(in Arabic, no forms like مبسوط or مبسوطة, متأكد or متأكدة).",
+}
+
+
+def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = "neutral") -> str:
     prompt = (
         "Write one complete public reply of 10 to 20 words. "
         "Finish the sentence. Never stop mid-word or mid-phrase, and do not end with a comma. "
-        "Use the same language as the tweet. Sound like a real person: specific, casual, "
+        "Use the same language as the tweet. " + REPLY_VOICES.get(voice, REPLY_VOICES["neutral"]) + " "
+        "Sound like a real person: specific, casual, "
         "not like a brand or an assistant. No hashtags, no links, no quotes, no labels, no introduction. "
         "Return only the finished reply."
     )
@@ -3060,7 +3109,7 @@ def resolve_comment_target(page, path: str, needs_parent: bool) -> tuple[str, ob
     return path, page.locator('article[data-testid="tweet"]').first
 
 
-def execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress=None, should_stop=None, on_snapshot=None, account: str = "") -> list[dict]:
+def execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress=None, should_stop=None, on_snapshot=None, account: str = "", voice: str = "neutral") -> list[dict]:
     allow_media(page)
     results: list[dict] = []
     plain = [action for action in actions if action != "comment"]
@@ -3151,9 +3200,9 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
             if replied_before or ("comment" in actions and already_done_recently(account, tweet_status_id(target_path), ["comment"])):
                 result["actions"]["comment"] = "سبق الرد خلال ٨ ساعات — تم التخطي"
             elif "comment" in actions:
-                comment = gemini_comment(api_key, model, image, str(item.get("text") or ""))
+                comment = gemini_comment(api_key, model, image, str(item.get("text") or ""), voice)
                 if len(comment.split()) < 4:
-                    comment = gemini_comment(api_key, model, image, str(item.get("text") or ""))
+                    comment = gemini_comment(api_key, model, image, str(item.get("text") or ""), voice)
                 if len(comment.split()) < 4:
                     result["actions"]["comment"] = "لم يُرجع النموذج تعليقًا صالحًا"
                 else:
@@ -4927,7 +4976,7 @@ def job_cancelled(job_id: str) -> bool:
 DEFAULT_GROUP_WAIT_SECONDS = 8
 
 
-def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, phone_height: int = 0) -> None:
+def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, phone_height: int = 0, reply_voice: str = "neutral") -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
             raise JobStopped
@@ -4949,7 +4998,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
         else:
             publish_job(job_id, phase=phase, message="فتح الدردشة والقروب…")
 
-    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, phone_height)
+    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, phone_height, reply_voice)
 
     def work(page):
         try:
@@ -5036,7 +5085,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if "comment" in actions:
                     fresh = execute_comment_actions(
                         page, pending, actions, gemini_api_key, gemini_model, on_act,
-                        lambda: job_cancelled(job_id), snapshot, profile_key(auth_token),
+                        lambda: job_cancelled(job_id), snapshot, profile_key(auth_token), reply_voice,
                     )
                 else:
                     fresh = visit_and_apply(page, pending, actions, on_act, snapshot, lambda: job_cancelled(job_id), profile_key(auth_token))
@@ -5926,6 +5975,9 @@ def group_run_endpoint(access_path: str):
             group_wait_s = max(0, min(300, parsed_wait))
     profiles_per_account = parse_requested_count(data.get("account_profiles")) or 1
     profiles_per_account = max(1, min(MAX_PROFILES_PER_ACCOUNT, profiles_per_account))
+    reply_voice = str(data.get("reply_voice") or "neutral")
+    if reply_voice not in REPLY_VOICES:
+        reply_voice = "neutral"
     phone_height = 0
     if data.get("phone_screen"):
         phone_height = max(600, min(25000, parse_requested_count(data.get("phone_height")) or PHONE_SCREEN["height"]))
@@ -5967,7 +6019,7 @@ def group_run_endpoint(access_path: str):
     )
     threading.Thread(
         target=run_group_job,
-        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, phone_height),
+        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, phone_height, reply_voice),
         daemon=True,
     ).start()
     return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأ التنفيذ.")
