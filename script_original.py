@@ -434,6 +434,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .reply-voice[hidden] { display: none !important; }
     .voice-label { font-size: 12px; font-weight: 600; color: var(--muted); }
     .voices { display: flex; gap: 4px; }
+    /* Smaller than the actions above them. */
+    .voices .choice { min-height: 26px; padding: 0 7px; gap: 4px; border-radius: 7px; }
+    .voices .choice input { width: 13px; height: 13px; }
+    .voices .choice-title { font-size: 12px; }
+    #show-gemini { height: 26px; min-height: 26px; padding: 0 7px; }
     .gemini-fields .field-label { margin-top: 0; }
     .gemini-edit { height: 32px; min-height: 32px; padding: 0 8px; font-size: 12px; }
     .gemini-owner { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; }
@@ -1379,7 +1384,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
       const response = await fetchWithTimeout(apiRoot + "/gemini-usage", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
       const data = await response.json();
       if (!response.ok || !data.success) return;
-      const comments = Number(data.comments || 0);
+      // The comments since the cost was last reset (they start again from 0 with it); the count at
+      // the top of the page is all of them and is never reset.
+      const comments = Number(data.cost_comments ?? data.comments ?? 0);
       const total = Number(data.total || 0);
       geminiUsageText.textContent = "التعليقات (" + comments.toLocaleString("en-US") + ")";
       geminiCostValue.textContent = "$" + total.toFixed(3);
@@ -5399,7 +5406,8 @@ def sync_with_owner() -> None:
             with gemini_usage_lock:
                 done = str(gemini_usage.get("reset_id") or "")
                 report = {
-                    "comments": int(gemini_usage.get("comments") or 0),
+                    # Since the cost was last reset, like the cost beside it in «إدارة».
+                    "comments": int(gemini_usage.get("cost_comments") or 0),
                     "cost": round(int(gemini_usage.get("cost_comments") or 0) * GEMINI_PRICE_PER_COMMENT, 6),
                     "reset_id": done,
                 }
@@ -6173,6 +6181,8 @@ def gemini_usage_endpoint(access_path: str):
         success=True,
         since=since,
         comments=comments,
+        # The comments the cost counts: since it was last reset.
+        cost_comments=cost_comments,
         price_per_comment=GEMINI_PRICE_PER_COMMENT,
         total=round(cost_comments * GEMINI_PRICE_PER_COMMENT, 6),
     )
@@ -6202,7 +6212,7 @@ def gemini_usage_reset_endpoint(access_path: str):
     if not hmac.compare_digest(password.encode("utf-8"), COST_RESET_PASSWORD.encode("utf-8")):
         return jsonify(success=False, message="كلمة السر غير صحيحة."), 403
     reset_gemini_cost()
-    return jsonify(success=True, message="أُعيد تعيين التكلفة إلى 0. عدد التعليقات كما هو.")
+    return jsonify(success=True, message="أُعيد تعيين التكلفة وعدد تعليقاتها إلى 0. العدد في أعلى الصفحة كما هو.")
 
 
 @app.post("/<access_path>/gemini")
