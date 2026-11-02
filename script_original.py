@@ -57,6 +57,29 @@ APP_VERSION = "1.0"
 # The owner's copy fills both in when it hands the program out; both stay empty in the owner's copy.
 UPDATE_SOURCE = ""
 UPDATE_KEY = ""
+
+
+def _apply_external_config() -> None:
+    """A protected (compiled) copy cannot carry the per-user address and key in its code, so it reads
+    them from config.json beside the program, or from the environment. A plain text copy keeps the
+    values above (the owner's copy fills them in when it hands the program out)."""
+    global UPDATE_SOURCE, UPDATE_KEY
+    data: dict = {}
+    try:
+        loaded = json.loads((Path(__file__).resolve().with_name("config.json")).read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    except (OSError, json.JSONDecodeError, ValueError):
+        data = {}
+    source = str(os.getenv("GG_UPDATE_SOURCE") or data.get("update_source") or "").strip()
+    key = str(os.getenv("GG_UPDATE_KEY") or data.get("update_key") or "").strip()
+    if source:
+        UPDATE_SOURCE = source
+    if key:
+        UPDATE_KEY = key
+
+
+_apply_external_config()
 ATTEMPT_WINDOW_SECONDS = 300
 MAX_ATTEMPTS_PER_CLIENT = 5
 MAX_REPOSTS_REQUEST = 1000
