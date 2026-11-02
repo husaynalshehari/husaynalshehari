@@ -8,8 +8,6 @@ the first visit sets it.
 """
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import hmac
 import json
@@ -38,13 +36,8 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Strict",
     SESSION_COOKIE_SECURE=os.getenv("X_APP_SECURE_COOKIE", "0") == "1",
-    MAX_CONTENT_LENGTH=4 * 1024 * 1024,
+    MAX_CONTENT_LENGTH=8 * 1024,
 )
-# The owner's script (which starts this page) fills these so the server can write users' comments
-# with each user's own Gemini key and count them here.
-generate_comment = None
-gemini_price_per_comment = 0.007
-default_gemini_model = "gemini-3.5-flash"
 store_lock = threading.Lock()
 store: dict = {"password_hash": "", "password_salt": "", "address": "", "users": [], "published_version": ""}
 attempts: dict[str, deque[float]] = defaultdict(deque)
@@ -312,9 +305,8 @@ def control_change():
                 if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}", model):
                     return jsonify(success=False, message="اكتب اسم النموذج، مثل gemini-3.5-flash"), 400
                 user["gemini_model"] = model
-            else:  # cost_reset: start this user's cost and its comment count again from 0
-                user["usage"] = {"comments": 0, "cost": 0.0, "reset_id": "", "at": time.time()}
-                user["reset_id"] = ""
+            else:
+                user["reset_id"] = secrets.token_hex(6)
             save_store_unlocked()
         else:
             return jsonify(success=False, message="طلب غير معروف."), 400
@@ -362,18 +354,21 @@ def update_user() -> tuple[dict | None, tuple | None]:
 
 @app.post("/user/sync")
 def user_sync():
-    """A user's copy checking in: it gets back the owner's running comment tally for it (the cost the
-    owner counted). The Gemini key never leaves the owner. Stopped users still check in."""
+    """A user's copy checking in: it reports its Gemini comments and cost, and gets the Gemini key
+    the owner set for it and the last cost reset asked for. Stopped users still check in."""
     key = (request.headers.get("X-Update-Key") or "").strip()
+    data = request.get_json(silent=True) or {}
     with store_lock:
         ready = bool(store["password_hash"] and store["address"])
         user = next((row for row in store["users"] if key and hmac.compare_digest(row["key"], key)), None)
         if ready and user:
-            # The owner counts each comment as it is written here, so the copy does not report it.
-            # The copy gets back the owner's running tally to show, and nothing else (no key).
-            user["usage"]["at"] = time.time()
+            try:
+                comments, cost = max(0, int(data.get("comments") or 0)), max(0.0, float(data.get("cost") or 0))
+            except (TypeError, ValueError):
+                comments, cost = user["usage"]["comments"], user["usage"]["cost"]
+            user["usage"] = {"comments": comments, "cost": round(cost, 6), "reset_id": str(data.get("reset_id") or "")[:32], "at": time.time()}
             save_store_unlocked()
-            answer = {"success": True, "comments": user["usage"]["comments"], "cost": user["usage"]["cost"]}
+            answer = {"success": True, "gemini_key": user["gemini_key"], "gemini_model": user["gemini_model"], "reset_id": user["reset_id"]}
     if not ready:
         return jsonify(success=False, message="غير متاح الآن."), 404
     if not user:
@@ -381,59 +376,6 @@ def user_sync():
             return jsonify(success=False, message="محاولات كثيرة. انتظر بضع دقائق."), 429
         return jsonify(success=False, message="مفتاح التحديث غير صحيح."), 403
     return jsonify(answer)
-
-
-@app.post("/user/comment")
-def user_comment():
-    """A user's copy asks the owner to write one reply: it sends the tweet's text and picture, and
-    the owner writes it with that user's Gemini key, counts it against that user, and returns only
-    the reply. The key never leaves here."""
-    key = (request.headers.get("X-Update-Key") or "").strip()
-    data = request.get_json(silent=True) or {}
-    with store_lock:
-        ready = bool(store["password_hash"] and store["address"])
-        user = next((row for row in store["users"] if key and hmac.compare_digest(row["key"], key)), None)
-        gemini_key = user["gemini_key"] if user else ""
-        gemini_model = (user["gemini_model"] if user else "") or default_gemini_model
-        active = bool(user and user["active"])
-    if not ready:
-        return jsonify(success=False, message="الخدمة غير متاحة الآن."), 404
-    if not user:
-        if not allow_attempt("comment:" + (request.remote_addr or "unknown")):
-            return jsonify(success=False, message="محاولات كثيرة. انتظر بضع دقائق."), 429
-        return jsonify(success=False, message="مفتاح التحديث غير صحيح."), 403
-    if not active:
-        return jsonify(success=False, message="أوقف صاحب البرنامج هذه النسخة."), 403
-    if not gemini_key:
-        return jsonify(success=False, message="لم يضبط صاحب البرنامج مفتاح Gemini لنسختك.")
-    if generate_comment is None:
-        return jsonify(success=False, message="خدمة التعليقات غير متاحة الآن."), 503
-    text = str(data.get("text") or "")[:1000]
-    voice = str(data.get("voice") or "")
-    image = None
-    raw = data.get("image")
-    if raw:
-        try:
-            image = base64.b64decode(str(raw), validate=True)
-        except (ValueError, binascii.Error):
-            image = None
-    try:
-        comment = generate_comment(gemini_key, gemini_model, image, text, voice)
-    except RuntimeError as exc:
-        return jsonify(success=False, message=str(exc)[:200])
-    except Exception:
-        return jsonify(success=False, message="تعذّر توليد التعليق.")
-    if not comment or len(comment.split()) < 4:
-        return jsonify(success=False, message="لم يُرجع النموذج تعليقًا صالحًا.")
-    with store_lock:
-        row = next((r for r in store["users"] if r["id"] == user["id"]), None)
-        if row is None:
-            return jsonify(success=False, message="لم يعد هذا المستخدم موجودًا."), 404
-        count = int(row["usage"].get("comments") or 0) + 1
-        cost = round(count * gemini_price_per_comment, 6)
-        row["usage"] = {"comments": count, "cost": cost, "reset_id": row["usage"].get("reset_id", ""), "at": time.time()}
-        save_store_unlocked()
-    return jsonify(success=True, comment=comment, comments=count, cost=cost)
 
 
 @app.get("/update/latest")
@@ -748,7 +690,7 @@ PAGE = r'''<!doctype html>
       document.getElementById("manage-cost").textContent = row.reported_at ? "$" + row.cost.toFixed(3) : "—";
       document.getElementById("manage-cost-note").textContent = (row.reported_at
         ? "التعليقات " + row.comments + " · آخر تحديث من نسخته " + ago(row.reported_at) + "."
-        : "لم تتصل نسخته بعد.");
+        : "لم تصل بيانات من نسخته بعد.") + (row.reset_pending ? " طلب التصفير بانتظار نسخته." : "");
     }
 
     function openManage(userId) {
@@ -776,7 +718,7 @@ PAGE = r'''<!doctype html>
     });
     document.getElementById("manage-reset").addEventListener("click", async () => {
       if (!window.confirm("تصفير تكلفة هذا المستخدم؟ يبقى عدد التعليقات كما هو.")) return;
-      await change({action: "cost_reset", id: managed}, "أُعيد تصفير التكلفة وعدد التعليقات لهذا المستخدم.");
+      await change({action: "cost_reset", id: managed}, "طُلب التصفير. تصفّر نسخته التكلفة خلال دقيقتين، أو عند فتحه صفحته.");
     });
     document.getElementById("manage-close").addEventListener("click", () => dialog.close());
 

@@ -1690,7 +1690,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     if (!stopId) { showNotice("الصق رابط التغريدة المحددة أو رقمها.", false); stopField.focus(); return; }
     if (!actions.length) { showNotice("اختر إجراءً واحدًا على الأقل.", false); return; }
     if (actions.includes("comment") && geminiByOwner) {
-      // The Gemini key lives with the owner, who writes the comment; nothing to check on this copy.
+      if (!geminiKey.value.trim()) { showNotice("لا يوجد مفتاح Gemini لهذه النسخة. اطلبه من صاحب البرنامج.", false); return; }
     } else if (actions.includes("comment")) {
       if (!geminiKey.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل مفتاح Gemini.", false); geminiKey.focus(); return; }
       if (!geminiModel.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل اسم النموذج.", false); geminiModel.focus(); return; }
@@ -2822,9 +2822,7 @@ REPLY_VOICES = {
 DEFAULT_REPLY_VOICE = "male"
 
 
-def generate_comment_text(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE) -> str:
-    """Ask Gemini for one reply and return it ("" if none). Does not count it: the caller decides
-    whose tally it belongs to (the owner's own, or a user's on «توزيع البرنامج»)."""
+def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE) -> str:
     prompt = (
         "Write one complete public reply of 10 to 20 words. "
         "Finish the sentence. Never stop mid-word or mid-phrase, and do not end with a comma. "
@@ -2902,59 +2900,16 @@ def generate_comment_text(api_key: str, model: str, image: bytes | None, tweet_t
                 texts.append(str(part["text"]))
         text = clean_comment(" ".join(texts))
         if comment_is_complete(text):
+            record_comment_generated()
             return text
         if len(text) > len(best):
             best = text
     if comment_is_complete(best):
+        record_comment_generated()
         return best
     if saw_busy:
         raise RuntimeError("النموذج مشغول مؤقتًا بعد عدة محاولات. غيّر النموذج أو أعد التنفيذ بعد قليل.")
     return ""
-
-
-def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE) -> str:
-    """One reply, counted as this copy's own comment. The owner's copy uses this for its own tasks."""
-    text = generate_comment_text(api_key, model, image, tweet_text, voice)
-    if text:
-        record_comment_generated()
-    return text
-
-
-def make_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE) -> str:
-    """The comment for a task. The owner's copy writes it here with its own key and counts it; a
-    user's copy asks the owner to write it (the key and the tally stay with the owner)."""
-    if is_owner_copy():
-        return gemini_comment(api_key, model, image, tweet_text, voice)
-    return request_owner_comment(image, tweet_text, voice)
-
-
-def request_owner_comment(image: bytes | None, tweet_text: str, voice: str) -> str:
-    """A user's copy asks the owner's «توزيع البرنامج» to write the comment: it sends the tweet's text
-    and picture, and gets back only the reply. The owner holds the Gemini key and counts the cost."""
-    report = {
-        "text": (tweet_text or "")[:1000],
-        "voice": voice,
-        "image": base64.b64encode(image).decode("ascii") if image else "",
-    }
-    status, body = ask_update_source("/user/comment", 120, report)
-    if status == 0:
-        raise RuntimeError("تعذّر الاتصال بخادم صاحب البرنامج لكتابة التعليق.")
-    try:
-        answer = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        answer = {}
-    if status == 200 and isinstance(answer, dict) and answer.get("success"):
-        # Show the owner's running tally for this copy (the real one is kept on the owner).
-        try:
-            with gemini_usage_lock:
-                gemini_usage["comments"] = int(answer.get("comments") or 0)
-                gemini_usage["cost_comments"] = int(answer.get("comments") or 0)
-                write_private_json(GEMINI_USAGE_PATH, dict(gemini_usage))
-        except Exception:
-            pass
-        return str(answer.get("comment") or "")
-    message = (answer.get("message") if isinstance(answer, dict) else "") or "تعذّر الحصول على التعليق من خادم صاحب البرنامج."
-    raise RuntimeError(message)
 
 
 def screenshot_article(card) -> bytes | None:
@@ -3255,9 +3210,9 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
             if replied_before or ("comment" in actions and already_done_recently(account, tweet_status_id(target_path), ["comment"])):
                 result["actions"]["comment"] = "سبق الرد خلال ٨ ساعات — تم التخطي"
             elif "comment" in actions:
-                comment = make_comment(api_key, model, image, str(item.get("text") or ""), voice)
+                comment = gemini_comment(api_key, model, image, str(item.get("text") or ""), voice)
                 if len(comment.split()) < 4:
-                    comment = make_comment(api_key, model, image, str(item.get("text") or ""), voice)
+                    comment = gemini_comment(api_key, model, image, str(item.get("text") or ""), voice)
                 if len(comment.split()) < 4:
                     result["actions"]["comment"] = "لم يُرجع النموذج تعليقًا صالحًا"
                 else:
@@ -5376,10 +5331,6 @@ def start_distribution(bind_host: str) -> None:
         control = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(control)
         control.PROGRAM_PATH = Path(__file__).resolve()
-        # The owner's server writes each user's comment with that user's Gemini key and counts it.
-        control.generate_comment = generate_comment_text
-        control.gemini_price_per_comment = GEMINI_PRICE_PER_COMMENT
-        control.default_gemini_model = "gemini-3.5-flash"
         server = make_server(bind_host, CONTROL_PORT, control.app, threaded=True)
     except (Exception, SystemExit) as exc:
         # Werkzeug exits the program when the port is taken; the script keeps running without the page.
@@ -5424,12 +5375,24 @@ owner_sync_lock = threading.Lock()
 owner_sync_state = {"at": 0.0}
 
 
-def drop_managed_gemini() -> None:
-    """A user's copy keeps no Gemini key: the owner holds it and writes the comments. Clear any key
-    an older copy stored (from when the owner used to send it down)."""
+def apply_owner_gemini(key: str, model: str = "") -> None:
+    """Use the Gemini key and model the owner set for this copy; when the owner deleted the key, drop
+    it here too. With no model from the owner, the copy keeps its own."""
+    model = normalize_gemini_model(model) or ""
     with gemini_lock:
-        if saved_gemini.get("api_key") or saved_gemini.get("managed"):
+        current, managed = saved_gemini.get("api_key") or "", bool(saved_gemini.get("managed"))
+        changed = False
+        if key and valid_gemini_key(key):
+            if key != current or not managed:
+                saved_gemini.update(api_key=key, managed=True)
+                changed = True
+        elif managed and current:
             saved_gemini.update(api_key="", managed=False)
+            changed = True
+        if model and model != saved_gemini.get("model"):
+            saved_gemini["model"] = model
+            changed = True
+        if changed:
             persist_gemini_unlocked()
 
 
@@ -5439,25 +5402,28 @@ def sync_with_owner() -> None:
     if is_owner_copy() or not owner_sync_lock.acquire(blocking=False):
         return
     try:
-        # Empty body, so the request is a POST (the endpoint takes POST); it carries nothing to report.
-        status, body = ask_update_source("/user/sync", 15, {})
-        owner_sync_state["at"] = time.monotonic()
-        try:
-            answer = json.loads(body.decode("utf-8")) if status == 200 else {}
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            answer = {}
-        if not isinstance(answer, dict) or not answer.get("success"):
-            return
-        # The key stays with the owner; keep none here. Show the owner's tally for this copy.
-        drop_managed_gemini()
-        try:
-            count = max(0, int(answer.get("comments") or 0))
+        for _ in range(2):  # after a reset, report the new cost straight away
             with gemini_usage_lock:
-                gemini_usage["comments"] = count
-                gemini_usage["cost_comments"] = count
-                write_private_json(GEMINI_USAGE_PATH, dict(gemini_usage))
-        except (TypeError, ValueError):
-            pass
+                done = str(gemini_usage.get("reset_id") or "")
+                report = {
+                    # Since the cost was last reset, like the cost beside it in «إدارة».
+                    "comments": int(gemini_usage.get("cost_comments") or 0),
+                    "cost": round(int(gemini_usage.get("cost_comments") or 0) * GEMINI_PRICE_PER_COMMENT, 6),
+                    "reset_id": done,
+                }
+            status, body = ask_update_source("/user/sync", 15, report)
+            owner_sync_state["at"] = time.monotonic()
+            try:
+                answer = json.loads(body.decode("utf-8")) if status == 200 else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                answer = {}
+            if not isinstance(answer, dict) or not answer.get("success"):
+                return
+            apply_owner_gemini(str(answer.get("gemini_key") or ""), str(answer.get("gemini_model") or ""))
+            wanted = str(answer.get("reset_id") or "")
+            if not wanted or wanted == done:
+                return
+            reset_gemini_cost(wanted)
     finally:
         owner_sync_lock.release()
 
@@ -6526,6 +6492,5 @@ if __name__ == "__main__":
         print("For public use, configure HTTPS and set PUBLIC_BASE_URL.", flush=True)
     start_distribution(bind_host)
     if not is_owner_copy():
-        drop_managed_gemini()
         threading.Thread(target=owner_sync_loop, name="owner-sync", daemon=True).start()
     app.run(host=bind_host, port=port, debug=False, threaded=True)
