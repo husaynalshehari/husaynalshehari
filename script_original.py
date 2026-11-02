@@ -782,9 +782,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <div id="reply-voice" class="reply-voice" hidden>
             <span class="voice-label">صيغة الرد</span>
             <div class="voices" role="radiogroup" aria-label="صيغة الرد">
-              <label class="choice"><input type="radio" name="reply-voice" value="male"><span class="choice-title">مذكر</span></label>
+              <label class="choice"><input type="radio" name="reply-voice" value="male" checked><span class="choice-title">مذكر</span></label>
               <label class="choice"><input type="radio" name="reply-voice" value="female"><span class="choice-title">مؤنث</span></label>
-              <label class="choice"><input type="radio" name="reply-voice" value="neutral" checked><span class="choice-title">عام</span></label>
+              <label class="choice"><input type="radio" name="reply-voice" value="neutral"><span class="choice-title">عام</span></label>
             </div>
             {% if owner_copy %}<button id="show-gemini" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Gemini</button>{% endif %}
           </div>
@@ -1370,7 +1370,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   }
 
   function selectedVoice() {
-    return (document.querySelector('input[name="reply-voice"]:checked') || {}).value || "neutral";
+    return (document.querySelector('input[name="reply-voice"]:checked') || {}).value || "male";
   }
 
   // Total comments written by the model, and their price, read from the server.
@@ -1528,15 +1528,16 @@ EMBEDDED_PAGE = r'''<!doctype html>
 
   commentToggle.addEventListener("change", syncGemini);
   if (showGemini) showGemini.addEventListener("click", () => openGemini(geminiFields.hidden));
-  // The reply's voice chosen last time, on this browser.
+  // The reply's voice chosen last time, on this browser ("_v2": a choice made before «مذكر» became the
+  // default is not restored).
   try {
-    const voice = localStorage.getItem("x_reply_voice");
+    const voice = localStorage.getItem("x_reply_voice_v2");
     const box = document.querySelector('input[name="reply-voice"][value="' + voice + '"]');
     if (box) box.checked = true;
   } catch (_) {}
   document.querySelectorAll('input[name="reply-voice"]').forEach((box) => box.addEventListener("change", () => {
     try {
-      localStorage.setItem("x_reply_voice", selectedVoice());
+      localStorage.setItem("x_reply_voice_v2", selectedVoice());
     } catch (_) {}
   }));
   const savedModel = geminiByOwner ? "" : localStorage.getItem("x_gemini_model");
@@ -2810,13 +2811,15 @@ REPLY_VOICES = {
     "neutral": "The reply must suit a man or a woman: never use words that show the writer's gender "
                "(in Arabic, no forms like مبسوط or مبسوطة, متأكد or متأكدة).",
 }
+# The voice when none (or an unknown one) is given.
+DEFAULT_REPLY_VOICE = "male"
 
 
-def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = "neutral") -> str:
+def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE) -> str:
     prompt = (
         "Write one complete public reply of 10 to 20 words. "
         "Finish the sentence. Never stop mid-word or mid-phrase, and do not end with a comma. "
-        "Use the same language as the tweet. " + REPLY_VOICES.get(voice, REPLY_VOICES["neutral"]) + " "
+        "Use the same language as the tweet. " + REPLY_VOICES.get(voice, REPLY_VOICES[DEFAULT_REPLY_VOICE]) + " "
         "Sound like a real person: specific, casual, "
         "not like a brand or an assistant. No hashtags, no links, no quotes, no labels, no introduction. "
         "Return only the finished reply."
@@ -3109,7 +3112,7 @@ def resolve_comment_target(page, path: str, needs_parent: bool) -> tuple[str, ob
     return path, page.locator('article[data-testid="tweet"]').first
 
 
-def execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress=None, should_stop=None, on_snapshot=None, account: str = "", voice: str = "neutral") -> list[dict]:
+def execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress=None, should_stop=None, on_snapshot=None, account: str = "", voice: str = DEFAULT_REPLY_VOICE) -> list[dict]:
     allow_media(page)
     results: list[dict] = []
     plain = [action for action in actions if action != "comment"]
@@ -4976,7 +4979,7 @@ def job_cancelled(job_id: str) -> bool:
 DEFAULT_GROUP_WAIT_SECONDS = 8
 
 
-def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, phone_height: int = 0, reply_voice: str = "neutral") -> None:
+def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, phone_height: int = 0, reply_voice: str = DEFAULT_REPLY_VOICE) -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
             raise JobStopped
@@ -5975,9 +5978,9 @@ def group_run_endpoint(access_path: str):
             group_wait_s = max(0, min(300, parsed_wait))
     profiles_per_account = parse_requested_count(data.get("account_profiles")) or 1
     profiles_per_account = max(1, min(MAX_PROFILES_PER_ACCOUNT, profiles_per_account))
-    reply_voice = str(data.get("reply_voice") or "neutral")
+    reply_voice = str(data.get("reply_voice") or DEFAULT_REPLY_VOICE)
     if reply_voice not in REPLY_VOICES:
-        reply_voice = "neutral"
+        reply_voice = DEFAULT_REPLY_VOICE
     phone_height = 0
     if data.get("phone_screen"):
         phone_height = max(600, min(25000, parse_requested_count(data.get("phone_height")) or PHONE_SCREEN["height"]))
