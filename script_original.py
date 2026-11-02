@@ -3077,14 +3077,21 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
     results: list[dict] = []
     plain = [action for action in actions if action != "comment"]
     total = len(items)
-    # The tweet before failed to open (a deleted one does not count).
-    failed_before = False
+    failures = FailedTweets()
+    # Where each tweet's result starts in results: going back after a pause drops them from there on.
+    starts: dict[int, int] = {}
     opened_one = False
+    # Just back from a pause: no wait before the next tweet.
+    paused = False
     if on_progress:
         on_progress(0, total, "act")
-    for index, item in enumerate(items):
+    index = -1
+    while index + 1 < total:
+        index += 1
+        item = items[index]
         if should_stop and should_stop():
             break
+        starts[index] = len(results)
         result = {"url": item.get("url", ""), "text": item.get("text", ""), "actions": {}, "comment": ""}
         path = normalize_status_path(str(item.get("url") or ""))
         if not path:
@@ -3104,22 +3111,38 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
                 on_progress(index + 1, total, "act")
             continue
         # A random wait within the range set between tweets, from the second tweet that is opened on.
-        if opened_one and wait_range[1] > 0:
+        if opened_one and wait_range[1] > 0 and not paused:
             wait_between_tweets(page, wait_range, should_stop)
             if should_stop and should_stop():
                 break
         opened_one = True
+        paused = False
         # This account already replied to this tweet in the last 8 hours: never reply to it again.
         replied_before = "comment" in actions and already_done_recently(account, status_id, ["comment"])
         try:
-            page, opened, reason = open_task_tweet(page, str(item.get("url") or ""), None, failed_before, should_stop, on_progress, total, allow_media)
+            opened, reason = open_task_tweet(page, str(item.get("url") or ""), None)
         except Exception as exc:
             if browser_closed_error(exc):
                 if on_snapshot and results:
                     on_snapshot(list(results))
                 raise BrowserClosed() from exc
             raise
-        failed_before = not opened and reason != "gone"
+        if opened or reason == "gone":
+            failures.opened()
+        else:
+            back = failures.failed(index)
+            new_page = pause_after_failures(should_stop, on_progress, total, allow_media) if back is not None else None
+            if new_page is not None:
+                # Back to the first of the two that would not open; what was recorded from it on goes.
+                page = new_page
+                del results[starts[back]:]
+                if on_snapshot:
+                    on_snapshot(list(results))
+                if on_progress:
+                    on_progress(back, total, "act")
+                index = back - 1
+                paused = True
+                continue
         if not opened:
             note = "محذوفة — تم التخطي" if reason == "gone" else "تعذر فتح التغريدة"
             result["actions"] = {key: note for key in actions}
@@ -4717,24 +4740,49 @@ def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None
             pass
 
 
-# When a tweet will not open and the one before it would not either, the browser is closed this long.
-TWEET_FAIL_PAUSE_SECONDS = 240
+# Two tweets in a row that would not open: the browser is closed this long, then the task goes back
+# to the first of them.
+TWEET_FAIL_PAUSE_SECONDS = 210
 
 
-def open_task_tweet(page, url: str, skip_if_on, failed_before: bool, should_stop=None, on_progress=None, total: int = 0, after_reopen=None):
-    """Open a task's tweet with two tries. When it still fails and the tweet before it failed too,
-    close the browser, wait TWEET_FAIL_PAUSE_SECONDS, reopen it and give this tweet two more tries.
-    Returns (page, opened path or None, reason); the page is a new one after the wait."""
+def open_task_tweet(page, url: str, skip_if_on):
+    """Open a task's tweet with two tries. Returns (opened path or None, reason)."""
+    opened, reason = open_status_page(page, url, skip_if_on)
+    if not opened and reason != "gone":
+        opened, reason = open_status_page(page, url, skip_if_on)
+    return opened, reason
 
-    def two_tries(current):
-        opened, reason = open_status_page(current, url, skip_if_on)
-        if not opened and reason != "gone":
-            opened, reason = open_status_page(current, url, skip_if_on)
-        return opened, reason
 
-    opened, reason = two_tries(page)
-    if opened or reason == "gone" or not failed_before:
-        return page, opened, reason
+class FailedTweets:
+    """The tweets of a task that would not open (a deleted one does not count). When two in a row
+    would not, the browser is closed for TWEET_FAIL_PAUSE_SECONDS and the task goes back to the first
+    of them. Each tweet gets that second chance once: two that fail again after it stay failed and
+    the task goes on."""
+
+    def __init__(self):
+        self.last: int | None = None   # the tweet tried before, when it would not open
+        self.again: set[int] = set()   # the tweets that had their second chance
+
+    def opened(self) -> None:
+        self.last = None
+
+    def failed(self, index: int) -> int | None:
+        """This tweet would not open. Returns the tweet to go back to after the pause, or None to go on."""
+        before, self.last = self.last, index
+        if before is None:
+            return None
+        back = [number for number in (before, index) if number not in self.again]
+        if not back:
+            return None
+        self.again.update(back)
+        self.last = None
+        return back[0]
+
+
+def pause_after_failures(should_stop=None, on_progress=None, total: int = 0, after_reopen=None):
+    """Close the browser for TWEET_FAIL_PAUSE_SECONDS, then reopen it. Returns the new page, or None
+    when the task was stopped during the wait (the browser then stays closed) or the browser cannot
+    be reopened here."""
 
     def wait_closed() -> bool:
         end = time.monotonic() + TWEET_FAIL_PAUSE_SECONDS
@@ -4751,25 +4799,29 @@ def open_task_tweet(page, url: str, skip_if_on, failed_before: bool, should_stop
         return True
 
     new_page = restart_browser(wait_closed)
-    if new_page is None:
-        return page, opened, reason
-    if after_reopen:
+    if new_page is not None and after_reopen:
         after_reopen(new_page)
-    opened, reason = two_tries(new_page)
-    return new_page, opened, reason
+    return new_page
 
 
 def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "", wait_range: tuple[float, float] = (0, 0)) -> list[dict]:
     results: list[dict] = []
     total = len(items)
-    # The tweet before failed to open (a deleted one does not count).
-    failed_before = False
+    failures = FailedTweets()
+    # Where each tweet's result starts in results: going back after a pause drops them from there on.
+    starts: dict[int, int] = {}
     opened_one = False
+    # Just back from a pause: no wait before the next tweet.
+    paused = False
     if on_progress:
         on_progress(0, total, "act")
-    for index, item in enumerate(items):
+    index = -1
+    while index + 1 < total:
+        index += 1
+        item = items[index]
         if should_stop and should_stop():
             break
+        starts[index] = len(results)
         result = {"url": item.get("url", ""), "text": item.get("text", ""), "actions": {}}
         status_id = tweet_status_id(str(item.get("url") or ""))
         if already_done_recently(account, status_id, actions):
@@ -4782,20 +4834,36 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
                 on_progress(index + 1, total, "act")
             continue
         # A random wait within the range set between tweets, from the second tweet that is opened on.
-        if opened_one and wait_range[1] > 0:
+        if opened_one and wait_range[1] > 0 and not paused:
             wait_between_tweets(page, wait_range, should_stop)
             if should_stop and should_stop():
                 break
         opened_one = True
+        paused = False
         try:
-            page, opened, reason = open_task_tweet(page, str(item.get("url") or ""), actions, failed_before, should_stop, on_progress, total)
+            opened, reason = open_task_tweet(page, str(item.get("url") or ""), actions)
         except Exception as exc:
             if browser_closed_error(exc):
                 if on_snapshot and results:
                     on_snapshot(list(results))
                 raise BrowserClosed() from exc
             raise
-        failed_before = not opened and reason != "gone"
+        if opened or reason == "gone":
+            failures.opened()
+        else:
+            back = failures.failed(index)
+            new_page = pause_after_failures(should_stop, on_progress, total) if back is not None else None
+            if new_page is not None:
+                # Back to the first of the two that would not open; what was recorded from it on goes.
+                page = new_page
+                del results[starts[back]:]
+                if on_snapshot:
+                    on_snapshot(list(results))
+                if on_progress:
+                    on_progress(back, total, "act")
+                index = back - 1
+                paused = True
+                continue
         if not opened:
             note = "محذوفة — تم التخطي" if reason == "gone" else "تعذر فتح التغريدة"
             result["actions"] = {key: note for key in actions}
@@ -4909,9 +4977,9 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
         elif phase == "pause":
             # Two tweets in a row would not open: the browser is closed, done = seconds left.
             if done > 0:
-                publish_job(job_id, phase="act", message=f"تعذّر فتح تغريدتين متتاليتين، فأُغلق المتصفح. المتابعة بعد {done // 60}:{done % 60:02d}.")
+                publish_job(job_id, phase="act", message=f"تعذّر فتح تغريدتين متتاليتين، فأُغلق المتصفح. المتابعة منهما بعد {done // 60}:{done % 60:02d}.")
             else:
-                publish_job(job_id, phase="act", message="انتهى الانتظار. إعادة فتح المتصفح ومتابعة التنفيذ…")
+                publish_job(job_id, phase="act", message="انتهى الانتظار. إعادة فتح المتصفح والمتابعة من التغريدتين…")
         else:
             publish_job(job_id, phase=phase, message="فتح الدردشة والقروب…")
 
