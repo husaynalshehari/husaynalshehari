@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import binascii
 import gzip
 import hashlib
 import hmac
@@ -5558,14 +5559,40 @@ def remember_gemini(api_key: str, model: str) -> None:
         persist_gemini_unlocked()
 
 
+# The Gemini key is kept on disk scrambled, so it is not readable in data/gemini.json. The scramble
+# secret lives in the program's code; in a protected (compiled) copy it cannot be read, so a user
+# cannot unscramble the key from their files. The key is only in the clear in memory while it is used.
+_KEY_SCRAMBLE_SECRET = bytes((37, 211, 90, 158, 7, 244, 129, 63, 182, 25, 100, 203, 71, 19, 240, 88, 149, 33, 206, 114, 56, 221, 9, 167))
+
+
+def _scramble_key(text: str) -> str:
+    raw = (text or "").encode("utf-8")
+    mixed = bytes(byte ^ _KEY_SCRAMBLE_SECRET[index % len(_KEY_SCRAMBLE_SECRET)] for index, byte in enumerate(raw))
+    return base64.b64encode(mixed).decode("ascii")
+
+
+def _unscramble_key(blob: str) -> str:
+    try:
+        mixed = base64.b64decode(str(blob or ""), validate=True)
+    except (ValueError, binascii.Error):
+        return ""
+    raw = bytes(byte ^ _KEY_SCRAMBLE_SECRET[index % len(_KEY_SCRAMBLE_SECRET)] for index, byte in enumerate(mixed))
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
 def persist_gemini_unlocked() -> None:
-    write_private_json(GEMINI_PATH, {"version": 1, "api_key": saved_gemini["api_key"], "model": saved_gemini["model"], "managed": bool(saved_gemini.get("managed"))})
+    write_private_json(GEMINI_PATH, {"version": 2, "api_key_enc": _scramble_key(saved_gemini["api_key"]),
+                                     "model": saved_gemini["model"], "managed": bool(saved_gemini.get("managed"))})
 
 
 def load_gemini() -> None:
     global saved_gemini
     loaded = read_private_json(GEMINI_PATH) or {}
-    key = str(loaded.get("api_key") or "").strip()
+    # "api_key_enc" is the scrambled key; "api_key" is an older plain copy, read once then re-saved scrambled.
+    key = (_unscramble_key(loaded.get("api_key_enc")) if loaded.get("api_key_enc") else str(loaded.get("api_key") or "")).strip()
     model = normalize_gemini_model(str(loaded.get("model") or "")) or "gemini-3.5-flash"
     if key and not valid_gemini_key(key):
         key = ""
