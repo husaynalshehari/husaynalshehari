@@ -12,6 +12,7 @@ import atexit
 import base64
 import binascii
 import gzip
+import zlib
 import hashlib
 import hmac
 import importlib.util
@@ -5323,7 +5324,11 @@ CONTROL_PORT = int(os.getenv("CONTROL_PORT", "5050"))
 # Where «توزيع البرنامج» opens, when not this host on CONTROL_PORT (e.g. behind a domain).
 CONTROL_URL = os.getenv("CONTROL_URL", "")
 BACKUPS_DIR = DATA_DIR / "backups"
-MAX_PROGRAM_BYTES = 8 * 1024 * 1024
+MAX_PROGRAM_BYTES = 16 * 1024 * 1024
+# This running program's own file, and whether it is a protected (compiled .so) copy or plain text.
+# The update downloads and swaps a new .so for a compiled copy, or a new .py for a plain one.
+RUNNING_FILE = Path(__file__).resolve()
+IS_COMPILED = RUNNING_FILE.suffix.lower() != ".py"
 # Set once g.py's page is up.
 distribution_started = threading.Event()
 # Set while a user's copy installs an update: no new task starts.
@@ -5480,6 +5485,9 @@ def new_program_problem(body: bytes, latest: dict) -> str:
         return "لم يصل ملف التحديث كاملًا. أعد المحاولة."
     if not hmac.compare_digest(hashlib.sha256(body).hexdigest(), latest.get("sha256") or ""):
         return "لم يصل ملف التحديث كاملًا. أعد المحاولة."
+    if IS_COMPILED:
+        # A compiled file is not text; that it loads and is the right version is checked by program_starts.
+        return ""
     try:
         text = body.decode("utf-8")
         compile(text, "update.py", "exec")
@@ -5492,12 +5500,26 @@ def new_program_problem(body: bytes, latest: dict) -> str:
     return ""
 
 
-def program_starts(body: bytes) -> bool:
-    """Load the new program once in a separate Python, in a scratch folder, to see that it starts."""
+def program_starts(body: bytes, latest: dict | None = None) -> bool:
+    """Load the new program once in a separate Python, in a scratch folder, to see that it starts.
+    For a compiled copy this also confirms the new file is the version the owner offered."""
     trial = BACKUPS_DIR / "trial"
     shutil.rmtree(trial, ignore_errors=True)
     try:
         trial.mkdir(parents=True)
+        if IS_COMPILED:
+            # Import the new .so (named like the running one) and print its version.
+            name = RUNNING_FILE.name
+            (trial / name).write_bytes(body)
+            module = name.split(".")[0]
+            check = ("import sys; sys.path.insert(0, sys.argv[1]); "
+                     "m = __import__(sys.argv[2]); print(getattr(m, 'APP_VERSION', ''))")
+            result = subprocess.run([sys.executable, "-c", check, str(trial), module], cwd=trial,
+                                    capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                return False
+            offered = str((latest or {}).get("version") or "")
+            return not offered or result.stdout.strip() == offered
         program = trial / "program.py"
         program.write_bytes(body)
         load = ("import importlib.util, sys; spec = importlib.util.spec_from_file_location('trial', sys.argv[1]); "
@@ -5512,9 +5534,10 @@ def program_starts(body: bytes) -> bool:
 
 def install_program(body: bytes) -> None:
     """Keep the running file in data/backups, then put the new one in its place."""
-    script = Path(__file__).resolve()
+    script = RUNNING_FILE
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(script, BACKUPS_DIR / f"{script.stem}-{APP_VERSION}.py")
+    backup = f"{script.name}-{APP_VERSION}.bak" if IS_COMPILED else f"{script.stem}-{APP_VERSION}.py"
+    shutil.copy2(script, BACKUPS_DIR / backup)
     temporary = script.with_name(script.name + ".new")
     temporary.write_bytes(body)
     try:
@@ -6385,10 +6408,16 @@ def update_apply(access_path: str):
         status, body = ask_update_source("/update/file", 60)
         if status != 200:
             return jsonify(success=False, message=latest_update().get("message") or "تعذّر تنزيل التحديث."), 502
+        if IS_COMPILED:
+            # The compiled file travels compressed; unpack it to the real .so bytes.
+            try:
+                body = gzip.decompress(body)
+            except (OSError, EOFError, zlib.error):
+                return jsonify(success=False, message="لم يصل ملف التحديث سليمًا. أعد المحاولة."), 502
         problem = new_program_problem(body, latest)
         if problem:
             return jsonify(success=False, message=problem), 502
-        if not program_starts(body):
+        if not program_starts(body, latest):
             return jsonify(success=False, message="الإصدار الجديد لا يعمل على هذه الاستضافة. لم يتغير شيء."), 502
         if busy():
             return jsonify(success=False, message="بدأت مهمة أثناء التنزيل. انتظر حتى تنتهي ثم اضغط «تحديث»."), 409

@@ -8,6 +8,7 @@ the first visit sets it.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import hmac
 import json
@@ -144,9 +145,17 @@ def next_version(version: str) -> str:
     return ".".join(str(part) for part in parts)
 
 
+def is_compiled_program() -> bool:
+    """The owner hands out a protected (compiled .so) program rather than plain text."""
+    return PROGRAM_PATH.suffix.lower() != ".py"
+
+
 def program_for(user_key: str, address: str) -> bytes:
-    """The program as a user gets it: the script with the published version, this address and the
-    user's key filled in."""
+    """The program bytes a user gets. A compiled .so is the same for everyone (its per-user address
+    and key live in a separate config.json), so it is served as-is. A plain .py gets the published
+    version, this address and the user's key filled in."""
+    if is_compiled_program():
+        return PROGRAM_PATH.read_bytes()
     text = PROGRAM_PATH.read_text(encoding="utf-8")
     with store_lock:
         version = published_version_unlocked()
@@ -387,8 +396,9 @@ def update_latest():
         body = program_for(user["key"], user["address"])
     except OSError:
         return jsonify(success=False, message="التحديثات غير متاحة الآن."), 503
-    version = re.search(r'^APP_VERSION = "([0-9][0-9.]*)"', body.decode("utf-8"), re.M)
-    return jsonify(success=True, version=version.group(1) if version else "", sha256=hashlib.sha256(body).hexdigest(), size=len(body))
+    with store_lock:
+        version = published_version_unlocked()
+    return jsonify(success=True, version=version, sha256=hashlib.sha256(body).hexdigest(), size=len(body))
 
 
 @app.get("/update/file")
@@ -400,6 +410,10 @@ def update_file():
         body = program_for(user["key"], user["address"])
     except OSError:
         return jsonify(success=False, message="التحديثات غير متاحة الآن."), 503
+    if is_compiled_program():
+        response = make_response(gzip.compress(body, 9))
+        response.headers["Content-Type"] = "application/octet-stream"
+        return response
     response = make_response(body)
     response.headers["Content-Type"] = "text/x-python; charset=utf-8"
     return response
