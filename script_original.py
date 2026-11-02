@@ -350,7 +350,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       font-weight: 600;
     }
     .wait-groups input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--pine); }
-    input.wait-sec.wide { width: 72px; }
     input.wait-sec {
       width: 52px;
       min-height: 28px;
@@ -360,13 +359,14 @@ EMBEDDED_PAGE = r'''<!doctype html>
       direction: ltr;
       font-size: 14px;
     }
+    /* The three options on one line; on a screen too narrow for it, an option moves down whole. */
     .options {
-      display: grid;
-      grid-template-columns: auto auto 1fr;
+      display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 6px 8px;
+      gap: 6px 12px;
       margin: 8px 0;
-      padding: 8px 10px;
+      padding: 8px;
       border-radius: 12px;
       background: var(--paper);
       box-shadow: inset 0 0 0 1px var(--line);
@@ -375,7 +375,14 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
     .options input[type="checkbox"] { width: 15px; height: 15px; margin: 0; accent-color: var(--pine); }
     .options label { cursor: pointer; white-space: nowrap; }
-    .opt-value { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .opt { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+    .opt input.wait-sec { width: 36px; }
+    .opt #account-profiles { width: 28px; }
+    .opt #phone-height { width: 54px; }
+    /* No up/down arrows in these small boxes: they would cover the number. */
+    .opt input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+    .opt input[type="number"]::-webkit-inner-spin-button,
+    .opt input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
     .btn-wide { width: 100%; margin-top: 8px; min-height: 34px; height: 34px; }
     .stop-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; align-items: center; margin-top: 6px; }
     #group-box {
@@ -710,22 +717,21 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <ul id="group-list" class="saved-list"></ul>
           </div>
           <div class="options">
-            <input id="group-wait-on" type="checkbox" checked>
-            <label for="group-wait-on" title="انتظار داخل القروب قبل التمرير والجمع">قبل الجمع</label>
-            <span class="opt-value">
+            <span class="opt">
+              <input id="group-wait-on" type="checkbox" checked>
+              <label for="group-wait-on" title="انتظار داخل القروب قبل التمرير والجمع">قبل الجمع</label>
               <input id="group-wait-sec" class="wait-sec" type="number" min="0" max="300" step="1" value="30" inputmode="numeric" aria-label="ثواني الانتظار داخل القروب">
               ث
             </span>
-            <input id="account-profiles-on" type="checkbox">
-            <label for="account-profiles-on" title="عدد المهام في نفس الوقت لكل حساب">مهام لكل حساب</label>
-            <span class="opt-value">
+            <span class="opt">
+              <input id="account-profiles-on" type="checkbox">
+              <label for="account-profiles-on" title="عدد المهام في نفس الوقت لكل حساب" aria-label="مهام لكل حساب">مهام</label>
               <input id="account-profiles" class="wait-sec" type="number" min="0" max="5" step="1" value="0" inputmode="numeric" aria-label="عدد المهام لكل حساب">
             </span>
-            <input id="phone-screen" type="checkbox" checked>
-            <label for="phone-screen" title="شاشة جوال، وطولها أثناء الجمع داخل القروب">شاشة جوال</label>
-            <span class="opt-value">
-              <input id="phone-height" class="wait-sec wide" type="number" min="600" max="25000" step="1" value="10000" inputmode="numeric" aria-label="طول شاشة الجوال أثناء الجمع بالبكسل">
-              بكسل
+            <span class="opt">
+              <input id="phone-screen" type="checkbox" checked>
+              <label for="phone-screen" title="شاشة جوال، وطولها بالبكسل أثناء الجمع داخل القروب" aria-label="شاشة جوال">جوال</label>
+              <input id="phone-height" class="wait-sec" type="number" min="600" max="25000" step="1" value="10000" inputmode="numeric" aria-label="طول شاشة الجوال أثناء الجمع بالبكسل">
             </span>
           </div>
           <div class="stop-row">
