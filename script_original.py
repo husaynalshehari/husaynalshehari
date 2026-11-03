@@ -707,21 +707,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
           </div>
         </section>
 
-        {% if owner_copy %}
-        <section class="block" id="skip-block">
-          <div class="block-head">
-            <h2>حسابات متجاهَلة</h2>
-            <p>تغريدات هذه الحسابات لا تُفتح ولا يُتفاعل معها في أي نسخة، ولا تظهر في النتيجة. اكتب اسم الحساب، ويمكن إضافة أكثر من حساب بفاصلة.</p>
-          </div>
-          <div class="token-row">
-            <input id="skip-users" type="text" maxlength="500" autocomplete="off" autocapitalize="off" spellcheck="false"
-                   placeholder="@username" aria-label="حسابات متجاهَلة">
-            <button id="save-skip-users" class="btn btn-ghost" type="button">حفظ</button>
-          </div>
-          <p id="skip-users-note" class="session-account" hidden></p>
-        </section>
-        {% endif %}
-
         <section class="block">
           <div class="block-head">
             <h2>القروب</h2>
@@ -958,44 +943,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
   }
   lockGemini(true);
   const csrf = document.getElementById("csrf_token").value;
-  const skipUsersInit = {{ skip_users|tojson }};
-  const skipInput = document.getElementById("skip-users");
-  const skipSave = document.getElementById("save-skip-users");
-  const skipNote = document.getElementById("skip-users-note");
-  const skipToText = (list) => (list || []).map((h) => "@" + h).join("، ");
-  function showSkipNote(list) {
-    if (!skipNote) return;
-    if (list && list.length) {
-      skipNote.textContent = "متجاهَلة الآن: " + skipToText(list);
-      skipNote.hidden = false;
-    } else {
-      skipNote.textContent = "لا حسابات متجاهَلة.";
-      skipNote.hidden = false;
-    }
-  }
-  if (skipInput) {
-    skipInput.value = skipToText(skipUsersInit);
-    showSkipNote(skipUsersInit || []);
-  }
-  if (skipSave) {
-    skipSave.addEventListener("click", async () => {
-      skipSave.disabled = true;
-      try {
-        const data = await postJson("/skip-users", {users: skipInput.value});
-        if (data && data.success) {
-          skipInput.value = skipToText(data.users);
-          showSkipNote(data.users || []);
-          showNotice(data.message || "حُفظ.", true);
-        } else {
-          showNotice((data && data.message) || "تعذّر الحفظ.");
-        }
-      } catch (_) {
-        showNotice("تعذّر الحفظ.");
-      } finally {
-        skipSave.disabled = false;
-      }
-    });
-  }
   const loginButton = document.getElementById("login-button");
   const accountName = document.getElementById("account-name");
   const quickVerify = document.getElementById("quick-verify");
@@ -5163,6 +5110,9 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
 
     def work(page):
         try:
+            # Pick up any change to the ignored-accounts list (the owner sets it in «توزيع البرنامج»,
+            # which shares this folder; a user's copy keeps it current from its check-in).
+            load_skip_users()
             with jobs_lock:
                 saved = jobs.get(job_id) or {}
                 items = list(saved["items"]) if isinstance(saved.get("items"), list) else []
@@ -5382,7 +5332,7 @@ def login_page(access_path: str):
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
         PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(),
-        content_ready=content_ready.is_set() or CONTENT_FILE.is_file(), skip_users=skip_users_list(),
+        content_ready=content_ready.is_set() or CONTENT_FILE.is_file(),
     ))
     return response
 
@@ -6460,22 +6410,6 @@ def save_gemini_endpoint(access_path: str):
         return jsonify(success=True, message="لا يوجد ما يُحفظ.")
     remember_gemini(api_key, model or "")
     return jsonify(success=True, message="حُفظ مفتاح Gemini.")
-
-
-@app.post("/<access_path>/skip-users")
-def save_skip_users_endpoint(access_path: str):
-    """The owner sets the ignored accounts here; the list reaches every user's copy on its check-in."""
-    if not hmac.compare_digest(access_path, ACCESS_PATH):
-        abort(404)
-    data = request.get_json(silent=True) or {}
-    if not csrf_ok(data):
-        return jsonify(success=False, message="انتهت صلاحية الصفحة."), 400
-    if not is_owner_copy():
-        return jsonify(success=False, message="يضبط الحسابات المتجاهَلة صاحب البرنامج."), 403
-    raw = str(data.get("users") or "")
-    cleaned = store_skip_users(re.split(r"[\s,،؛]+", raw))
-    return jsonify(success=True, users=cleaned,
-                   message=f"حُفظ. حسابات متجاهَلة: {len(cleaned)}." if cleaned else "لا حسابات متجاهَلة.")
 
 
 @app.post("/<access_path>/sessions/pin")

@@ -183,6 +183,7 @@ def state_payload() -> dict:
             "next_version": next_version(published_version_unlocked()),
             "program_found": PROGRAM_PATH.is_file(),
             "program": PROGRAM_PATH.name,
+            "skip_users": read_skip_users(),
         }
 
 
@@ -274,6 +275,8 @@ def control_change():
                 return jsonify(success=False, message=f"اكتب رقمًا أكبر من الإصدار المنشور الآن ({published_version_unlocked()})."), 400
             store["published_version"] = version
             save_store_unlocked()
+        elif action == "skip_users":
+            write_skip_users(data.get("users"))
         elif action == "add":
             name = re.sub(r"\s+", " ", str(data.get("name") or "")).strip()[:40]
             if not name:
@@ -352,17 +355,40 @@ def update_user() -> tuple[dict | None, tuple | None]:
     return user, None
 
 
+SKIP_USERS_PATH = DATA_DIR / "skip_users.json"
+
+
 def read_skip_users() -> list:
-    """The owner's ignored-accounts list, kept beside this file (the owner's script writes it). Every
-    user's copy takes it on its check-in and skips those accounts' tweets silently."""
+    """The owner's ignored-accounts list, set in this page and kept beside this file. Every user's
+    copy takes it on its check-in and skips those accounts' tweets silently."""
     try:
-        data = json.loads((DATA_DIR / "skip_users.json").read_text(encoding="utf-8"))
+        data = json.loads(SKIP_USERS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
         return []
     users = data.get("users") if isinstance(data, dict) else None
     if not isinstance(users, list):
         return []
     return [str(handle) for handle in users][:500]
+
+
+def normalize_handle(value: str) -> str:
+    """An X handle, lowercased, without a leading @; "" when it is not a valid handle."""
+    handle = str(value or "").strip().lstrip("@").lower()
+    return handle if re.fullmatch(r"[a-z0-9_]{1,15}", handle) else ""
+
+
+def write_skip_users(raw) -> list:
+    """Save the ignored-accounts list (one field of handles, any separators). Returns it cleaned."""
+    parts = re.split(r"[\s,،؛]+", str(raw or "")) if not isinstance(raw, list) else raw
+    cleaned = sorted({h for h in (normalize_handle(x) for x in parts) if h})[:500]
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = SKIP_USERS_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"users": cleaned}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(SKIP_USERS_PATH)
+    except OSError:
+        pass
+    return cleaned
 
 
 @app.post("/user/sync")
@@ -569,6 +595,15 @@ PAGE = r'''<!doctype html>
       </div>
       <p class="hint">ضع ملف <span id="program-name"></span> الجديد مكان القديم أولًا، ثم اضغط «نشر التحديث»، فيظهر زر «تحديث» عند المستخدمين.</p>
     </section>
+    <section id="skip-part" class="sheet" hidden>
+      <label for="skip-users">حسابات متجاهَلة</label>
+      <div class="row">
+        <input id="skip-users" type="text" maxlength="500" spellcheck="false" autocomplete="off" placeholder="@username">
+        <button id="skip-save" type="button">حفظ</button>
+      </div>
+      <p class="hint">تغريدات هذه الحسابات لا تُفتح ولا يُتفاعل معها في أي نسخة، ولا تظهر في النتيجة. تصل القائمة لكل مستخدم خلال دقيقتين. أكثر من حساب بفاصلة.</p>
+      <p id="skip-now" class="hint"></p>
+    </section>
     <section id="users-part" class="sheet" hidden>
       <label for="address">عنوان هذه الصفحة كما يصل إليه المستخدمون</label>
       <div class="row">
@@ -629,6 +664,12 @@ PAGE = r'''<!doctype html>
         : "اخترها أولًا: تحمي هذه الصفحة، لأن المستخدمين سيعرفون عنوانها.";
       document.getElementById("users-part").hidden = !data.password_set;
       document.getElementById("publish-part").hidden = !data.password_set;
+      document.getElementById("skip-part").hidden = !data.password_set;
+      const skipField = document.getElementById("skip-users");
+      const skipList = data.skip_users || [];
+      const skipText = skipList.map((h) => "@" + h).join("، ");
+      if (document.activeElement !== skipField) skipField.value = skipText;
+      document.getElementById("skip-now").textContent = skipList.length ? "متجاهَلة الآن: " + skipText : "لا حسابات متجاهَلة.";
       savedAddress = data.address || "";
       if (document.activeElement !== address) address.value = savedAddress || location.origin;
       users.replaceChildren();
@@ -783,6 +824,9 @@ PAGE = r'''<!doctype html>
     });
     document.getElementById("address-save").addEventListener("click", () => {
       change({action: "address", address: address.value.trim()}, "حُفظ العنوان.");
+    });
+    document.getElementById("skip-save").addEventListener("click", () => {
+      change({action: "skip_users", users: document.getElementById("skip-users").value}, "حُفظت الحسابات المتجاهَلة.");
     });
     document.getElementById("add").addEventListener("click", async () => {
       // The address goes inside the program a user downloads, so it is saved first.
