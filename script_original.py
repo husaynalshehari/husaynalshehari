@@ -3845,33 +3845,74 @@ def collect_groups(page) -> list[str]:
     return found
 
 
-def group_messages_shown(page, wait_s: float) -> bool:
-    """Wait up to wait_s for an open group's message list to appear."""
+# A group's conversation view, once its page has loaded.
+GROUP_VIEW_SELECTOR = '[data-testid="dm-message-list"], [data-testid="dm-message-scroller"], [data-testid="dm-conversation-content"]'
+
+
+def conversation_key(url: str) -> str:
+    """The conversation id in a chat link (…/i/chat/<id> or …/messages/<id>): its digits when it has
+    any (so "g123" and "123" are the same group), else the id itself. "" for any other page."""
+    match = re.search(r"/(?:i/chat|messages)/([^/?#\s]+)", url or "")
+    if not match:
+        return ""
+    raw = match.group(1)
+    if raw.lower() in ("pin", "compose", "requests", "settings"):
+        return ""
+    return re.sub(r"\D", "", raw) or raw.lower()
+
+
+def conversation_link(path: str) -> str:
+    """The full address of a saved group link, or "" when it is not a chat conversation link."""
+    cleaned = (path or "").strip()
+    if not conversation_key(cleaned):
+        return ""
+    if cleaned.startswith("/"):
+        return "https://x.com" + cleaned
+    if re.match(r"https://(?:www\.)?(?:x|twitter)\.com/", cleaned):
+        return cleaned
+    return ""
+
+
+def land_in_group(page, target: str, pin: str, wait_s: float) -> bool:
+    """After a group's page was loaded, wait until that group shows: its conversation view, at its own
+    link. Types the chat PIN if X asks for it; if X then shows the chat list instead of the group,
+    goes to the group's link once more. Only the view is waited for, not the messages: after a full
+    page load X can take a while to show them. True once the group shows."""
+    want = conversation_key(target)
+    plain_target = (target or "").split("?")[0].rstrip("/")
+    typed = False
+    again = False
     deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
-        try:
-            state = page.evaluate(GROUP_CHAT_SCROLL_JS, "state") or {}
-        except Exception:
-            state = {}
-        if state.get("hasList") and state.get("messages"):
-            page.wait_for_timeout(800)
+        accept_cookies(page)
+        url = page.url or ""
+        at_group = bool(want and conversation_key(url) == want) or url.split("?")[0].rstrip("/") == plain_target
+        if at_group and page.locator(GROUP_VIEW_SELECTOR).count():
             return True
-        page.wait_for_timeout(300)
+        if "pin" in url:
+            if not typed and pin_fields(page):
+                type_pin_once(page, pin)
+                typed = True
+                error = pin_error_message(page)
+                if error:
+                    raise RuntimeError(error)
+        elif typed and not at_group and not again and (target or "").startswith("http"):
+            again = True
+            try:
+                goto_x(page, target)
+            except Exception as exc:
+                if browser_closed_error(exc):
+                    raise
+        page.wait_for_timeout(500)
     return False
 
 
-def open_group_by_path(page, path: str, pin: str, wait_s: float = 12.0) -> bool:
-    """Open a group by going straight to its conversation link, without waiting for the inbox list.
-    Types the chat PIN if X asks for it after the navigation. Returns True once the group's messages
-    show, False to fall back to searching the inbox."""
-    cleaned = (path or "").strip()
-    if "/messages/" not in cleaned and "/i/chat/" not in cleaned:
-        return False
-    if cleaned.startswith("/"):
-        target = "https://x.com" + cleaned
-    elif cleaned.startswith("http"):
-        target = cleaned
-    else:
+def open_group_direct(page, path: str, pin: str, wait_s: float = 40.0) -> bool:
+    """Open the group by going straight to its saved link (the chat is already unlocked), instead of
+    waiting for it to show up in the chat list. True once the group shows; False to find it in the
+    chat list instead."""
+    target = conversation_link(path)
+    if not target:
         return False
     try:
         goto_x(page, target)
@@ -3879,13 +3920,17 @@ def open_group_by_path(page, path: str, pin: str, wait_s: float = 12.0) -> bool:
         if browser_closed_error(exc):
             raise
         return False
+    opened = land_in_group(page, target, pin, wait_s)
     if os.environ.get("COLLECT_DEBUG"):
-        print(f"group opened directly by link: {target}", flush=True)
-    typed = False
+        print(f"group opened directly by its link {target}: {opened}", flush=True)
+    return opened
+
+
+def wait_group_messages(page, wait_s: float) -> bool:
+    """Wait up to wait_s for the open group's messages to show. True when they did."""
     deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
         try:
-            accept_cookies(page)
             state = page.evaluate(GROUP_CHAT_SCROLL_JS, "state") or {}
         except Exception as exc:
             if browser_closed_error(exc):
@@ -3894,31 +3939,20 @@ def open_group_by_path(page, path: str, pin: str, wait_s: float = 12.0) -> bool:
         if state.get("hasList") and state.get("messages"):
             page.wait_for_timeout(800)
             return True
-        if not typed and "pin" in (page.url or "") and pin_fields(page):
-            type_pin_once(page, pin)
-            typed = True
-            if pin_error_message(page):
-                return False
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(400)
     return False
 
 
-def open_named_group(page, name: str, pin: str = "") -> str:
-    """Open the group and wait for its messages. No retries: on failure the task stops with a message.
+def open_named_group(page, name: str) -> str:
+    """Find the group in the inbox (waiting up to 10 seconds for it), click it once,
+    then wait for its messages. No retries: on failure the task stops with a message.
 
-    First it goes straight to the group's saved conversation link (no waiting for the inbox). If that
-    link is not known yet or does not open, it finds the group in the inbox — by its saved id first
-    (renaming does not change it), then by exact name, then by a very similar name. Returns the name
-    the group has now."""
+    The group is matched by its saved id first (renaming does not change it), then by
+    exact name, then by a name that starts the same and differs only in the last few
+    characters. Returns the name the group has now."""
     wanted = re.sub(r"\s+", " ", name).strip()
     with group_ids_lock:
         saved_id = group_ids.get(wanted, "")
-        saved_path = group_paths.get(wanted, "")
-    if saved_path and open_group_by_path(page, saved_path, pin):
-        return wanted
-    if saved_path and open_chat(page, pin) is None:
-        # The saved link did not open; we are off the inbox now, so reopen it before searching.
-        show_groups_only(page)
     started = time.monotonic()
     clicked = False
     current_name = wanted
@@ -3930,7 +3964,7 @@ def open_named_group(page, name: str, pin: str = "") -> str:
         if payload.get("clicked"):
             clicked = True
             current_name = re.sub(r"\s+", " ", str(payload.get("matched") or wanted)).strip() or wanted
-            # Remember the group's link so the next task opens it straight away.
+            # Remember the group's link, so the next task opens it straight away.
             if payload.get("path"):
                 remember_group_path(wanted, str(payload.get("path")))
             if os.environ.get("COLLECT_DEBUG"):
@@ -3944,12 +3978,20 @@ def open_named_group(page, name: str, pin: str = "") -> str:
         page.wait_for_timeout(700)
     if not clicked:
         raise RuntimeError(f"لم يظهر القروب «{wanted}» في الدردشة خلال ١٠ ثوانٍ. توقفت المهمة.")
-    if group_messages_shown(page, 12):
-        return current_name
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        try:
+            state = page.evaluate(GROUP_CHAT_SCROLL_JS, "state") or {}
+        except Exception:
+            state = {}
+        if state.get("hasList") and state.get("messages"):
+            page.wait_for_timeout(800)
+            return current_name
+        page.wait_for_timeout(300)
     raise RuntimeError("فُتح القروب لكن رسائله لم تظهر. توقفت المهمة.")
 
 
-def peek_named_group(page, name: str, pin: str = "", wait_s: float = 10.0) -> bool:
+def peek_named_group(page, name: str, wait_s: float = 10.0) -> bool:
     """Open the group once (found the same way as open_named_group) and wait until its
     messages show, at most wait_s. True when the group was opened, whether or not the
     messages showed in time. Used before the real open, because X first opens a group at
@@ -3957,12 +3999,6 @@ def peek_named_group(page, name: str, pin: str = "", wait_s: float = 10.0) -> bo
     wanted = re.sub(r"\s+", " ", name).strip()
     with group_ids_lock:
         saved_id = group_ids.get(wanted, "")
-        saved_path = group_paths.get(wanted, "")
-    if saved_path and open_group_by_path(page, saved_path, pin, wait_s):
-        return True
-    if saved_path and open_chat(page, pin) is None:
-        # The saved link did not open; we are off the inbox now, so reopen it before searching.
-        show_groups_only(page)
     started = time.monotonic()
     clicked = False
     while time.monotonic() - started < 10:
@@ -3983,7 +4019,16 @@ def peek_named_group(page, name: str, pin: str = "", wait_s: float = 10.0) -> bo
         page.wait_for_timeout(700)
     if not clicked:
         return False
-    group_messages_shown(page, wait_s)
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            state = page.evaluate(GROUP_CHAT_SCROLL_JS, "state") or {}
+        except Exception:
+            state = {}
+        if state.get("hasList") and state.get("messages"):
+            page.wait_for_timeout(1000)
+            return True
+        page.wait_for_timeout(300)
     return True
 
 
@@ -3993,34 +4038,21 @@ GROUP_RELOAD_AFTER = 10
 
 def reload_group(page, pin: str, group_name: str) -> None:
     """Reload the open group's page and wait until the group shows again. Types the chat PIN if
-    X asks for it; if the reload has not landed back in the group within 20 s, opens the group
-    again from the chat list."""
+    X asks for it, and goes back to the group's link if X then shows the chat list; if the group
+    is still not showing after 30 s, opens it again from the chat list."""
     group_url = (page.url or "").split("?")[0]
     try:
         page.reload(wait_until="domcontentloaded", timeout=60_000)
     except Exception as exc:
         if browser_closed_error(exc):
             raise
-    typed = False
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        accept_cookies(page)
-        if (page.url or "").split("?")[0] == group_url and page.locator(
-            '[data-testid="dm-message-list"], [data-testid="dm-message-scroller"]'
-        ).count():
-            return
-        if not typed and "pin" in (page.url or "") and pin_fields(page):
-            type_pin_once(page, pin)
-            typed = True
-            error = pin_error_message(page)
-            if error:
-                raise RuntimeError(error)
-        page.wait_for_timeout(500)
+    if land_in_group(page, group_url, pin, 30):
+        return
     error = open_chat(page, pin)
     if error:
         raise RuntimeError(error)
     show_groups_only(page)
-    open_named_group(page, group_name, pin)
+    open_named_group(page, group_name)
 
 
 def leave_group(page, pin: str) -> None:
@@ -4037,6 +4069,41 @@ def leave_group(page, pin: str) -> None:
         error = open_chat(page, pin)
         if error:
             raise RuntimeError(error)
+
+
+def open_group_for_task(page, pin: str, group_name: str, group_wait_s: int, say) -> str:
+    """Open the task's group once the chat is unlocked. With the group's saved link it goes straight
+    to the group (no waiting for it in the chat list, no leaving and coming back); without one, or
+    if the link does not open it, it finds the group in the chat list as before. say(text) reports
+    each step. Returns the name the group has now."""
+    with group_ids_lock:
+        group_link = group_paths.get(re.sub(r"\s+", " ", group_name).strip(), "")
+    if group_link:
+        say(f"فتح القروب مباشرة: {group_name}")
+        if open_group_direct(page, group_link, pin):
+            wait_group_messages(page, 25)
+            if group_wait_s <= GROUP_RELOAD_AFTER:
+                # X first opens a group at the place this account last read up to: load its page
+                # once more so it opens at the newest messages. (With a longer wait before
+                # collecting, the reload during that wait does this.)
+                say("فُتح القروب. تحديث صفحته لتظهر أحدث الرسائل…")
+                reload_group(page, pin, group_name)
+                wait_group_messages(page, 25)
+            return group_name
+        # The link did not open the group: back to the chat list, to find it there.
+        error = open_chat(page, pin)
+        if error:
+            raise RuntimeError(error)
+    show_groups_only(page)
+    say(f"فتح القروب: {group_name}")
+    # X first opens a group at the place this account last read up to. Open it once (until its
+    # messages show, at most 10 s), leave, and open it again at the newest messages.
+    if peek_named_group(page, group_name, 10):
+        say("فُتح القروب. الخروج منه والعودة إليه لتظهر أحدث الرسائل…")
+        leave_group(page, pin)
+        show_groups_only(page)
+    return open_named_group(page, group_name)
+
 
 def group_chat_state(page) -> dict:
     try:
@@ -5134,15 +5201,10 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if error:
                     publish_job(job_id, status="done", success=False, message=error)
                     return
-                show_groups_only(page)
-                publish_job(job_id, phase="login", message=f"فتح القروب: {group_name}")
-                # X first opens a group at the place this account last read up to. Open it once
-                # (until its messages show, at most 10 s), leave, and open it again at the newest messages.
-                if peek_named_group(page, group_name, pin, 10):
-                    publish_job(job_id, phase="login", message="فُتح القروب. الخروج منه والعودة إليه لتظهر أحدث الرسائل…")
-                    leave_group(page, pin)
-                    show_groups_only(page)
-                opened_name = open_named_group(page, group_name, pin)
+                opened_name = open_group_for_task(
+                    page, pin, group_name, group_wait_s,
+                    lambda text: publish_job(job_id, phase="login", message=text),
+                )
                 if opened_name != group_name:
                     publish_job(job_id, phase="login", message=f"تغيّر اسم القروب إلى «{opened_name}» وفُتح.")
                 if group_wait_s > GROUP_RELOAD_AFTER:
