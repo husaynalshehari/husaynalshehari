@@ -22,8 +22,21 @@ from pathlib import Path
 
 from flask import Flask, jsonify, make_response, render_template_string, request, session
 
-# The program handed out: the script that starts this page sets it to itself.
-PROGRAM_PATH = Path(__file__).resolve().with_name(os.getenv("PROGRAM_FILE", "gg.py"))
+# The program handed out. PROGRAM_FILE names it explicitly; otherwise, to distribute the protected
+# build the owner just drops a gg_core*.so next to this file (that is enough to serve it compiled),
+# and without one it stays the plain gg.py as before.
+def _program_to_serve() -> Path:
+    here = Path(__file__).resolve()
+    override = (os.getenv("PROGRAM_FILE") or "").strip()
+    if override:
+        return here.with_name(override)
+    compiled = sorted(here.parent.glob("gg_core*.so"))
+    if compiled:
+        return compiled[0]
+    return here.with_name("gg.py")
+
+
+PROGRAM_PATH = _program_to_serve()
 DATA_DIR = Path(__file__).resolve().with_name("data")
 STORE_PATH = DATA_DIR / "distribution.json"
 ATTEMPT_WINDOW_SECONDS = 300
