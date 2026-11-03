@@ -707,6 +707,21 @@ EMBEDDED_PAGE = r'''<!doctype html>
           </div>
         </section>
 
+        {% if owner_copy %}
+        <section class="block" id="skip-block">
+          <div class="block-head">
+            <h2>حسابات متجاهَلة</h2>
+            <p>تغريدات هذه الحسابات لا تُفتح ولا يُتفاعل معها في أي نسخة، ولا تظهر في النتيجة. اكتب اسم الحساب، ويمكن إضافة أكثر من حساب بفاصلة.</p>
+          </div>
+          <div class="token-row">
+            <input id="skip-users" type="text" maxlength="500" autocomplete="off" autocapitalize="off" spellcheck="false"
+                   placeholder="@username" aria-label="حسابات متجاهَلة">
+            <button id="save-skip-users" class="btn btn-ghost" type="button">حفظ</button>
+          </div>
+          <p id="skip-users-note" class="session-account" hidden></p>
+        </section>
+        {% endif %}
+
         <section class="block">
           <div class="block-head">
             <h2>القروب</h2>
@@ -943,6 +958,44 @@ EMBEDDED_PAGE = r'''<!doctype html>
   }
   lockGemini(true);
   const csrf = document.getElementById("csrf_token").value;
+  const skipUsersInit = {{ skip_users|tojson }};
+  const skipInput = document.getElementById("skip-users");
+  const skipSave = document.getElementById("save-skip-users");
+  const skipNote = document.getElementById("skip-users-note");
+  const skipToText = (list) => (list || []).map((h) => "@" + h).join("، ");
+  function showSkipNote(list) {
+    if (!skipNote) return;
+    if (list && list.length) {
+      skipNote.textContent = "متجاهَلة الآن: " + skipToText(list);
+      skipNote.hidden = false;
+    } else {
+      skipNote.textContent = "لا حسابات متجاهَلة.";
+      skipNote.hidden = false;
+    }
+  }
+  if (skipInput) {
+    skipInput.value = skipToText(skipUsersInit);
+    showSkipNote(skipUsersInit || []);
+  }
+  if (skipSave) {
+    skipSave.addEventListener("click", async () => {
+      skipSave.disabled = true;
+      try {
+        const data = await postJson("/skip-users", {users: skipInput.value});
+        if (data && data.success) {
+          skipInput.value = skipToText(data.users);
+          showSkipNote(data.users || []);
+          showNotice(data.message || "حُفظ.", true);
+        } else {
+          showNotice((data && data.message) || "تعذّر الحفظ.");
+        }
+      } catch (_) {
+        showNotice("تعذّر الحفظ.");
+      } finally {
+        skipSave.disabled = false;
+      }
+    });
+  }
   const loginButton = document.getElementById("login-button");
   const accountName = document.getElementById("account-name");
   const quickVerify = document.getElementById("quick-verify");
@@ -5058,6 +5111,9 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     page.wait_for_timeout(int(group_wait_s) * 1000)
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
                 items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
+                # Drop tweets by ignored accounts here, before anything is opened: they leave no trace
+                # in the counts or the result, as if the group never carried them.
+                items = [item for item in items if not tweet_is_ignored(str(item.get("url") or ""))]
                 set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
                 if job_cancelled(job_id):
                     raise JobStopped
@@ -5228,7 +5284,7 @@ def login_page(access_path: str):
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
         PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(),
-        content_ready=content_ready.is_set() or CONTENT_FILE.is_file(),
+        content_ready=content_ready.is_set() or CONTENT_FILE.is_file(), skip_users=skip_users_list(),
     ))
     return response
 
@@ -5290,6 +5346,76 @@ def read_private_json(path: Path) -> dict | None:
             path.replace(broken)
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+# Ignored accounts. The owner sets a list of handles in «توزيع البرنامج» (stored beside g.py in
+# data/skip_users.json); every user's copy takes the list on its check-in and caches it in the same
+# file on its own server. A collected tweet whose author is on the list is dropped right after it is
+# gathered — before it is opened — so it is never acted on and never appears anywhere in the result.
+SKIP_USERS_PATH = DATA_DIR / "skip_users.json"
+skip_users_lock = threading.Lock()
+skip_users_cache: set[str] = set()
+_HANDLE_NOT_A_USER = {"i", "web", "intent", "share", "home", "search", "messages", "notifications", "explore"}
+
+
+def normalize_handle(value: str) -> str:
+    """An X handle, lowercased, no leading @; "" when it is not a valid handle."""
+    handle = (value or "").strip().lstrip("@").lower()
+    return handle if re.fullmatch(r"[a-z0-9_]{1,15}", handle) else ""
+
+
+def _clean_handles(handles) -> list[str]:
+    seen = {h for h in (normalize_handle(x) for x in (handles or [])) if h}
+    return sorted(seen)
+
+
+def load_skip_users() -> None:
+    data = read_private_json(SKIP_USERS_PATH) or {}
+    users = data.get("users") if isinstance(data, dict) else []
+    cleaned = _clean_handles(users if isinstance(users, list) else [])
+    with skip_users_lock:
+        skip_users_cache.clear()
+        skip_users_cache.update(cleaned)
+
+
+def store_skip_users(handles) -> list[str]:
+    """Replace the ignored-accounts list, persist it only when it changed, and return it cleaned."""
+    cleaned = _clean_handles(handles)
+    with skip_users_lock:
+        changed = set(cleaned) != skip_users_cache
+        if changed:
+            skip_users_cache.clear()
+            skip_users_cache.update(cleaned)
+    if changed:
+        try:
+            write_private_json(SKIP_USERS_PATH, {"users": cleaned})
+        except OSError:
+            pass
+    return cleaned
+
+
+def skip_users_list() -> list[str]:
+    with skip_users_lock:
+        return sorted(skip_users_cache)
+
+
+def tweet_author_handle(url: str) -> str:
+    """The author handle inside an x.com/<handle>/status/<id> link, or "" for a handle-less link."""
+    match = re.search(r"(?:^|[^A-Za-z0-9_])([A-Za-z0-9_]{1,15})/status/\d", url or "")
+    if match:
+        handle = match.group(1).lower()
+        if handle not in _HANDLE_NOT_A_USER:
+            return handle
+    return ""
+
+
+def tweet_is_ignored(url: str) -> bool:
+    """True when this tweet's author is an ignored account, so it must be skipped silently."""
+    handle = tweet_author_handle(url)
+    if not handle:
+        return False
+    with skip_users_lock:
+        return handle in skip_users_cache
 
 
 # Updates. Users and their keys live in g.py beside the owner's script ("توزيع البرنامج"),
@@ -5420,6 +5546,8 @@ def sync_with_owner() -> None:
             if not isinstance(answer, dict) or not answer.get("success"):
                 return
             apply_owner_gemini(str(answer.get("gemini_key") or ""), str(answer.get("gemini_model") or ""))
+            if isinstance(answer.get("skip_users"), list):
+                store_skip_users(answer["skip_users"])
             wanted = str(answer.get("reset_id") or "")
             if not wanted or wanted == done:
                 return
@@ -6236,6 +6364,22 @@ def save_gemini_endpoint(access_path: str):
     return jsonify(success=True, message="حُفظ مفتاح Gemini.")
 
 
+@app.post("/<access_path>/skip-users")
+def save_skip_users_endpoint(access_path: str):
+    """The owner sets the ignored accounts here; the list reaches every user's copy on its check-in."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة."), 400
+    if not is_owner_copy():
+        return jsonify(success=False, message="يضبط الحسابات المتجاهَلة صاحب البرنامج."), 403
+    raw = str(data.get("users") or "")
+    cleaned = store_skip_users(re.split(r"[\s,،؛]+", raw))
+    return jsonify(success=True, users=cleaned,
+                   message=f"حُفظ. حسابات متجاهَلة: {len(cleaned)}." if cleaned else "لا حسابات متجاهَلة.")
+
+
 @app.post("/<access_path>/sessions/pin")
 def save_session_pin_endpoint(access_path: str):
     if not hmac.compare_digest(access_path, ACCESS_PATH):
@@ -6362,6 +6506,7 @@ load_action_counts()
 load_jobs()
 threading.Thread(target=save_jobs_in_background, name="jobs-saver", daemon=True).start()
 load_screen()
+load_skip_users()
 atexit.register(shutdown_jobs)
 
 

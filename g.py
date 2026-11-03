@@ -352,6 +352,19 @@ def update_user() -> tuple[dict | None, tuple | None]:
     return user, None
 
 
+def read_skip_users() -> list:
+    """The owner's ignored-accounts list, kept beside this file (the owner's script writes it). Every
+    user's copy takes it on its check-in and skips those accounts' tweets silently."""
+    try:
+        data = json.loads((DATA_DIR / "skip_users.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return []
+    users = data.get("users") if isinstance(data, dict) else None
+    if not isinstance(users, list):
+        return []
+    return [str(handle) for handle in users][:500]
+
+
 @app.post("/user/sync")
 def user_sync():
     """A user's copy checking in: it reports its Gemini comments and cost, and gets the Gemini key
@@ -368,7 +381,7 @@ def user_sync():
                 comments, cost = user["usage"]["comments"], user["usage"]["cost"]
             user["usage"] = {"comments": comments, "cost": round(cost, 6), "reset_id": str(data.get("reset_id") or "")[:32], "at": time.time()}
             save_store_unlocked()
-            answer = {"success": True, "gemini_key": user["gemini_key"], "gemini_model": user["gemini_model"], "reset_id": user["reset_id"]}
+            answer = {"success": True, "gemini_key": user["gemini_key"], "gemini_model": user["gemini_model"], "reset_id": user["reset_id"], "skip_users": read_skip_users()}
     if not ready:
         return jsonify(success=False, message="غير متاح الآن."), 404
     if not user:
