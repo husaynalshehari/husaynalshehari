@@ -3241,6 +3241,11 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
             if on_progress:
                 on_progress(index + 1, total, "act")
             continue
+        if tweet_is_ignored("https://x.com" + opened):
+            # The opened tweet's author is an ignored account: take no action and leave no trace.
+            if on_progress:
+                on_progress(index + 1, total, "act")
+            continue
         path = opened
         result["url"] = "https://x.com" + path
         try:
@@ -4948,6 +4953,11 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             results.append(result)
             if on_snapshot:
                 on_snapshot(list(results))
+            if on_progress:
+                on_progress(index + 1, total, "act")
+            continue
+        if tweet_is_ignored("https://x.com" + opened):
+            # The opened tweet's author is an ignored account: take no action and leave no trace.
             if on_progress:
                 on_progress(index + 1, total, "act")
             continue
