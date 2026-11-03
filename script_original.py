@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import atexit
 import base64
-import binascii
 import gzip
-import zlib
 import hashlib
 import hmac
 import importlib.util
@@ -59,29 +57,6 @@ APP_VERSION = "1.0"
 # The owner's copy fills both in when it hands the program out; both stay empty in the owner's copy.
 UPDATE_SOURCE = ""
 UPDATE_KEY = ""
-
-
-def _apply_external_config() -> None:
-    """A protected (compiled) copy cannot carry the per-user address and key in its code, so it reads
-    them from config.json beside the program, or from the environment. A plain text copy keeps the
-    values above (the owner's copy fills them in when it hands the program out)."""
-    global UPDATE_SOURCE, UPDATE_KEY
-    data: dict = {}
-    try:
-        loaded = json.loads((Path(__file__).resolve().with_name("config.json")).read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            data = loaded
-    except (OSError, json.JSONDecodeError, ValueError):
-        data = {}
-    source = str(os.getenv("GG_UPDATE_SOURCE") or data.get("update_source") or "").strip()
-    key = str(os.getenv("GG_UPDATE_KEY") or data.get("update_key") or "").strip()
-    if source:
-        UPDATE_SOURCE = source
-    if key:
-        UPDATE_KEY = key
-
-
-_apply_external_config()
 ATTEMPT_WINDOW_SECONDS = 300
 MAX_ATTEMPTS_PER_CLIENT = 5
 MAX_REPOSTS_REQUEST = 1000
@@ -5324,11 +5299,7 @@ CONTROL_PORT = int(os.getenv("CONTROL_PORT", "5050"))
 # Where «توزيع البرنامج» opens, when not this host on CONTROL_PORT (e.g. behind a domain).
 CONTROL_URL = os.getenv("CONTROL_URL", "")
 BACKUPS_DIR = DATA_DIR / "backups"
-MAX_PROGRAM_BYTES = 16 * 1024 * 1024
-# This running program's own file, and whether it is a protected (compiled .so) copy or plain text.
-# The update downloads and swaps a new .so for a compiled copy, or a new .py for a plain one.
-RUNNING_FILE = Path(__file__).resolve()
-IS_COMPILED = RUNNING_FILE.suffix.lower() != ".py"
+MAX_PROGRAM_BYTES = 8 * 1024 * 1024
 # Set once g.py's page is up.
 distribution_started = threading.Event()
 # Set while a user's copy installs an update: no new task starts.
@@ -5485,9 +5456,6 @@ def new_program_problem(body: bytes, latest: dict) -> str:
         return "لم يصل ملف التحديث كاملًا. أعد المحاولة."
     if not hmac.compare_digest(hashlib.sha256(body).hexdigest(), latest.get("sha256") or ""):
         return "لم يصل ملف التحديث كاملًا. أعد المحاولة."
-    if IS_COMPILED:
-        # A compiled file is not text; that it loads and is the right version is checked by program_starts.
-        return ""
     try:
         text = body.decode("utf-8")
         compile(text, "update.py", "exec")
@@ -5500,26 +5468,12 @@ def new_program_problem(body: bytes, latest: dict) -> str:
     return ""
 
 
-def program_starts(body: bytes, latest: dict | None = None) -> bool:
-    """Load the new program once in a separate Python, in a scratch folder, to see that it starts.
-    For a compiled copy this also confirms the new file is the version the owner offered."""
+def program_starts(body: bytes) -> bool:
+    """Load the new program once in a separate Python, in a scratch folder, to see that it starts."""
     trial = BACKUPS_DIR / "trial"
     shutil.rmtree(trial, ignore_errors=True)
     try:
         trial.mkdir(parents=True)
-        if IS_COMPILED:
-            # Import the new .so (named like the running one) and print its version.
-            name = RUNNING_FILE.name
-            (trial / name).write_bytes(body)
-            module = name.split(".")[0]
-            check = ("import sys; sys.path.insert(0, sys.argv[1]); "
-                     "m = __import__(sys.argv[2]); print(getattr(m, 'APP_VERSION', ''))")
-            result = subprocess.run([sys.executable, "-c", check, str(trial), module], cwd=trial,
-                                    capture_output=True, text=True, timeout=120)
-            if result.returncode != 0:
-                return False
-            offered = str((latest or {}).get("version") or "")
-            return not offered or result.stdout.strip() == offered
         program = trial / "program.py"
         program.write_bytes(body)
         load = ("import importlib.util, sys; spec = importlib.util.spec_from_file_location('trial', sys.argv[1]); "
@@ -5534,10 +5488,9 @@ def program_starts(body: bytes, latest: dict | None = None) -> bool:
 
 def install_program(body: bytes) -> None:
     """Keep the running file in data/backups, then put the new one in its place."""
-    script = RUNNING_FILE
+    script = Path(__file__).resolve()
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
-    backup = f"{script.name}-{APP_VERSION}.bak" if IS_COMPILED else f"{script.stem}-{APP_VERSION}.py"
-    shutil.copy2(script, BACKUPS_DIR / backup)
+    shutil.copy2(script, BACKUPS_DIR / f"{script.stem}-{APP_VERSION}.py")
     temporary = script.with_name(script.name + ".new")
     temporary.write_bytes(body)
     try:
@@ -5582,40 +5535,14 @@ def remember_gemini(api_key: str, model: str) -> None:
         persist_gemini_unlocked()
 
 
-# The Gemini key is kept on disk scrambled, so it is not readable in data/gemini.json. The scramble
-# secret lives in the program's code; in a protected (compiled) copy it cannot be read, so a user
-# cannot unscramble the key from their files. The key is only in the clear in memory while it is used.
-_KEY_SCRAMBLE_SECRET = bytes((37, 211, 90, 158, 7, 244, 129, 63, 182, 25, 100, 203, 71, 19, 240, 88, 149, 33, 206, 114, 56, 221, 9, 167))
-
-
-def _scramble_key(text: str) -> str:
-    raw = (text or "").encode("utf-8")
-    mixed = bytes(byte ^ _KEY_SCRAMBLE_SECRET[index % len(_KEY_SCRAMBLE_SECRET)] for index, byte in enumerate(raw))
-    return base64.b64encode(mixed).decode("ascii")
-
-
-def _unscramble_key(blob: str) -> str:
-    try:
-        mixed = base64.b64decode(str(blob or ""), validate=True)
-    except (ValueError, binascii.Error):
-        return ""
-    raw = bytes(byte ^ _KEY_SCRAMBLE_SECRET[index % len(_KEY_SCRAMBLE_SECRET)] for index, byte in enumerate(mixed))
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return ""
-
-
 def persist_gemini_unlocked() -> None:
-    write_private_json(GEMINI_PATH, {"version": 2, "api_key_enc": _scramble_key(saved_gemini["api_key"]),
-                                     "model": saved_gemini["model"], "managed": bool(saved_gemini.get("managed"))})
+    write_private_json(GEMINI_PATH, {"version": 1, "api_key": saved_gemini["api_key"], "model": saved_gemini["model"], "managed": bool(saved_gemini.get("managed"))})
 
 
 def load_gemini() -> None:
     global saved_gemini
     loaded = read_private_json(GEMINI_PATH) or {}
-    # "api_key_enc" is the scrambled key; "api_key" is an older plain copy, read once then re-saved scrambled.
-    key = (_unscramble_key(loaded.get("api_key_enc")) if loaded.get("api_key_enc") else str(loaded.get("api_key") or "")).strip()
+    key = str(loaded.get("api_key") or "").strip()
     model = normalize_gemini_model(str(loaded.get("model") or "")) or "gemini-3.5-flash"
     if key and not valid_gemini_key(key):
         key = ""
@@ -6408,16 +6335,10 @@ def update_apply(access_path: str):
         status, body = ask_update_source("/update/file", 60)
         if status != 200:
             return jsonify(success=False, message=latest_update().get("message") or "تعذّر تنزيل التحديث."), 502
-        if IS_COMPILED:
-            # The compiled file travels compressed; unpack it to the real .so bytes.
-            try:
-                body = gzip.decompress(body)
-            except (OSError, EOFError, zlib.error):
-                return jsonify(success=False, message="لم يصل ملف التحديث سليمًا. أعد المحاولة."), 502
         problem = new_program_problem(body, latest)
         if problem:
             return jsonify(success=False, message=problem), 502
-        if not program_starts(body, latest):
+        if not program_starts(body):
             return jsonify(success=False, message="الإصدار الجديد لا يعمل على هذه الاستضافة. لم يتغير شيء."), 502
         if busy():
             return jsonify(success=False, message="بدأت مهمة أثناء التنزيل. انتظر حتى تنتهي ثم اضغط «تحديث»."), 409
