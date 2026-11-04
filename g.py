@@ -41,7 +41,9 @@ app.config.update(
 store_lock = threading.Lock()
 store: dict = {"password_hash": "", "password_salt": "", "address": "", "users": [], "published_version": "",
                # The totals since the beginning of users that were deleted, so the overall total stays whole.
-               "removed": {"comments": 0, "cost": 0.0}}
+               "removed": {"comments": 0, "cost": 0.0},
+               # The owner's Grok (xAI) key, for «عرض الأكثر مشاهدة» in «عرض التغريدات» of the owner's copy.
+               "grok_key": ""}
 attempts: dict[str, deque[float]] = defaultdict(deque)
 attempts_lock = threading.Lock()
 
@@ -121,6 +123,7 @@ def load_store() -> None:
                 "comments": count_or_none(removed.get("comments"), int) or 0,
                 "cost": count_or_none(removed.get("cost"), float) or 0.0,
             },
+            "grok_key": str(loaded.get("grok_key") or ""),
         })
 
 
@@ -254,6 +257,7 @@ def state_payload() -> dict:
             "program_found": PROGRAM_PATH.is_file(),
             "program": PROGRAM_PATH.name,
             "skip_users": read_skip_users(),
+            "grok_key": f"{store['grok_key'][:4]}…{store['grok_key'][-4:]}" if store["grok_key"] else "",
         }
 
 
@@ -347,6 +351,15 @@ def control_change():
             save_store_unlocked()
         elif action == "skip_users":
             write_skip_users(data.get("users"))
+        elif action == "grok_key":
+            api_key = str(data.get("api_key") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_\-]{20,256}", api_key):
+                return jsonify(success=False, message="صيغة مفتاح Grok غير صالحة."), 400
+            store["grok_key"] = api_key
+            save_store_unlocked()
+        elif action == "grok_key_delete":
+            store["grok_key"] = ""
+            save_store_unlocked()
         elif action == "add":
             name = re.sub(r"\s+", " ", str(data.get("name") or "")).strip()[:40]
             if not name:
@@ -640,7 +653,7 @@ PAGE = r'''<!doctype html>
     .tile small { display: block; color: var(--muted); font-size: 11px; }
     .manage .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .manage .close { width: 100%; margin-top: 14px; }
-    #manage-key, #manage-model { direction: ltr; text-align: start; }
+    #manage-key, #manage-model, #grok-key { direction: ltr; text-align: start; }
   </style>
 </head>
 <body>
@@ -703,6 +716,18 @@ PAGE = r'''<!doctype html>
       </div>
       <p class="hint">تغريدات هذه الحسابات لا تُفتح ولا يُتفاعل معها في أي نسخة، ولا تظهر في النتيجة. تصل القائمة لكل مستخدم خلال دقيقتين. أكثر من حساب بفاصلة.</p>
       <p id="skip-now" class="hint"></p>
+    </section>
+    <section id="grok-part" class="sheet" hidden>
+      <label for="grok-key">مفتاح Grok</label>
+      <div class="row">
+        <input id="grok-key" type="password" autocomplete="off" spellcheck="false" placeholder="الصق مفتاح xAI API">
+        <button id="grok-save" type="button">حفظ</button>
+      </div>
+      <p id="grok-now" class="hint"></p>
+      <div class="row" id="grok-drop-row" hidden>
+        <button id="grok-delete" type="button" class="drop">حذف المفتاح</button>
+      </div>
+      <p class="hint">يُستخدم في «عرض التغريدات» ← «عرض الأكثر مشاهدة» في نسختك. يبقى على خادمك ولا يُرسل للمستخدمين.</p>
     </section>
     <section id="totals-part" class="sheet" hidden>
       <label>تكلفة Gemini لكل المستخدمين</label>
@@ -781,6 +806,9 @@ PAGE = r'''<!doctype html>
       document.getElementById("users-part").hidden = !data.password_set;
       document.getElementById("publish-part").hidden = !data.password_set;
       document.getElementById("skip-part").hidden = !data.password_set;
+      document.getElementById("grok-part").hidden = !data.password_set;
+      document.getElementById("grok-now").textContent = data.grok_key ? "المفتاح الحالي: " + data.grok_key : "لا يوجد مفتاح Grok.";
+      document.getElementById("grok-drop-row").hidden = !data.grok_key;
       const totals = data.totals || {};
       document.getElementById("totals-part").hidden = !data.password_set;
       document.getElementById("sum-cost").textContent = "$" + Number(totals.cost || 0).toFixed(3);
@@ -952,6 +980,14 @@ PAGE = r'''<!doctype html>
     });
     document.getElementById("address-save").addEventListener("click", () => {
       change({action: "address", address: address.value.trim()}, "حُفظ العنوان.");
+    });
+    document.getElementById("grok-save").addEventListener("click", async () => {
+      const field = document.getElementById("grok-key");
+      if (await change({action: "grok_key", api_key: field.value.trim()}, "حُفظ مفتاح Grok.")) field.value = "";
+    });
+    document.getElementById("grok-delete").addEventListener("click", async () => {
+      if (!window.confirm("حذف مفتاح Grok؟")) return;
+      await change({action: "grok_key_delete"}, "حُذف مفتاح Grok.");
     });
     document.getElementById("skip-save").addEventListener("click", () => {
       change({action: "skip_users", users: document.getElementById("skip-users").value}, "حُفظت الحسابات المتجاهَلة.");
