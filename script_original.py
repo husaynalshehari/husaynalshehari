@@ -5536,34 +5536,27 @@ def tweet_is_ignored(url: str) -> bool:
         return handle in skip_users_cache
 
 
-# «عرض التغريدات»: every tweet the tasks collected in the last 7 days. Each tweet is kept once, with
-# when it was collected (collections less than 30 minutes apart share one entry and are counted) and
-# the groups it came from. The page sorts them into days in the viewer's own time zone.
+# «عرض التغريدات»: the tweets the tasks collected in the last 7 days. Each tweet is saved once, when it
+# is first collected (its time and group); collecting it again does not add it again. It is kept 7
+# days from then. The page sorts the tweets into days in the viewer's own time zone.
 COLLECTED_PATH = DATA_DIR / "collected_tweets.json"
 COLLECTED_KEEP_SECONDS = 7 * 24 * 3600
-COLLECTED_MERGE_SECONDS = 30 * 60
 collected_lock = threading.Lock()
 collected_tweets: dict[str, dict] = {}
 
 
 def prune_collected_unlocked(now: float) -> bool:
-    """Drop what was collected more than 7 days ago. True when anything was dropped."""
+    """Drop the tweets saved more than 7 days ago. True when any was dropped."""
     oldest = now - COLLECTED_KEEP_SECONDS
-    dropped = False
-    for status_id in list(collected_tweets):
-        row = collected_tweets[status_id]
-        kept = [entry for entry in row["seen"] if entry[0] >= oldest]
-        if len(kept) != len(row["seen"]):
-            dropped = True
-            row["seen"] = kept
-        if not kept:
-            del collected_tweets[status_id]
-    return dropped
+    gone = [status_id for status_id, row in collected_tweets.items() if row["at"] < oldest]
+    for status_id in gone:
+        del collected_tweets[status_id]
+    return bool(gone)
 
 
 def persist_collected_unlocked() -> None:
     try:
-        write_private_json(COLLECTED_PATH, {"version": 1, "tweets": collected_tweets}, compact=True)
+        write_private_json(COLLECTED_PATH, {"version": 2, "tweets": collected_tweets}, compact=True)
     except OSError:
         pass
 
@@ -5575,52 +5568,60 @@ def load_collected() -> None:
     for status_id, row in rows.items():
         if not isinstance(row, dict) or not re.fullmatch(r"\d{6,25}", str(status_id)):
             continue
-        seen = []
-        for entry in row.get("seen") or []:
-            try:
-                seen.append([int(entry[0]), max(1, int(entry[1]))])
-            except (TypeError, ValueError, IndexError):
-                continue
-        if seen:
-            loaded[str(status_id)] = {
-                "url": str(row.get("url") or "")[:300],
-                "text": str(row.get("text") or "")[:300],
-                "groups": [str(name)[:80] for name in (row.get("groups") or []) if name][:10],
-                "seen": sorted(seen)[-200:],
-            }
+        try:
+            if row.get("at") is not None:
+                at = int(row["at"])
+            else:
+                # Saved by the first version, which kept every collection: the first one is the time.
+                at = min(int(entry[0]) for entry in row.get("seen") or [])
+        except (TypeError, ValueError, IndexError):
+            continue
+        group = row.get("group")
+        if not group and isinstance(row.get("groups"), list) and row["groups"]:
+            group = row["groups"][0]
+        loaded[str(status_id)] = {
+            "url": str(row.get("url") or "")[:300],
+            "text": str(row.get("text") or "")[:300],
+            "group": str(group or "")[:80],
+            "at": at,
+        }
     with collected_lock:
         collected_tweets.clear()
         collected_tweets.update(loaded)
-        prune_collected_unlocked(time.time())
+        if prune_collected_unlocked(time.time()) or any(isinstance(r, dict) and "seen" in r for r in rows.values()):
+            persist_collected_unlocked()
 
 
 def remember_collected(items: list[dict], group_name: str) -> None:
-    """Keep the tweets a task has just collected from a group, for «عرض التغريدات»."""
+    """Save the tweets a task has just collected from a group, each only the first time (for
+    «عرض التغريدات»). A tweet already saved is not saved again; only a missing text, or a link
+    without the author's name, is filled in."""
     now = int(time.time())
     group = re.sub(r"\s+", " ", group_name or "").strip()[:80]
+    changed = False
     with collected_lock:
+        if prune_collected_unlocked(now):
+            changed = True
         for item in items or []:
             url = str(item.get("url") or "")
             status_id = tweet_status_id(url)
             if not status_id:
                 continue
+            text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+            text = "" if text == "تغريدة" else text[:300]
             row = collected_tweets.get(status_id)
             if row is None:
-                row = collected_tweets[status_id] = {"url": url[:300], "text": "", "groups": [], "seen": []}
-            text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
-            if text and text != "تغريدة":
-                row["text"] = text[:300]
+                collected_tweets[status_id] = {"url": url[:300], "text": text, "group": group, "at": now}
+                changed = True
+                continue
+            if text and not row["text"]:
+                row["text"] = text
+                changed = True
             if tweet_author_handle(url) and not tweet_author_handle(row["url"]):
                 row["url"] = url[:300]
-            if group and group not in row["groups"]:
-                row["groups"] = (row["groups"] + [group])[-10:]
-            last = row["seen"][-1] if row["seen"] else None
-            if last and 0 <= now - last[0] < COLLECTED_MERGE_SECONDS:
-                last[1] += 1
-            else:
-                row["seen"] = (row["seen"] + [[now, 1]])[-200:]
-        prune_collected_unlocked(now)
-        persist_collected_unlocked()
+                changed = True
+        if changed:
+            persist_collected_unlocked()
 
 
 def forget_collected(url: str) -> None:
@@ -5649,17 +5650,13 @@ def refine_collected_links(results: list[dict]) -> None:
 
 
 def collected_payload() -> list[dict]:
-    """The saved tweets for the page, most recently collected first; ignored accounts left out."""
+    """The saved tweets for the page, newest first; ignored accounts left out."""
     with collected_lock:
         if prune_collected_unlocked(time.time()):
             persist_collected_unlocked()
-        rows = [
-            {"id": status_id, "url": row["url"], "text": row["text"], "groups": list(row["groups"]),
-             "seen": [list(entry) for entry in row["seen"]]}
-            for status_id, row in collected_tweets.items()
-        ]
+        rows = [{"id": status_id, **row} for status_id, row in collected_tweets.items()]
     rows = [row for row in rows if not tweet_is_ignored(row["url"])]
-    rows.sort(key=lambda row: row["seen"][-1][0], reverse=True)
+    rows.sort(key=lambda row: row["at"], reverse=True)
     return rows
 
 
@@ -6798,24 +6795,12 @@ TWEETS_PAGE = r'''<!doctype html>
     const label = (key, when) => key === dayKey(now) ? "اليوم" : key === dayKey(yesterday) ? "أمس" : dayName.format(when);
     const safeLink = (url) => /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[^\s"'<>]+$/.test(url || "") ? url : "";
 
-    // Each tweet goes under every day (in this device's time zone) it was collected on.
+    // Each tweet once, under the day (in this device's time zone) it was first collected on.
     const days = new Map();
     for (const tweet of tweets) {
-      const perDay = new Map();
-      for (const [at, times] of tweet.seen || []) {
-        const key = dayKey(new Date(at * 1000));
-        const entry = perDay.get(key);
-        if (entry) {
-          entry.first = Math.min(entry.first, at);
-          entry.times += times;
-        } else {
-          perDay.set(key, {first: at, times});
-        }
-      }
-      for (const [key, entry] of perDay) {
-        if (!days.has(key)) days.set(key, {key, items: []});
-        days.get(key).items.push({tweet, first: entry.first, times: entry.times});
-      }
+      const key = dayKey(new Date(tweet.at * 1000));
+      if (!days.has(key)) days.set(key, {key, items: []});
+      days.get(key).items.push({tweet, first: tweet.at});
     }
 
     const list = [...days.values()].sort((a, b) => b.key.localeCompare(a.key));
@@ -6845,15 +6830,10 @@ TWEETS_PAGE = r'''<!doctype html>
         const time = document.createElement("span");
         time.textContent = clock.format(new Date(item.first * 1000));
         meta.append(time);
-        if ((item.tweet.groups || []).length) {
-          const groups = document.createElement("span");
-          groups.textContent = item.tweet.groups.join("، ");
-          meta.append(groups);
-        }
-        if (item.times > 1) {
-          const times = document.createElement("span");
-          times.textContent = "جُمعت " + item.times + " مرات";
-          meta.append(times);
+        if (item.tweet.group) {
+          const group = document.createElement("span");
+          group.textContent = item.tweet.group;
+          meta.append(group);
         }
         const link = safeLink(item.tweet.url);
         if (link) {
