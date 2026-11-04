@@ -219,7 +219,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
       gap: 8px;
     }
     .brand { display: flex; gap: 12px; align-items: center; min-width: 0; }
-    a.content-link { margin-inline-start: auto; display: inline-flex; align-items: center; text-decoration: none; white-space: nowrap; }
+    .mast-links { margin-inline-start: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+    .mast-links a { display: inline-flex; align-items: center; text-decoration: none; white-space: nowrap; }
     .mark {
       flex: 0 0 auto;
       width: 22px;
@@ -655,7 +656,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <p class="eyebrow">من قروب الدردشة</p>
           <h1>تنفيذ على تغريدات القروب</h1>
         </div>
-        {% if content_ready %}<a class="btn btn-ghost content-link" href="{{ api_root }}/content">إنشاء محتوى</a>{% endif %}
+        <div class="mast-links">
+          <a class="btn btn-ghost" href="{{ api_root }}/tweets">عرض التغريدات</a>
+          {% if content_ready %}<a class="btn btn-ghost" href="{{ api_root }}/content">إنشاء محتوى</a>{% endif %}
+        </div>
       </div>
       <ol class="counts" aria-label="الإجراءات الناجحة">
         <li>الرتويت <b id="count-repost">0</b></li>
@@ -3194,6 +3198,7 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
             continue
         if tweet_is_ignored("https://x.com" + opened):
             # The opened tweet's author is an ignored account: take no action and leave no trace.
+            forget_collected("https://x.com" + opened)
             if on_progress:
                 on_progress(index + 1, total, "act")
             continue
@@ -5060,6 +5065,7 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             continue
         if tweet_is_ignored("https://x.com" + opened):
             # The opened tweet's author is an ignored account: take no action and leave no trace.
+            forget_collected("https://x.com" + opened)
             if on_progress:
                 on_progress(index + 1, total, "act")
             continue
@@ -5224,6 +5230,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 # Drop tweets by ignored accounts here, before anything is opened: they leave no trace
                 # in the counts or the result, as if the group never carried them.
                 items = [item for item in items if not tweet_is_ignored(str(item.get("url") or ""))]
+                remember_collected(items, group_name)
                 set_page_height(page, NORMAL_VIEWPORT_HEIGHT)
                 if job_cancelled(job_id):
                     raise JobStopped
@@ -5266,6 +5273,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 else:
                     fresh = visit_and_apply(page, pending, actions, on_act, snapshot, lambda: job_cancelled(job_id), profile_key(auth_token))
                 results = prefix + fresh
+                refine_collected_links(fresh)
             if job_cancelled(job_id):
                 publish_job(
                     job_id, status="done", success=False, phase="act", done=len(results), requested=len(items),
@@ -5526,6 +5534,133 @@ def tweet_is_ignored(url: str) -> bool:
         return False
     with skip_users_lock:
         return handle in skip_users_cache
+
+
+# «عرض التغريدات»: every tweet the tasks collected in the last 7 days. Each tweet is kept once, with
+# when it was collected (collections less than 30 minutes apart share one entry and are counted) and
+# the groups it came from. The page sorts them into days in the viewer's own time zone.
+COLLECTED_PATH = DATA_DIR / "collected_tweets.json"
+COLLECTED_KEEP_SECONDS = 7 * 24 * 3600
+COLLECTED_MERGE_SECONDS = 30 * 60
+collected_lock = threading.Lock()
+collected_tweets: dict[str, dict] = {}
+
+
+def prune_collected_unlocked(now: float) -> bool:
+    """Drop what was collected more than 7 days ago. True when anything was dropped."""
+    oldest = now - COLLECTED_KEEP_SECONDS
+    dropped = False
+    for status_id in list(collected_tweets):
+        row = collected_tweets[status_id]
+        kept = [entry for entry in row["seen"] if entry[0] >= oldest]
+        if len(kept) != len(row["seen"]):
+            dropped = True
+            row["seen"] = kept
+        if not kept:
+            del collected_tweets[status_id]
+    return dropped
+
+
+def persist_collected_unlocked() -> None:
+    try:
+        write_private_json(COLLECTED_PATH, {"version": 1, "tweets": collected_tweets}, compact=True)
+    except OSError:
+        pass
+
+
+def load_collected() -> None:
+    data = read_private_json(COLLECTED_PATH) or {}
+    rows = data.get("tweets") if isinstance(data.get("tweets"), dict) else {}
+    loaded: dict[str, dict] = {}
+    for status_id, row in rows.items():
+        if not isinstance(row, dict) or not re.fullmatch(r"\d{6,25}", str(status_id)):
+            continue
+        seen = []
+        for entry in row.get("seen") or []:
+            try:
+                seen.append([int(entry[0]), max(1, int(entry[1]))])
+            except (TypeError, ValueError, IndexError):
+                continue
+        if seen:
+            loaded[str(status_id)] = {
+                "url": str(row.get("url") or "")[:300],
+                "text": str(row.get("text") or "")[:300],
+                "groups": [str(name)[:80] for name in (row.get("groups") or []) if name][:10],
+                "seen": sorted(seen)[-200:],
+            }
+    with collected_lock:
+        collected_tweets.clear()
+        collected_tweets.update(loaded)
+        prune_collected_unlocked(time.time())
+
+
+def remember_collected(items: list[dict], group_name: str) -> None:
+    """Keep the tweets a task has just collected from a group, for «عرض التغريدات»."""
+    now = int(time.time())
+    group = re.sub(r"\s+", " ", group_name or "").strip()[:80]
+    with collected_lock:
+        for item in items or []:
+            url = str(item.get("url") or "")
+            status_id = tweet_status_id(url)
+            if not status_id:
+                continue
+            row = collected_tweets.get(status_id)
+            if row is None:
+                row = collected_tweets[status_id] = {"url": url[:300], "text": "", "groups": [], "seen": []}
+            text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+            if text and text != "تغريدة":
+                row["text"] = text[:300]
+            if tweet_author_handle(url) and not tweet_author_handle(row["url"]):
+                row["url"] = url[:300]
+            if group and group not in row["groups"]:
+                row["groups"] = (row["groups"] + [group])[-10:]
+            last = row["seen"][-1] if row["seen"] else None
+            if last and 0 <= now - last[0] < COLLECTED_MERGE_SECONDS:
+                last[1] += 1
+            else:
+                row["seen"] = (row["seen"] + [[now, 1]])[-200:]
+        prune_collected_unlocked(now)
+        persist_collected_unlocked()
+
+
+def forget_collected(url: str) -> None:
+    """Remove a saved tweet: it turned out to be by an ignored account, which leaves no trace."""
+    status_id = tweet_status_id(url)
+    if not status_id:
+        return
+    with collected_lock:
+        if collected_tweets.pop(status_id, None) is not None:
+            persist_collected_unlocked()
+
+
+def refine_collected_links(results: list[dict]) -> None:
+    """After a task, give each saved tweet the link it really opened at (it has the author's name)."""
+    changed = False
+    with collected_lock:
+        for result in results or []:
+            url = str(result.get("url") or "")
+            status_id = tweet_status_id(url)
+            row = collected_tweets.get(status_id) if status_id else None
+            if row and tweet_author_handle(url) and not tweet_author_handle(row["url"]):
+                row["url"] = url[:300]
+                changed = True
+        if changed:
+            persist_collected_unlocked()
+
+
+def collected_payload() -> list[dict]:
+    """The saved tweets for the page, most recently collected first; ignored accounts left out."""
+    with collected_lock:
+        if prune_collected_unlocked(time.time()):
+            persist_collected_unlocked()
+        rows = [
+            {"id": status_id, "url": row["url"], "text": row["text"], "groups": list(row["groups"]),
+             "seen": [list(entry) for entry in row["seen"]]}
+            for status_id, row in collected_tweets.items()
+        ]
+    rows = [row for row in rows if not tweet_is_ignored(row["url"])]
+    rows.sort(key=lambda row: row["seen"][-1][0], reverse=True)
+    return rows
 
 
 # Updates. Users and their keys live in g.py beside the owner's script ("توزيع البرنامج"),
@@ -6604,7 +6739,151 @@ load_jobs()
 threading.Thread(target=save_jobs_in_background, name="jobs-saver", daemon=True).start()
 load_screen()
 load_skip_users()
+load_collected()
 atexit.register(shutdown_jobs)
+
+
+TWEETS_PAGE = r'''<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>التغريدات المجموعة</title>
+  <style>
+    :root { --paper: #f3efe6; --sheet: #fffdf8; --ink: #1c1915; --muted: #6e675e; --line: #e4dcd0; --pine: #0f6b50; color-scheme: light; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font-family: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif; line-height: 1.55; }
+    main { width: min(560px, 100%); margin: 0 auto; padding: 14px 12px 32px; }
+    header { display: flex; align-items: center; gap: 10px; }
+    h1 { margin: 0; font-size: 18px; }
+    header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+    .back { margin-inline-start: auto; display: inline-flex; align-items: center; min-height: 36px; padding: 0 12px; border-radius: 8px; background: var(--sheet);
+      box-shadow: inset 0 0 0 1px var(--line); color: var(--ink); font-size: 13px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+    details { margin-top: 10px; border-radius: 14px; background: var(--sheet); box-shadow: inset 0 0 0 1px var(--line); }
+    summary { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: pointer; list-style: none; font-weight: 700; }
+    summary::-webkit-details-marker { display: none; }
+    summary .count { margin-inline-start: auto; color: var(--muted); font-size: 13px; font-weight: 600; }
+    summary::after { content: "‹"; color: var(--muted); font-size: 18px; line-height: 1; transition: transform 0.15s; }
+    details[open] summary::after { transform: rotate(-90deg); }
+    ol { list-style: none; margin: 0; padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+    li { padding: 8px 10px; border-radius: 10px; background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); }
+    .text { margin: 0; font-size: 14px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .meta .open { margin-inline-start: auto; color: var(--pine); font-weight: 700; text-decoration: none; }
+    .empty { margin-top: 28px; text-align: center; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>التغريدات المجموعة</h1>
+        <p id="summary"></p>
+      </div>
+      <a class="back" href="{{ back }}">رجوع</a>
+    </header>
+    <div id="days"></div>
+    <p id="empty" class="empty" hidden>لم تُجمع تغريدات خلال آخر ٧ أيام.</p>
+  </main>
+  <script>
+  (() => {
+    const tweets = {{ tweets|tojson }};
+    const pad = (n) => String(n).padStart(2, "0");
+    const dayKey = (when) => when.getFullYear() + "-" + pad(when.getMonth() + 1) + "-" + pad(when.getDate());
+    const dayName = new Intl.DateTimeFormat("ar-u-nu-latn", {weekday: "long", day: "numeric", month: "long"});
+    const clock = new Intl.DateTimeFormat("ar-u-nu-latn", {hour: "numeric", minute: "2-digit"});
+    const now = new Date();
+    const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    const label = (key, when) => key === dayKey(now) ? "اليوم" : key === dayKey(yesterday) ? "أمس" : dayName.format(when);
+    const safeLink = (url) => /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[^\s"'<>]+$/.test(url || "") ? url : "";
+
+    // Each tweet goes under every day (in this device's time zone) it was collected on.
+    const days = new Map();
+    for (const tweet of tweets) {
+      const perDay = new Map();
+      for (const [at, times] of tweet.seen || []) {
+        const key = dayKey(new Date(at * 1000));
+        const entry = perDay.get(key);
+        if (entry) {
+          entry.first = Math.min(entry.first, at);
+          entry.times += times;
+        } else {
+          perDay.set(key, {first: at, times});
+        }
+      }
+      for (const [key, entry] of perDay) {
+        if (!days.has(key)) days.set(key, {key, items: []});
+        days.get(key).items.push({tweet, first: entry.first, times: entry.times});
+      }
+    }
+
+    const list = [...days.values()].sort((a, b) => b.key.localeCompare(a.key));
+    document.getElementById("summary").textContent = "آخر ٧ أيام · " + tweets.length + " تغريدة";
+    document.getElementById("empty").hidden = list.length > 0;
+    const box = document.getElementById("days");
+    list.forEach((day, index) => {
+      day.items.sort((a, b) => b.first - a.first);
+      const details = document.createElement("details");
+      details.open = index === 0;
+      const summary = document.createElement("summary");
+      const title = document.createElement("span");
+      title.textContent = label(day.key, new Date(day.items[0].first * 1000));
+      const count = document.createElement("span");
+      count.className = "count";
+      count.textContent = day.items.length + " تغريدة";
+      summary.append(title, count);
+      const ol = document.createElement("ol");
+      for (const item of day.items) {
+        const li = document.createElement("li");
+        const text = document.createElement("p");
+        text.className = "text";
+        text.dir = "auto";
+        text.textContent = item.tweet.text || "تغريدة";
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        const time = document.createElement("span");
+        time.textContent = clock.format(new Date(item.first * 1000));
+        meta.append(time);
+        if ((item.tweet.groups || []).length) {
+          const groups = document.createElement("span");
+          groups.textContent = item.tweet.groups.join("، ");
+          meta.append(groups);
+        }
+        if (item.times > 1) {
+          const times = document.createElement("span");
+          times.textContent = "جُمعت " + item.times + " مرات";
+          meta.append(times);
+        }
+        const link = safeLink(item.tweet.url);
+        if (link) {
+          const open = document.createElement("a");
+          open.className = "open";
+          open.href = link;
+          open.target = "_blank";
+          open.rel = "noopener noreferrer";
+          open.textContent = "فتح";
+          meta.append(open);
+        }
+        li.append(text, meta);
+        ol.append(li);
+      }
+      details.append(summary, ol);
+      box.append(details);
+    });
+  })();
+  </script>
+</body>
+</html>
+'''
+
+
+@app.get("/<access_path>/tweets")
+def tweets_page(access_path: str):
+    """«عرض التغريدات»: the tweets collected in the last 7 days, day by day."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    return render_template_string(TWEETS_PAGE, tweets=collected_payload(), back="/" + ACCESS_PATH)
 
 
 # «إنشاء محتوى»: content.py beside the script adds its page to this panel.
