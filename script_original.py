@@ -5579,12 +5579,20 @@ def load_collected() -> None:
         group = row.get("group")
         if not group and isinstance(row.get("groups"), list) and row["groups"]:
             group = row["groups"][0]
-        loaded[str(status_id)] = {
+        record = {
             "url": str(row.get("url") or "")[:300],
             "text": str(row.get("text") or "")[:300],
             "group": str(group or "")[:80],
             "at": at,
         }
+        # «عرض المشاهدات»: the view count from the last check, and when (views None: no count then).
+        try:
+            if row.get("views_at") is not None:
+                record["views_at"] = int(row["views_at"])
+                record["views"] = None if row.get("views") is None else max(0, int(row["views"]))
+        except (TypeError, ValueError):
+            record.pop("views_at", None)
+        loaded[str(status_id)] = record
     with collected_lock:
         collected_tweets.clear()
         collected_tweets.update(loaded)
@@ -5658,6 +5666,188 @@ def collected_payload() -> list[dict]:
     rows = [row for row in rows if not tweet_is_ignored(row["url"])]
     rows.sort(key=lambda row: row["at"], reverse=True)
     return rows
+
+
+# «عرض المشاهدات» in «عرض التغريدات»: the current view count of a day's tweets, from FxTwitter's free
+# API (api.fxtwitter.com/status/<id>). It is asked slowly, one tweet every few seconds, so this server
+# is not blocked. If it is (too many requests), or several tweets in a row get no answer, the fetching
+# waits a few minutes (longer each time), then goes on where it stopped, more slowly than before.
+# The counts are kept with the saved tweets.
+FX_STATUS_URL = "https://api.fxtwitter.com/status/{}"
+FX_GAP_SECONDS = (2.0, 3.5)          # between two tweets
+FX_SLOW_GAP_SECONDS = (5.0, 8.0)     # the same, once the service has asked to slow down
+FX_PAUSE_SECONDS = 180               # the first wait; the next ones wait 6, 9, 12 then 15 minutes
+FX_PAUSE_MAX_SECONDS = 900
+FX_MAX_PAUSES = 6                    # waits in a row with no answer between them: then it stops
+FX_FRESH_SECONDS = 600               # a count newer than this is not asked again
+views_lock = threading.Lock()
+views_queue: deque = deque()
+views_state: dict = {"running": False, "paused_until": 0.0, "error": "", "removed": []}
+
+
+def fx_tweet_views(status_id: str) -> tuple[str, int | None, str]:
+    """Ask FxTwitter about one tweet. Returns (outcome, views, detail): ("ok", views or None, the
+    tweet's link) · ("gone", None, "") deleted, private or not found · ("blocked", None, seconds to
+    wait or "") too many requests · ("error", None, why) no usable answer."""
+    asking = urllib.request.Request(FX_STATUS_URL.format(status_id), headers={
+        "User-Agent": "x-group-tool/1.0", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(asking, timeout=20) as response:
+            data = json.loads(response.read(4 * 1024 * 1024).decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read(4096).decode("utf-8"))
+        except Exception:
+            body = None
+        if exc.code == 429:
+            return "blocked", None, str(exc.headers.get("Retry-After") or "")
+        if isinstance(body, dict) and body.get("code") in (401, 403, 404, 410):
+            return "gone", None, ""          # FxTwitter's own answer about this tweet
+        if exc.code in (403, 503):
+            return "blocked", None, str(exc.headers.get("Retry-After") or "")
+        if exc.code in (404, 410):
+            return "gone", None, ""
+        return "error", None, f"HTTP {exc.code}"
+    except Exception as exc:                 # no answer, a cut connection, or not JSON
+        return "error", None, type(exc).__name__
+    tweet = data.get("tweet") if isinstance(data, dict) else None
+    if not isinstance(tweet, dict):
+        return "gone", None, ""
+    views = tweet.get("views")
+    if isinstance(views, bool) or not isinstance(views, (int, float)) or views < 0:
+        views = None
+    return "ok", None if views is None else int(views), str(tweet.get("url") or "")
+
+
+def views_to_end_of_line(status_id: str) -> None:
+    with views_lock:
+        if views_queue and views_queue[0] == status_id:
+            views_queue.rotate(-1)
+
+
+def views_worker() -> None:
+    """The fetching thread. It marks itself finished under the lock when the line is empty, so a new
+    request starts a new thread; if something unexpected breaks it, it stops cleanly the same way."""
+    try:
+        fetch_queued_views()
+    except Exception:
+        app.logger.warning("views fetching failed")
+        with views_lock:
+            views_queue.clear()
+            views_state.update(running=False, paused_until=0.0,
+                               error="توقف جلب المشاهدات بسبب خطأ. اضغط «عرض المشاهدات» ليكمل.")
+
+
+def fetch_queued_views() -> None:
+    """Fetch the queued tweets' view counts one by one, slowly; wait out a block and go on."""
+    pauses = 0                       # waits in a row, with no answer between them
+    failed: dict[str, int] = {}      # failed asks of each tweet
+    failing: set[str] = set()        # the tweets that failed since the last answer
+    gap = FX_GAP_SECONDS
+    while True:
+        with views_lock:
+            if not views_queue:
+                views_state.update(running=False, paused_until=0.0)
+                return
+            status_id = views_queue[0]
+        outcome, views, detail = fx_tweet_views(status_id)
+        if outcome == "error":
+            failed[status_id] = failed.get(status_id, 0) + 1
+            failing.add(status_id)
+            if failed[status_id] >= 3:
+                pass                             # it fails while others are answered: no count for it
+            elif len(failing) >= 3:
+                # Three tweets in a row: the service or the connection is down, not the tweets.
+                views_to_end_of_line(status_id)
+                outcome, detail = "blocked", ""
+            elif failed[status_id] == 1:
+                time.sleep(10)                   # a moment's trouble: the same tweet again
+                continue
+            else:
+                views_to_end_of_line(status_id)  # once more, after the others
+                time.sleep(random.uniform(*gap))
+                continue
+        if outcome == "blocked":
+            pauses += 1
+            if pauses > FX_MAX_PAUSES:
+                with views_lock:
+                    views_queue.clear()
+                    views_state.update(running=False, paused_until=0.0,
+                                       error="توقف جلب المشاهدات لأن الخدمة لم تعد تجيب. اضغط «عرض المشاهدات» لاحقًا ليكمل.")
+                return
+            try:
+                asked = int(float(detail))
+            except ValueError:
+                asked = 0
+            wait = min(max(asked, FX_PAUSE_SECONDS * pauses), FX_PAUSE_MAX_SECONDS)
+            gap = FX_SLOW_GAP_SECONDS
+            with views_lock:
+                views_state["paused_until"] = time.time() + wait
+            time.sleep(wait)
+            with views_lock:
+                views_state["paused_until"] = 0.0
+            continue                             # the same tweet (or, after failures, the next) again
+        if outcome != "error":
+            pauses = 0
+            failing.clear()
+        link = detail if outcome == "ok" else ""
+        ignored = bool(link) and tweet_is_ignored(link)
+        with collected_lock:
+            row = collected_tweets.get(status_id)
+            if row is not None:
+                if ignored:
+                    del collected_tweets[status_id]
+                else:
+                    row["views"] = views if outcome == "ok" else None
+                    row["views_at"] = int(time.time())
+                    if link and tweet_author_handle(link) and not tweet_author_handle(row["url"]):
+                        row["url"] = link[:300]
+                persist_collected_unlocked()
+        with views_lock:
+            if views_queue and views_queue[0] == status_id:
+                views_queue.popleft()
+            if ignored:
+                views_state["removed"] = (views_state["removed"] + [status_id])[-500:]
+        time.sleep(random.uniform(*gap))
+
+
+def queue_views(ids: list[str]) -> int:
+    """Add tweets to the ones waiting for their view count; start fetching if it is not running."""
+    with views_lock:
+        waiting = set(views_queue)
+        added = [status_id for status_id in dict.fromkeys(ids) if status_id not in waiting]
+        views_queue.extend(added)
+        views_state["error"] = ""
+        if views_queue and not views_state["running"]:
+            views_state["running"] = True
+            threading.Thread(target=views_worker, name="tweet-views", daemon=True).start()
+        return len(added)
+
+
+def views_status_payload(since: float) -> dict:
+    """How the fetching is going, and the counts fetched since `since` (a time this server gave)."""
+    now = time.time()
+    with views_lock:
+        state = {"running": views_state["running"], "waiting": list(views_queue), "error": views_state["error"],
+                 "paused": max(0, int(views_state["paused_until"] - now)), "removed": list(views_state["removed"])}
+    with collected_lock:
+        state["views"] = {status_id: [row.get("views"), row["views_at"]] for status_id, row in collected_tweets.items()
+                          if row.get("views_at") and row["views_at"] >= since - 2}
+    state["now"] = now
+    return state
+
+
+def day_spans(data: dict) -> list[tuple[int, int]]:
+    """The days the page asks about, as [start, end) in seconds (in the viewer's own time zone)."""
+    spans = []
+    for pair in (data.get("ranges") or [])[:10]:
+        try:
+            start, end = int(pair[0]), int(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if 0 < end - start <= 26 * 3600:
+            spans.append((start, end))
+    return spans
 
 
 # Updates. Users and their keys live in g.py beside the owner's script ("توزيع البرنامج"),
@@ -6747,7 +6937,7 @@ TWEETS_PAGE = r'''<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>التغريدات المجموعة</title>
   <style>
-    :root { --paper: #f3efe6; --sheet: #fffdf8; --ink: #1c1915; --muted: #6e675e; --line: #e4dcd0; --pine: #0f6b50; color-scheme: light; }
+    :root { --paper: #f3efe6; --sheet: #fffdf8; --ink: #1c1915; --muted: #6e675e; --line: #e4dcd0; --pine: #0f6b50; --clay: #8d3a32; color-scheme: light; }
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
     body { margin: 0; background: var(--paper); color: var(--ink); font-family: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif; line-height: 1.55; }
@@ -6769,6 +6959,13 @@ TWEETS_PAGE = r'''<!doctype html>
     .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 4px; color: var(--muted); font-size: 12px; }
     .meta .open { margin-inline-start: auto; color: var(--pine); font-weight: 700; text-decoration: none; }
     .empty { margin-top: 28px; text-align: center; color: var(--muted); }
+    .vbtn { flex: 0 0 auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--pine); color: #f4fbf7;
+      font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+    .vbtn:disabled { opacity: 0.45; cursor: default; }
+    .vstatus { margin: 0 12px 8px; color: var(--muted); font-size: 12px; }
+    .vstatus.is-bad { color: var(--clay); }
+    .views { color: var(--pine); font-weight: 800; }
+    .views.is-none { color: var(--muted); font-weight: 600; }
   </style>
 </head>
 <body>
@@ -6786,14 +6983,31 @@ TWEETS_PAGE = r'''<!doctype html>
   <script>
   (() => {
     const tweets = {{ tweets|tojson }};
+    const apiRoot = {{ api_root|tojson }};
+    const csrf = {{ csrf_token|tojson }};
+    let since = {{ server_now|tojson }};
     const pad = (n) => String(n).padStart(2, "0");
     const dayKey = (when) => when.getFullYear() + "-" + pad(when.getMonth() + 1) + "-" + pad(when.getDate());
     const dayName = new Intl.DateTimeFormat("ar-u-nu-latn", {weekday: "long", day: "numeric", month: "long"});
     const clock = new Intl.DateTimeFormat("ar-u-nu-latn", {hour: "numeric", minute: "2-digit"});
+    const number = new Intl.NumberFormat("ar-u-nu-latn");
     const now = new Date();
     const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
     const label = (key, when) => key === dayKey(now) ? "اليوم" : key === dayKey(yesterday) ? "أمس" : dayName.format(when);
     const safeLink = (url) => /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[^\s"'<>]+$/.test(url || "") ? url : "";
+    const viewsText = (tweet) => !tweet.views_at ? "" : tweet.views == null ? "لا يوجد رقم" : number.format(tweet.views) + " مشاهدة";
+    const showViews = (span, tweet) => {
+      span.textContent = viewsText(tweet);
+      span.className = tweet.views == null ? "views is-none" : "views";
+      span.hidden = !span.textContent;
+    };
+    const checkedAt = (seconds) => {
+      const when = new Date(seconds * 1000);
+      const today = new Date();
+      const before = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+      const key = dayKey(when);
+      return (key === dayKey(today) ? "" : key === dayKey(before) ? "أمس " : dayName.format(when) + " ") + clock.format(when);
+    };
 
     // Each tweet once, under the day (in this device's time zone) it was first collected on.
     const days = new Map();
@@ -6802,11 +7016,54 @@ TWEETS_PAGE = r'''<!doctype html>
       if (!days.has(key)) days.set(key, {key, items: []});
       days.get(key).items.push({tweet, first: tweet.at});
     }
-
     const list = [...days.values()].sort((a, b) => b.key.localeCompare(a.key));
-    document.getElementById("summary").textContent = "آخر ٧ أيام · " + tweets.length + " تغريدة";
+    const byId = new Map();          // tweet id → {tweet, day, li, views}
+    let total = tweets.length;
+    const showTotal = () => { document.getElementById("summary").textContent = "آخر ٧ أيام · " + total + " تغريدة"; };
+    showTotal();
     document.getElementById("empty").hidden = list.length > 0;
     const box = document.getElementById("days");
+
+    // The day's tweets: most viewed first once it has counts (tweets without one after), else newest first.
+    function order(day) {
+      const counted = day.items.some((item) => item.tweet.views_at);
+      const sorted = [...day.items].sort((a, b) => {
+        if (counted) {
+          const va = a.tweet.views == null ? -1 : a.tweet.views;
+          const vb = b.tweet.views == null ? -1 : b.tweet.views;
+          if (va !== vb) return vb - va;
+        }
+        return b.first - a.first;
+      });
+      day.ol.replaceChildren(...sorted.map((item) => byId.get(item.tweet.id).li));
+    }
+
+    function showDay(day, state) {
+      const waiting = day.items.filter((item) => state && state.waiting.has(item.tweet.id)).length;
+      day.button.disabled = waiting > 0;
+      day.status.className = "vstatus";
+      if (waiting) {
+        let text = "يجلب المشاهدات ببطء لتجنّب الحظر… بقي " + waiting + " من " + day.items.length;
+        if (state.paused) text = "متوقف مؤقتًا لتجنّب الحظر · يتابع بعد " + Math.floor(state.paused / 60) + ":" + pad(state.paused % 60) + " · بقي " + waiting + " من " + day.items.length;
+        day.status.textContent = text;
+        day.status.hidden = false;
+        day.busy = true;
+        return;
+      }
+      if (day.busy) order(day);      // just finished: sort it now (not while numbers arrive)
+      day.busy = false;
+      if (state && state.error && day.asked) {
+        day.status.textContent = state.error;
+        day.status.className = "vstatus is-bad";
+        day.status.hidden = false;
+        return;
+      }
+      const checked = day.items.map((item) => item.tweet.views_at || 0);
+      const last = Math.max(0, ...checked);
+      day.status.textContent = last ? "مرتّبة من الأكثر مشاهدة · آخر فحص " + checkedAt(last) : "";
+      day.status.hidden = !last;
+    }
+
     list.forEach((day, index) => {
       day.items.sort((a, b) => b.first - a.first);
       const details = document.createElement("details");
@@ -6817,8 +7074,16 @@ TWEETS_PAGE = r'''<!doctype html>
       const count = document.createElement("span");
       count.className = "count";
       count.textContent = day.items.length + " تغريدة";
-      summary.append(title, count);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "vbtn";
+      button.textContent = "عرض المشاهدات";
+      summary.append(title, count, button);
+      const status = document.createElement("p");
+      status.className = "vstatus";
+      status.hidden = true;
       const ol = document.createElement("ol");
+      Object.assign(day, {details, ol, status, button, count});
       for (const item of day.items) {
         const li = document.createElement("li");
         const text = document.createElement("p");
@@ -6827,9 +7092,11 @@ TWEETS_PAGE = r'''<!doctype html>
         text.textContent = item.tweet.text || "تغريدة";
         const meta = document.createElement("div");
         meta.className = "meta";
+        const views = document.createElement("span");
+        showViews(views, item.tweet);
         const time = document.createElement("span");
         time.textContent = clock.format(new Date(item.first * 1000));
-        meta.append(time);
+        meta.append(views, time);
         if (item.tweet.group) {
           const group = document.createElement("span");
           group.textContent = item.tweet.group;
@@ -6846,11 +7113,92 @@ TWEETS_PAGE = r'''<!doctype html>
           meta.append(open);
         }
         li.append(text, meta);
-        ol.append(li);
+        byId.set(item.tweet.id, {tweet: item.tweet, day, li, views});
       }
-      details.append(summary, ol);
+      order(day);
+      showDay(day, null);
+      button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        details.open = true;
+        day.asked = true;
+        button.disabled = true;
+        status.className = "vstatus";
+        status.textContent = "يبدأ جلب المشاهدات…";
+        status.hidden = false;
+        const [year, month, date] = day.key.split("-").map(Number);
+        const range = [new Date(year, month - 1, date).getTime() / 1000, new Date(year, month - 1, date + 1).getTime() / 1000];
+        let data;
+        try {
+          const response = await fetch(apiRoot + "/tweets/views", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({ranges: [range], csrf_token: csrf})
+          });
+          data = await response.json();
+        } catch (_) {
+          data = {success: false, message: "تعذّر الاتصال بالسكربت."};
+        }
+        if (!data.success) {
+          status.textContent = data.message || "تعذّر البدء.";
+          status.className = "vstatus is-bad";
+          button.disabled = false;
+          return;
+        }
+        apply(data);
+        follow();
+      });
+      details.append(summary, status, ol);
       box.append(details);
     });
+
+    // New counts from the server go into their tweets; then each day's line is brought up to date.
+    function apply(data) {
+      if (typeof data.now === "number") since = data.now;
+      for (const [id, pair] of Object.entries(data.views || {})) {
+        const entry = byId.get(id);
+        if (!entry) continue;
+        entry.tweet.views = pair[0];
+        entry.tweet.views_at = pair[1];
+        showViews(entry.views, entry.tweet);
+      }
+      for (const id of data.removed || []) {
+        const entry = byId.get(id);
+        if (!entry) continue;
+        entry.li.remove();
+        entry.day.items = entry.day.items.filter((item) => item.tweet.id !== id);
+        entry.day.count.textContent = entry.day.items.length + " تغريدة";
+        byId.delete(id);
+        total -= 1;
+        showTotal();
+      }
+      const state = {waiting: new Set(data.waiting || []), paused: data.paused || 0, error: data.error || ""};
+      for (const day of list) showDay(day, state);
+      return data.running || state.waiting.size > 0;
+    }
+
+    let following = false;
+    async function follow() {
+      if (following) return;
+      following = true;
+      for (;;) {
+        await new Promise((done) => setTimeout(done, 2000));
+        let data;
+        try {
+          data = await (await fetch(apiRoot + "/tweets/views?since=" + since, {cache: "no-store"})).json();
+        } catch (_) {
+          continue;
+        }
+        if (!data.success || !apply(data)) break;
+      }
+      following = false;
+    }
+
+    // A fetch may already be running (started earlier, or from another tab): follow it.
+    fetch(apiRoot + "/tweets/views?since=" + since, {cache: "no-store"})
+      .then((response) => response.json())
+      .then((data) => { if (data.success && apply(data)) follow(); })
+      .catch(() => {});
   })();
   </script>
 </body>
@@ -6863,7 +7211,48 @@ def tweets_page(access_path: str):
     """«عرض التغريدات»: the tweets collected in the last 7 days, day by day."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
-    return render_template_string(TWEETS_PAGE, tweets=collected_payload(), back="/" + ACCESS_PATH)
+    csrf_token = session.get("csrf_token")
+    if not csrf_token:
+        csrf_token = secrets.token_urlsafe(32)
+        session["csrf_token"] = csrf_token
+    return render_template_string(TWEETS_PAGE, tweets=collected_payload(), back="/" + ACCESS_PATH,
+                                  api_root="/" + ACCESS_PATH, csrf_token=csrf_token, server_now=time.time())
+
+
+@app.post("/<access_path>/tweets/views")
+def tweets_views_start(access_path: str):
+    """«عرض المشاهدات»: queue a day's tweets for their current view count."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها."), 400
+    spans = day_spans(data)
+    now = time.time()
+    with collected_lock:
+        rows = [(row.get("views_at") or 0, -row["at"], status_id, row["url"]) for status_id, row in collected_tweets.items()
+                if any(start <= row["at"] < end for start, end in spans)]
+    if not rows:
+        return jsonify(success=False, message="لا توجد تغريدات في هذا اليوم."), 400
+    # The ones never counted first (newest first), then the oldest counts; a count from the last
+    # 10 minutes is new enough. So pressing again after a stop goes on from where it stopped.
+    rows.sort()
+    ids = [status_id for checked, _, status_id, url in rows
+           if checked < now - FX_FRESH_SECONDS and not tweet_is_ignored(url)]
+    queued = queue_views(ids)
+    return jsonify(success=True, queued=queued, **views_status_payload(now))
+
+
+@app.get("/<access_path>/tweets/views")
+def tweets_views_status(access_path: str):
+    """How «عرض المشاهدات» is going, and the counts fetched since the page last asked."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    try:
+        since = float(request.args.get("since") or 0)
+    except ValueError:
+        since = 0.0
+    return jsonify(success=True, **views_status_payload(since))
 
 
 # «إنشاء محتوى»: content.py beside the script adds its page to this panel.
