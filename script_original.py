@@ -5646,6 +5646,9 @@ def sync_with_owner() -> None:
                     "comments": int(gemini_usage.get("cost_comments") or 0),
                     "cost": round(int(gemini_usage.get("cost_comments") or 0) * GEMINI_PRICE_PER_COMMENT, 6),
                     "reset_id": done,
+                    # Since this copy began (never reset): its total cost from the beginning.
+                    "total_comments": int(gemini_usage.get("comments") or 0),
+                    "total_cost": round(int(gemini_usage.get("comments") or 0) * GEMINI_PRICE_PER_COMMENT, 6),
                 }
             status, body = ask_update_source("/user/sync", 15, report)
             owner_sync_state["at"] = time.monotonic()

@@ -39,13 +39,26 @@ app.config.update(
     MAX_CONTENT_LENGTH=8 * 1024,
 )
 store_lock = threading.Lock()
-store: dict = {"password_hash": "", "password_salt": "", "address": "", "users": [], "published_version": ""}
+store: dict = {"password_hash": "", "password_salt": "", "address": "", "users": [], "published_version": "",
+               # The totals since the beginning of users that were deleted, so the overall total stays whole.
+               "removed": {"comments": 0, "cost": 0.0}}
 attempts: dict[str, deque[float]] = defaultdict(deque)
 attempts_lock = threading.Lock()
 
 
+def count_or_none(value, kind):
+    """A non-negative number from stored or reported data, or None when there is none."""
+    if value is None:
+        return None
+    try:
+        return max(kind(0), kind(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def load_user(row: dict) -> dict:
     usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
+    archived = row.get("archived") if isinstance(row.get("archived"), dict) else {}
     return {
         "id": str(row["id"]),
         "name": str(row.get("name") or ""),
@@ -56,14 +69,36 @@ def load_user(row: dict) -> dict:
         "gemini_model": str(row.get("gemini_model") or ""),
         # Changes each time the owner resets this user's cost; the copy resets when it sees a new one.
         "reset_id": str(row.get("reset_id") or ""),
-        # The copy's last report: its comments, cost, the reset it last made, and when.
+        # The copy's last report: its comments and cost since the last reset, the reset it last made,
+        # and when. Newer copies also report their count since they began (None until they do).
         "usage": {
             "comments": int(usage.get("comments") or 0),
             "cost": float(usage.get("cost") or 0),
             "reset_id": str(usage.get("reset_id") or ""),
             "at": float(usage.get("at") or 0),
+            "total_comments": count_or_none(usage.get("total_comments"), int),
+            "total_cost": count_or_none(usage.get("total_cost"), float),
+        },
+        # What the copy had counted before each cost reset (or before a count it lost), kept here so
+        # this user's total since the beginning never goes down.
+        "archived": {
+            "comments": count_or_none(archived.get("comments"), int) or 0,
+            "cost": count_or_none(archived.get("cost"), float) or 0.0,
         },
     }
+
+
+def lifetime_of(row: dict) -> tuple[int, float, bool]:
+    """A user's comments and cost since the beginning, and whether that comes from the copy's own
+    count since it began (exact) rather than only what this page has seen."""
+    usage, archived = row["usage"], row["archived"]
+    comments = archived["comments"] + usage["comments"]
+    cost = archived["cost"] + usage["cost"]
+    from_copy = usage["total_cost"] is not None and usage["total_comments"] is not None
+    if from_copy:
+        comments = max(comments, usage["total_comments"])
+        cost = max(cost, usage["total_cost"])
+    return comments, round(cost, 6), from_copy
 
 
 def load_store() -> None:
@@ -74,6 +109,7 @@ def load_store() -> None:
     if not isinstance(loaded, dict):
         loaded = {}
     users = [load_user(row) for row in loaded.get("users") or [] if isinstance(row, dict) and row.get("id") and row.get("key")]
+    removed = loaded.get("removed") if isinstance(loaded.get("removed"), dict) else {}
     with store_lock:
         store.update({
             "password_hash": str(loaded.get("password_hash") or ""),
@@ -81,6 +117,10 @@ def load_store() -> None:
             "address": str(loaded.get("address") or ""),
             "users": users,
             "published_version": str(loaded.get("published_version") or ""),
+            "removed": {
+                "comments": count_or_none(removed.get("comments"), int) or 0,
+                "cost": count_or_none(removed.get("cost"), float) or 0.0,
+            },
         })
 
 
@@ -159,6 +199,7 @@ def program_for(user_key: str, address: str) -> bytes:
 def user_payload(row: dict) -> dict:
     """A user as the page shows it; the Gemini key only as its first and last letters."""
     key = row["gemini_key"]
+    total_comments, total_cost, from_copy = lifetime_of(row)
     return {
         "id": row["id"],
         "name": row["name"],
@@ -167,8 +208,36 @@ def user_payload(row: dict) -> dict:
         "gemini_model": row["gemini_model"],
         "comments": row["usage"]["comments"],
         "cost": row["usage"]["cost"],
+        "total_comments": total_comments,
+        "total_cost": total_cost,
+        "total_from_copy": from_copy,
         "reported_at": row["usage"]["at"],
         "reset_pending": bool(row["reset_id"]) and row["reset_id"] != row["usage"]["reset_id"],
+    }
+
+
+def totals_payload_unlocked() -> dict:
+    """Every user's cost added up: now (since each one's last reset) and since the beginning
+    (including users that were deleted since)."""
+    now_cost = now_comments = all_comments = 0
+    all_cost = 0.0
+    partial = False
+    for row in store["users"]:
+        comments, cost, from_copy = lifetime_of(row)
+        now_comments += row["usage"]["comments"]
+        now_cost += row["usage"]["cost"]
+        all_comments += comments
+        all_cost += cost
+        if row["usage"]["at"] and not from_copy:
+            partial = True
+    removed = store["removed"]
+    return {
+        "cost": round(now_cost, 6),
+        "comments": now_comments,
+        "total_cost": round(all_cost + removed["cost"], 6),
+        "total_comments": all_comments + removed["comments"],
+        "removed_cost": round(removed["cost"], 6),
+        "partial": partial,
     }
 
 
@@ -179,6 +248,7 @@ def state_payload() -> dict:
             "password_set": bool(store["password_hash"]),
             "address": store["address"],
             "users": [user_payload(row) for row in store["users"]],
+            "totals": totals_payload_unlocked(),
             "version": published_version_unlocked(),
             "next_version": next_version(published_version_unlocked()),
             "program_found": PROGRAM_PATH.is_file(),
@@ -289,6 +359,12 @@ def control_change():
             if not user:
                 return jsonify(success=False, message="لم يعد هذا المستخدم موجودًا."), 404
             if action == "delete":
+                # Their cost since the beginning stays in the overall total.
+                gone_comments, gone_cost, _ = lifetime_of(user)
+                store["removed"] = {
+                    "comments": store["removed"]["comments"] + gone_comments,
+                    "cost": round(store["removed"]["cost"] + gone_cost, 6),
+                }
                 store["users"] = [row for row in store["users"] if row["id"] != user_id]
             elif action in ("stop", "start"):
                 user["active"] = action == "start"
@@ -405,7 +481,23 @@ def user_sync():
                 comments, cost = max(0, int(data.get("comments") or 0)), max(0.0, float(data.get("cost") or 0))
             except (TypeError, ValueError):
                 comments, cost = user["usage"]["comments"], user["usage"]["cost"]
-            user["usage"] = {"comments": comments, "cost": round(cost, 6), "reset_id": str(data.get("reset_id") or "")[:32], "at": time.time()}
+            before = user["usage"]
+            reset_id = str(data.get("reset_id") or "")[:32]
+            # The copy has just made the owner's cost reset, or its count went back without one (it lost
+            # its data): what it had counted before stays in this user's total since the beginning.
+            made_reset = bool(user["reset_id"]) and reset_id == user["reset_id"] and before["reset_id"] != user["reset_id"]
+            if made_reset or comments < before["comments"]:
+                user["archived"] = {
+                    "comments": user["archived"]["comments"] + before["comments"],
+                    "cost": round(user["archived"]["cost"] + before["cost"], 6),
+                }
+            total_comments = count_or_none(data.get("total_comments"), int)
+            total_cost = count_or_none(data.get("total_cost"), float)
+            user["usage"] = {
+                "comments": comments, "cost": round(cost, 6), "reset_id": reset_id, "at": time.time(),
+                "total_comments": total_comments,
+                "total_cost": round(total_cost, 6) if total_cost is not None else None,
+            }
             save_store_unlocked()
             answer = {"success": True, "gemini_key": user["gemini_key"], "gemini_model": user["gemini_model"], "reset_id": user["reset_id"], "skip_users": read_skip_users()}
     if not ready:
@@ -541,6 +633,11 @@ PAGE = r'''<!doctype html>
     .manage { padding: 14px 14px 12px; }
     .manage h2 { margin: 0 0 4px; font-size: 16px; }
     .manage .cost { margin: 2px 0 0; font-size: 20px; font-weight: 700; direction: ltr; text-align: end; }
+    .totals { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 4px; }
+    .tile { min-width: 0; padding: 8px 10px; border-radius: 10px; background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); }
+    .tile span { display: block; color: var(--muted); font-size: 11px; }
+    .tile b { display: block; margin-top: 2px; font-size: 20px; direction: ltr; text-align: end; font-variant-numeric: tabular-nums; }
+    .tile small { display: block; color: var(--muted); font-size: 11px; }
     .manage .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .manage .close { width: 100%; margin-top: 14px; }
     #manage-key, #manage-model { direction: ltr; text-align: start; }
@@ -578,12 +675,15 @@ PAGE = r'''<!doctype html>
           <button id="manage-model-save" type="button">حفظ</button>
         </div>
         <p id="manage-model-now" class="hint"></p>
-        <label>التكلفة</label>
+        <label>التكلفة الحالية (منذ آخر تصفير)</label>
         <p id="manage-cost" class="cost"></p>
         <p id="manage-cost-note" class="hint"></p>
         <div class="actions">
           <button id="manage-reset" type="button">تصفير التكلفة</button>
         </div>
+        <label>التكلفة الكلية من البداية</label>
+        <p id="manage-total" class="cost"></p>
+        <p id="manage-total-note" class="hint"></p>
         <button id="manage-close" type="button" class="close">إغلاق</button>
       </div>
     </dialog>
@@ -603,6 +703,14 @@ PAGE = r'''<!doctype html>
       </div>
       <p class="hint">تغريدات هذه الحسابات لا تُفتح ولا يُتفاعل معها في أي نسخة، ولا تظهر في النتيجة. تصل القائمة لكل مستخدم خلال دقيقتين. أكثر من حساب بفاصلة.</p>
       <p id="skip-now" class="hint"></p>
+    </section>
+    <section id="totals-part" class="sheet" hidden>
+      <label>تكلفة Gemini لكل المستخدمين</label>
+      <div class="totals">
+        <div class="tile"><span>الحالية (منذ آخر تصفير)</span><b id="sum-cost"></b><small id="sum-cost-note"></small></div>
+        <div class="tile"><span>الكلية من البداية</span><b id="sum-total"></b><small id="sum-total-note"></small></div>
+      </div>
+      <p id="totals-hint" class="hint" hidden></p>
     </section>
     <section id="users-part" class="sheet" hidden>
       <label for="address">عنوان هذه الصفحة كما يصل إليه المستخدمون</label>
@@ -637,6 +745,14 @@ PAGE = r'''<!doctype html>
       target.hidden = !text;
     }
 
+    // A dollar amount in its own direction, so the sign stays before the number.
+    function dollars(value) {
+      const node = document.createElement("bdi");
+      node.dir = "ltr";
+      node.textContent = "$" + Number(value || 0).toFixed(3);
+      return node;
+    }
+
     function button(label, className, onClick) {
       const node = document.createElement("button");
       node.type = "button";
@@ -665,6 +781,17 @@ PAGE = r'''<!doctype html>
       document.getElementById("users-part").hidden = !data.password_set;
       document.getElementById("publish-part").hidden = !data.password_set;
       document.getElementById("skip-part").hidden = !data.password_set;
+      const totals = data.totals || {};
+      document.getElementById("totals-part").hidden = !data.password_set;
+      document.getElementById("sum-cost").textContent = "$" + Number(totals.cost || 0).toFixed(3);
+      document.getElementById("sum-cost-note").textContent = "التعليقات " + (totals.comments || 0);
+      document.getElementById("sum-total").textContent = "$" + Number(totals.total_cost || 0).toFixed(3);
+      document.getElementById("sum-total-note").textContent = "التعليقات " + (totals.total_comments || 0);
+      const totalsHint = document.getElementById("totals-hint");
+      totalsHint.replaceChildren();
+      if (totals.removed_cost > 0) totalsHint.append("الكلية تشمل ", dollars(totals.removed_cost), " لمستخدمين حُذفوا. ");
+      if (totals.partial) totalsHint.append("بعض النسخ لم تُحدَّث بعد: تكتمل تكلفتها الكلية من بدايتها بعد تحديثها.");
+      totalsHint.hidden = !totalsHint.childNodes.length;
       const skipField = document.getElementById("skip-users");
       const skipList = data.skip_users || [];
       const skipText = skipList.map((h) => "@" + h).join("، ");
@@ -682,11 +809,7 @@ PAGE = r'''<!doctype html>
         const status = document.createElement("span");
         status.textContent = row.active ? "فعّال" : "موقوف";
         if (row.reported_at) {
-          // Its own direction, so the dollar sign stays before the number.
-          const cost = document.createElement("bdi");
-          cost.dir = "ltr";
-          cost.textContent = "$" + row.cost.toFixed(3);
-          status.append(" · ", cost);
+          status.append(" · الحالية ", dollars(row.cost), " · الكلية ", dollars(row.total_cost));
         }
         who.append(title, status);
         const download = document.createElement("a");
@@ -745,6 +868,11 @@ PAGE = r'''<!doctype html>
       document.getElementById("manage-cost-note").textContent = (row.reported_at
         ? "التعليقات " + row.comments + " · آخر تحديث من نسخته " + ago(row.reported_at) + "."
         : "لم تصل بيانات من نسخته بعد.") + (row.reset_pending ? " طلب التصفير بانتظار نسخته." : "");
+      document.getElementById("manage-total").textContent = row.reported_at ? "$" + row.total_cost.toFixed(3) : "—";
+      document.getElementById("manage-total-note").textContent = !row.reported_at ? ""
+        : "التعليقات " + row.total_comments + (row.total_from_copy
+          ? " · من عدّاد نسخته منذ بدايتها، ولا يتأثر بالتصفير."
+          : " · ما سجّلته هذه الصفحة حتى الآن؛ يكتمل من بداية نسخته بعد أن تُحدَّث.");
     }
 
     function openManage(userId) {
@@ -771,7 +899,7 @@ PAGE = r'''<!doctype html>
       await change({action: "gemini_delete", id: managed}, "حُذف المفتاح. يُحذف من نسخته خلال دقيقتين، أو عند فتحه صفحته.");
     });
     document.getElementById("manage-reset").addEventListener("click", async () => {
-      if (!window.confirm("تصفير تكلفة هذا المستخدم؟ يبقى عدد التعليقات كما هو.")) return;
+      if (!window.confirm("تصفير التكلفة الحالية لهذا المستخدم؟ تبقى تكلفته الكلية وعدد تعليقاته.")) return;
       await change({action: "cost_reset", id: managed}, "طُلب التصفير. تصفّر نسخته التكلفة خلال دقيقتين، أو عند فتحه صفحته.");
     });
     document.getElementById("manage-close").addEventListener("click", () => dialog.close());
