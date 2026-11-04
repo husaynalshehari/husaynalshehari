@@ -46,8 +46,10 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Strict",
     SESSION_COOKIE_SECURE=os.getenv("X_APP_SECURE_COOKIE", "0") == "1",
-    MAX_CONTENT_LENGTH=8 * 1024,
+    MAX_CONTENT_LENGTH=64 * 1024,
 )
+# Every request stays under 8 KB, except starting a task from «روابط التغريدات» (up to 1000 links).
+SMALL_REQUEST_BYTES = 8 * 1024
 
 ACCESS_PATH = os.getenv("X_ACCESS_PATH", "desk")
 # This copy's version. In users' copies it is the version the owner published from «توزيع البرنامج»
@@ -386,6 +388,34 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .opt input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
     .btn-wide { width: 100%; margin-top: 8px; min-height: 34px; height: 34px; }
     .stop-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; align-items: center; margin-top: 6px; }
+    /* «روابط التغريدات»: at the other end of the groups row; on (pine) while the links box shows. */
+    .links-button { margin-inline-start: auto; }
+    .groups-row { flex-wrap: wrap; row-gap: 6px; }     /* a very narrow screen: the button goes under, not off the screen */
+    .links-button[aria-pressed="true"] { background: var(--pine); color: var(--on-pine); box-shadow: none; }
+    .links-button[aria-pressed="true"]:hover:not(:disabled) { background: var(--pine-deep); }
+    .links-box { margin-top: 10px; }
+    #tweet-links {
+      display: block;
+      width: 100%;
+      min-height: 120px;
+      max-height: 50vh;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--sheet);
+      color: var(--ink);
+      font: inherit;
+      font-size: 16px;
+      line-height: 1.5;
+      resize: vertical;
+      direction: ltr;
+      text-align: left;
+    }
+    #tweet-links:placeholder-shown { direction: rtl; text-align: right; }
+    #tweet-links:focus { outline: none; border-color: var(--pine); box-shadow: 0 0 0 3px rgba(15, 107, 80, 0.16); }
+    .links-foot { display: flex; align-items: center; gap: 8px; margin-top: 6px; color: var(--muted); font-size: 12px; font-weight: 600; }
+    .links-foot .btn { margin-inline-start: auto; min-height: 28px; height: 28px; }
+    #links-count.is-bad { color: var(--clay); }
     #group-box {
       margin-top: 10px;
       margin-bottom: 14px;
@@ -716,7 +746,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <h2>القروب</h2>
             <p>يُفتح صندوق الدردشة، وتُعرض القروبات فقط. اختر واحدًا ثم العدد.</p>
           </div>
-          <div class="token-row">
+          <div class="token-row groups-row">
             <button id="groups-button" class="btn btn-ghost" type="button">عرض القروبات</button>
             <label class="wait-groups" for="wait-groups">
               <input id="wait-groups" type="checkbox" checked>
@@ -724,13 +754,22 @@ EMBEDDED_PAGE = r'''<!doctype html>
               <input id="wait-groups-sec" class="wait-sec" type="number" min="1" max="120" step="1" value="30" inputmode="numeric" aria-label="ثواني الانتظار قبل التقاط القروبات">
               ث
             </label>
+            <button id="links-button" class="btn btn-ghost links-button" type="button" aria-pressed="false" aria-controls="links-box" title="روابط التغريدات" aria-label="روابط التغريدات">الروابط</button>
           </div>
           <div id="group-box" class="saved-sessions" hidden>
             <p class="field-label">اختر قروبًا</p>
             <ul id="group-list" class="saved-list"></ul>
           </div>
+          <div id="links-box" class="links-box" hidden>
+            <textarea id="tweet-links" rows="5" maxlength="200000" autocomplete="off" autocapitalize="off" spellcheck="false"
+                      placeholder="الصق روابط التغريدات هنا، كل رابط في سطر" aria-label="روابط التغريدات"></textarea>
+            <div class="links-foot">
+              <span id="links-count" aria-live="polite"></span>
+              <button id="links-clear" class="btn btn-ghost" type="button">مسح</button>
+            </div>
+          </div>
           <div class="options">
-            <span class="opt">
+            <span id="group-wait-opt" class="opt">
               <input id="group-wait-on" type="checkbox" checked>
               <label for="group-wait-on" title="انتظار داخل القروب قبل التمرير والجمع">قبل الجمع</label>
               <input id="group-wait-sec" class="wait-sec" type="number" min="0" max="300" step="1" value="30" inputmode="numeric" aria-label="ثواني الانتظار داخل القروب">
@@ -747,7 +786,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
               <input id="phone-height" class="wait-sec" type="number" min="600" max="25000" step="1" value="10000" inputmode="numeric" aria-label="طول شاشة الجوال أثناء الجمع بالبكسل">
             </span>
           </div>
-          <div class="stop-row">
+          <div id="stop-row" class="stop-row">
             <input id="stop-tweet" name="stop_tweet" type="text" maxlength="300" autocomplete="off" spellcheck="false"
                    placeholder="رابط التغريدة المحددة" aria-label="التغريدة المحددة">
           </div>
@@ -925,6 +964,73 @@ EMBEDDED_PAGE = r'''<!doctype html>
   }
   const groupBox = document.getElementById("group-box");
   const groupList = document.getElementById("group-list");
+  // «روابط التغريدات»: instead of a group, the task runs on the tweets pasted in this box. Meanwhile the
+  // groups, the group's tweet and the wait before collecting hide; «عرض القروبات» brings them back.
+  const linksButton = document.getElementById("links-button");
+  const linksBox = document.getElementById("links-box");
+  const linksField = document.getElementById("tweet-links");
+  const linksCount = document.getElementById("links-count");
+  const stopRow = document.getElementById("stop-row");
+  const groupWaitOpt = document.getElementById("group-wait-opt");
+  const MAX_LINKS = {{ max_links|tojson }};
+  let linksMode = false;
+  // Each tweet in the pasted text once, in order: "handle/id", or "id" for a link without the
+  // author's name (x.com/i/web/status/…) or a bare tweet number.
+  function pastedTweets(text) {
+    const seen = new Set();
+    const found = [];
+    const add = (handle, id) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      found.push(handle && !/^(i|web)$/i.test(handle) ? handle + "/" + id : id);
+    };
+    for (const token of String(text || "").split(/[\s,،]+/)) {
+      const pattern = /(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})(?:\/web)?\/status(?:es)?\/(\d{6,25})/gi;
+      let match;
+      let any = false;
+      while ((match = pattern.exec(token))) {
+        any = true;
+        add(match[1], match[2]);
+      }
+      if (!any && /^\d{15,25}$/.test(token)) add("", token);
+    }
+    return found;
+  }
+  function showLinksCount() {
+    const count = pastedTweets(linksField.value).length;
+    linksCount.textContent = count ? count + " تغريدة" + (count > MAX_LINKS ? " · الحد الأقصى " + MAX_LINKS : "") : "لم يُلصق أي رابط بعد";
+    linksCount.classList.toggle("is-bad", count > MAX_LINKS);
+  }
+  function setLinksMode(on) {
+    linksMode = on;
+    linksButton.setAttribute("aria-pressed", on ? "true" : "false");
+    linksBox.hidden = !on;
+    stopRow.hidden = on;
+    groupWaitOpt.hidden = on;
+    groupBox.hidden = on || groupNames.length === 0;
+    try {
+      localStorage.setItem("x_links_mode", on ? "1" : "0");
+    } catch (_) {}
+    if (on) showLinksCount();
+  }
+  linksButton.addEventListener("click", () => {
+    setLinksMode(!linksMode);
+    if (linksMode && !linksField.value.trim()) linksField.focus();
+  });
+  linksField.addEventListener("input", () => {
+    showLinksCount();
+    try {
+      localStorage.setItem("x_tweet_links", linksField.value);
+    } catch (_) {}
+  });
+  document.getElementById("links-clear").addEventListener("click", () => {
+    linksField.value = "";
+    try {
+      localStorage.removeItem("x_tweet_links");
+    } catch (_) {}
+    showLinksCount();
+    linksField.focus();
+  });
   const commentToggle = document.getElementById("action-comment");
   const geminiFields = document.getElementById("gemini-fields");
   const geminiKey = document.getElementById("gemini-key");
@@ -977,6 +1083,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
   let sessionRows = [];
   let groupNames = [];
   let selectedGroup = localStorage.getItem("x_selected_group") || "";
+  // The links box as it was left on this browser (its text, and whether it was the one showing).
+  try {
+    linksField.value = localStorage.getItem("x_tweet_links") || "";
+    if (localStorage.getItem("x_links_mode") === "1") setLinksMode(true);
+  } catch (_) {}
 
   function clientId() {
     const key = "x_desk_client";
@@ -1159,14 +1270,14 @@ EMBEDDED_PAGE = r'''<!doctype html>
     taskList.prepend(card);
     const paint = (data) => {
       const phase = data.phase || "collect";
-      const titles = {login: "فتح القروب", collect: "جمع", act: "تنفيذ"};
+      const titles = {login: "فتح القروب", prepare: "تجهيز", collect: "جمع", act: "تنفيذ"};
       card.querySelector(".task-phase").textContent = titles[phase] || "جارٍ العمل";
       card.querySelector(".task-msg").textContent = data.message || "";
       const current = phase === "act" ? (data.done || 0) : (data.collected || 0);
       const total = data.requested || 0;
       card.querySelector(".task-count").textContent = total ? current + " / " + total : String(current);
       const meter = card.querySelector(".meter");
-      const indeterminate = data.status === "running" && (phase === "login" || !total);
+      const indeterminate = data.status === "running" && (phase === "login" || phase === "prepare" || !total);
       meter.classList.toggle("is-indeterminate", indeterminate);
       card.querySelector(".task-bar").style.width = indeterminate ? "" : Math.max(0, Math.min(100, total ? Math.round((current / total) * 100) : 100)) + "%";
       stopButton.hidden = data.status !== "running";
@@ -1441,7 +1552,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     progressPanel.scrollIntoView({block: "nearest", behavior: reduceMotion ? "auto" : "smooth"});
     const phase = data.phase || "collect";
-    const titles = {login: "فتح القروب", collect: "جمع تغريدات القروب", act: "تنفيذ الإجراءات"};
+    const titles = {login: "فتح القروب", prepare: "تجهيز المهمة", collect: "جمع تغريدات القروب", act: "تنفيذ الإجراءات"};
     progressTitle.textContent = titles[phase] || "جارٍ العمل";
     progressMessage.textContent = data.message || "";
     const current = phase === "act" ? (data.done || 0) : (data.collected || 0);
@@ -1449,7 +1560,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     progressCount.textContent = String(current);
     progressDenom.textContent = total ? " / " + total : "";
     const pct = total ? Math.max(0, Math.min(100, Math.round((current / total) * 100))) : 0;
-    const indeterminate = phase === "login" || !total;
+    const indeterminate = phase === "login" || phase === "prepare" || !total;
     meter.classList.toggle("is-indeterminate", indeterminate);
     meterBar.style.width = indeterminate ? "" : pct + "%";
     meter.setAttribute("aria-valuenow", String(pct));
@@ -1629,7 +1740,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   quickVerify.addEventListener("click", verifySession);
 
   function renderGroups() {
-    groupBox.hidden = groupNames.length === 0;
+    groupBox.hidden = linksMode || groupNames.length === 0;
     // Three rows, or fewer when there are fewer groups (no empty rows under them).
     groupList.style.gridTemplateRows = "repeat(" + Math.max(1, Math.min(3, groupNames.length)) + ", auto)";
     groupList.replaceChildren();
@@ -1655,6 +1766,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   }
 
   groupsButton.addEventListener("click", async () => {
+    if (linksMode) setLinksMode(false);
     const authToken = tokenField.value.trim();
     const pin = pinField.value.trim();
     if (!authToken) { showNotice("أدخل رمز الجلسة أولًا.", false); revealField(tokenField); return; }
@@ -1688,10 +1800,18 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const stopMatch = stopRaw.match(/status\/(\d{6,25})/);
     const stopId = stopMatch ? stopMatch[1] : (/^\d{15,25}$/.test(stopRaw) ? stopRaw : "");
     const actions = selectedActions();
+    const byLinks = linksMode;
+    const links = byLinks ? pastedTweets(linksField.value) : [];
     if (!authToken) { showNotice("أدخل الرمز أولًا.", false); revealField(tokenField); return; }
-    if (!/^\d{4,8}$/.test(pin)) { showNotice("أدخل رمز الدردشة.", false); revealField(pinField); return; }
-    if (!selectedGroup) { showNotice("اعرض القروبات ثم اختر واحدًا.", false); return; }
-    if (!stopId) { showNotice("الصق رابط التغريدة المحددة أو رقمها.", false); stopField.focus(); return; }
+    if (byLinks) {
+      // No chat and no group: only the tweets are needed (the chat PIN is not).
+      if (!links.length) { showNotice("الصق رابط تغريدة واحدًا على الأقل.", false); linksField.focus(); return; }
+      if (links.length > MAX_LINKS) { showNotice("الحد الأقصى " + MAX_LINKS + " رابط في المهمة الواحدة.", false); linksField.focus(); return; }
+    } else {
+      if (!/^\d{4,8}$/.test(pin)) { showNotice("أدخل رمز الدردشة.", false); revealField(pinField); return; }
+      if (!selectedGroup) { showNotice("اعرض القروبات ثم اختر واحدًا.", false); return; }
+      if (!stopId) { showNotice("الصق رابط التغريدة المحددة أو رقمها.", false); stopField.focus(); return; }
+    }
     if (!actions.length) { showNotice("اختر إجراءً واحدًا على الأقل.", false); return; }
     if (actions.includes("comment") && geminiByOwner) {
       if (!geminiKey.value.trim()) { showNotice("لا يوجد مفتاح Gemini لهذه النسخة. اطلبه من صاحب البرنامج.", false); return; }
@@ -1702,32 +1822,33 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
     repostButton.disabled = true;
     try {
-      const started = await postJson("/group-run", {
+      const task = {
         auth_token: authToken,
         chat_pin: pin,
-        group: selectedGroup,
-        stop_tweet: stopRaw,
         actions,
         gemini_api_key: geminiKey.value.trim(),
         gemini_model: geminiModel.value.trim(),
         reply_voice: selectedVoice(),
-        group_wait: groupWaitOn.checked ? secondsFrom(groupWaitSec, 0, 300, 30) : null,
         account_profiles: accountProfilesOn.checked ? secondsFrom(accountProfiles, 1, 5, 1) : 1,
         phone_screen: phoneScreen.checked,
         phone_height: secondsFrom(phoneHeight, 600, 25000, 10000)
-      });
+      };
+      if (byLinks) task.links = links;
+      else Object.assign(task, {group: selectedGroup, stop_tweet: stopRaw, group_wait: groupWaitOn.checked ? secondsFrom(groupWaitSec, 0, 300, 30) : null});
+      const started = await postJson("/group-run", task);
       if (!started.success || !started.job_id || !started.job_key) {
         showNotice(started.message || "تعذّر بدء التنفيذ.", false);
         return;
       }
       const account = (sessionAccount.textContent || "").replace("الجلسة المحفوظة: ", "");
+      const name = byLinks ? "روابط (" + links.length + ")" : selectedGroup;
       followTask({
         id: started.job_id,
         key: started.job_key,
-        title: selectedGroup + (account ? " · " + account : "") + (phoneScreen.checked ? " · جوال " + secondsFrom(phoneHeight, 600, 25000, 10000) : ""),
+        title: name + (account ? " · " + account : "") + (phoneScreen.checked ? " · جوال " + secondsFrom(phoneHeight, 600, 25000, 10000) : ""),
         startedAt: Date.now()
       });
-      showNotice("بدأت مهمة «" + selectedGroup + "». يمكن بدء مهمة أخرى على نفس الحساب أو حساب مختلف.", true);
+      showNotice((byLinks ? "بدأت مهمة على " + links.length + " تغريدة من الروابط." : "بدأت مهمة «" + selectedGroup + "».") + " يمكن بدء مهمة أخرى على نفس الحساب أو حساب مختلف.", true);
     } catch (_) {
       showNotice("تعذّر الاتصال أثناء التنفيذ.", false);
     } finally {
@@ -5155,9 +5276,31 @@ def job_cancelled(job_id: str) -> bool:
 
 
 DEFAULT_GROUP_WAIT_SECONDS = 8
+# «روابط التغريدات»: a task on tweets pasted on the page, instead of opening a group and collecting.
+# The page sends each tweet as "handle/id", or "id" when its link has no author's name.
+MAX_TWEET_LINKS = MAX_REPOSTS_REQUEST
+LINKS_TASK_NAME = "روابط التغريدات"
 
 
-def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, phone_height: int = 0, reply_voice: str = DEFAULT_REPLY_VOICE) -> None:
+def tweet_links_from(entries) -> list[dict]:
+    """The pasted tweets as the same {"url", "text"} rows a group's collecting gives: each tweet
+    once, in the order pasted."""
+    items: list[dict] = []
+    seen: set[str] = set()
+    for entry in entries if isinstance(entries, list) else []:
+        match = re.fullmatch(r"(?:([A-Za-z0-9_]{1,15})/)?(\d{6,25})", str(entry or "").strip())
+        if not match or match.group(2) in seen:
+            continue
+        handle, status_id = match.group(1) or "", match.group(2)
+        seen.add(status_id)
+        if handle.lower() in _HANDLE_NOT_A_USER:
+            handle = ""
+        url = f"https://x.com/{handle}/status/{status_id}" if handle else f"https://x.com/i/web/status/{status_id}"
+        items.append({"url": url, "text": ""})
+    return items
+
+
+def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, profiles_per_account: int = 1, phone_height: int = 0, reply_voice: str = DEFAULT_REPLY_VOICE, tweet_links: list[dict] | None = None) -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
             raise JobStopped
@@ -5179,7 +5322,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
         else:
             publish_job(job_id, phase=phase, message="فتح الدردشة والقروب…")
 
-    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, phone_height, reply_voice)
+    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, profiles_per_account, phone_height, reply_voice, tweet_links)
 
     def work(page):
         try:
@@ -5192,7 +5335,27 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 prefix = list(saved["results"]) if isinstance(saved.get("results"), list) else []
             if items and len(prefix) > len(items):
                 prefix = prefix[: len(items)]
-            if not items:
+            if not items and tweet_links:
+                # «روابط التغريدات»: the tweets were pasted on the page, so no chat, no group and no
+                # collecting: check the session, then straight to the actions.
+                publish_job(job_id, phase="prepare", message="التحقق من الجلسة…")
+                if not ensure_logged_in(page):
+                    publish_job(job_id, status="done", success=False, message="فشل التحقق: الجلسة غير مسجّلة الدخول.")
+                    return
+                accept_cookies(page)
+                handle = read_session_username(page)
+                if handle:
+                    remember_session(auth_token, handle, pin)
+                # A tweet by an ignored account leaves no trace here either (one whose link has no
+                # author's name is caught once it is open, as for a group).
+                items = [dict(item) for item in tweet_links if not tweet_is_ignored(str(item.get("url") or ""))]
+                if not items:
+                    publish_job(job_id, status="done", success=False, message="لا توجد تغريدات للتنفيذ.")
+                    return
+                prefix = []
+                publish_job(job_id, phase="act", collected=len(items), requested=len(items), items=items,
+                            message=f"بدأ تنفيذ الإجراءات على {len(items)} تغريدة من الروابط.")
+            elif not items:
                 publish_job(job_id, phase="login", message="التحقق من الجلسة ثم فتح الدردشة…")
                 if not ensure_logged_in(page):
                     publish_job(job_id, status="done", success=False, message="فشل التحقق: الجلسة غير مسجّلة الدخول.")
@@ -5351,6 +5514,12 @@ def valid_auth_token(value: str) -> bool:
     return 20 <= len(value) <= 512
 
 
+@app.before_request
+def limit_request_size():
+    if (request.content_length or 0) > SMALL_REQUEST_BYTES and request.endpoint != "group_run_endpoint":
+        abort(413)
+
+
 @app.after_request
 def secure_response(response):
     response.headers["Cache-Control"] = "no-store, max-age=0"
@@ -5401,7 +5570,7 @@ def login_page(access_path: str):
         csrf_token = secrets.token_urlsafe(32)
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
-        PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(),
+        PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(), max_links=MAX_TWEET_LINKS,
         content_ready=content_ready.is_set() or CONTENT_FILE.is_file(),
     ))
     return response
@@ -6530,21 +6699,39 @@ def group_run_endpoint(access_path: str):
         return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
     auth_token = str(data.get("auth_token", "")).strip()
     pin = str(data.get("chat_pin", "")).strip()
-    group_name = re.sub(r"\s+", " ", str(data.get("group", ""))).strip()
-    stop_raw = str(data.get("stop_tweet") or "").strip()
-    stop_id = extract_status_id(stop_raw) if stop_raw else ""
+    # «روابط التغريدات»: the page sends the pasted tweets instead of a group (no chat PIN needed then).
+    by_links = data.get("links") is not None
+    tweet_links: list[dict] = []
+    if by_links:
+        group_name, stop_raw, stop_id = LINKS_TASK_NAME, "", ""
+        if not valid_chat_pin(pin):
+            pin = ""
+    else:
+        group_name = re.sub(r"\s+", " ", str(data.get("group", ""))).strip()
+        stop_raw = str(data.get("stop_tweet") or "").strip()
+        stop_id = extract_status_id(stop_raw) if stop_raw else ""
     requested_actions = data.get("actions")
     if not valid_auth_token(auth_token):
         return jsonify(success=False, message="أدخل auth_token صالحًا."), 400
-    if not valid_chat_pin(pin):
-        return jsonify(success=False, message="رمز الدردشة يجب أن يكون من ٤ إلى ٨ أرقام."), 400
-    if not group_name or len(group_name) > 80:
-        return jsonify(success=False, message="اختر قروبًا من القائمة."), 400
-    if stop_raw and not stop_id:
-        return jsonify(success=False, message="رابط التغريدة غير صالح. الصق رابطها أو رقمها."), 400
-    if not stop_id:
-        return jsonify(success=False, message="الصق رابط التغريدة المحددة أو رقمها."), 400
-    requested_count = 0
+    if by_links:
+        if not isinstance(data.get("links"), list) or len(data["links"]) > MAX_TWEET_LINKS:
+            return jsonify(success=False, message=f"الحد الأقصى {MAX_TWEET_LINKS} رابط في المهمة الواحدة."), 400
+        tweet_links = tweet_links_from(data["links"])
+        if not tweet_links:
+            return jsonify(success=False, message="الصق رابط تغريدة واحدًا على الأقل."), 400
+        tweet_links = [item for item in tweet_links if not tweet_is_ignored(item["url"])]
+        if not tweet_links:
+            return jsonify(success=False, message="لا توجد تغريدات للتنفيذ."), 400
+    else:
+        if not valid_chat_pin(pin):
+            return jsonify(success=False, message="رمز الدردشة يجب أن يكون من ٤ إلى ٨ أرقام."), 400
+        if not group_name or len(group_name) > 80:
+            return jsonify(success=False, message="اختر قروبًا من القائمة."), 400
+        if stop_raw and not stop_id:
+            return jsonify(success=False, message="رابط التغريدة غير صالح. الصق رابطها أو رقمها."), 400
+        if not stop_id:
+            return jsonify(success=False, message="الصق رابط التغريدة المحددة أو رقمها."), 400
+    requested_count = len(tweet_links)
     if not isinstance(requested_actions, list) or not requested_actions or any(not isinstance(action, str) or action not in ALLOWED_ACTIONS for action in requested_actions):
         return jsonify(success=False, message="اختر إجراء واحدًا على الأقل."), 400
     group_wait_raw = data.get("group_wait")
@@ -6586,20 +6773,25 @@ def group_run_endpoint(access_path: str):
         return jsonify(success=False, message=f"أقصى عدد للمهام المتزامنة هو {MAX_PARALLEL_JOBS}. أوقف مهمة أو انتظر انتهائها."), 429
     owner = session.get("csrf_token", "")
     client_id = request_client_id()
-    job_id, job_key = begin_job(owner, client_id, requested_count, "login", "فتح القروب…", "execute", group_name)
-    save_screen(
-        auth_token=auth_token,
-        chat_pin=pin,
-        group=group_name,
-        stop_tweet=stop_raw,
-        actions=requested_actions,
-        job_id=job_id,
-        job_key=job_key,
-        started_at=time.time(),
-    )
+    if by_links:
+        job_id, job_key = begin_job(owner, client_id, requested_count, "prepare", "التحقق من الجلسة…", "execute", group_name)
+        # The group chosen on the page, and its tweet, stay as they were for the next group task.
+        save_screen(auth_token=auth_token, actions=requested_actions, job_id=job_id, job_key=job_key, started_at=time.time())
+    else:
+        job_id, job_key = begin_job(owner, client_id, requested_count, "login", "فتح القروب…", "execute", group_name)
+        save_screen(
+            auth_token=auth_token,
+            chat_pin=pin,
+            group=group_name,
+            stop_tweet=stop_raw,
+            actions=requested_actions,
+            job_id=job_id,
+            job_key=job_key,
+            started_at=time.time(),
+        )
     threading.Thread(
         target=run_group_job,
-        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, phone_height, reply_voice),
+        args=(job_id, auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "", stop_id, group_wait_s, profiles_per_account, phone_height, reply_voice, tweet_links),
         daemon=True,
     ).start()
     return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأ التنفيذ.")
