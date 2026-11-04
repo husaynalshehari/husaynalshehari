@@ -5903,7 +5903,14 @@ def fx_tweet_views(status_id: str) -> tuple[str, int | None, str, dict]:
         views = None
     quote = tweet.get("quote") if isinstance(tweet.get("quote"), dict) else {}
     about = {"text": str(tweet.get("text") or "").strip()[:1000], "quote": str(quote.get("text") or "").strip()[:500],
-             "media": bool(tweet.get("media"))}
+             "media": bool(tweet.get("media")), "photo": ""}
+    media = tweet.get("media") if isinstance(tweet.get("media"), dict) else {}
+    for item in media.get("all") or []:
+        if isinstance(item, dict):
+            photo = str((item.get("url") if item.get("type") == "photo" else item.get("thumbnail_url")) or "")
+            if photo.startswith("https://pbs.twimg.com/"):
+                about["photo"] = photo.replace("name=orig", "name=small")
+                break
     return "ok", None if views is None else int(views), str(tweet.get("url") or ""), about
 
 
@@ -6052,7 +6059,7 @@ def day_spans(data: dict) -> list[tuple[int, int]]:
 # the post with its two images, ready to copy and download, and what it all cost.
 GROK_URL = "https://api.x.ai/v1/responses"
 GROK_IMAGES_URL = "https://api.x.ai/v1/images/generations"
-GROK_DEFAULT_MODEL = "grok-4.7"
+GROK_DEFAULT_MODEL = "grok-build-0.1"       # the owner found Grok's build model the most creative
 GROK_DEFAULT_IMAGE_MODEL = "grok-imagine-image-2.0"
 GROK_PATH = DATA_DIR / "grok.json"
 GROK_LAST_PATH = DATA_DIR / "grok_last.json"
@@ -6071,8 +6078,11 @@ grok_state: dict = {"running": False, "step": "", "error": "", "result": None, "
 
 def grok_settings() -> dict:
     data = read_private_json(GROK_PATH) or {}
+    model = str(data.get("model") or "").strip()
+    if data.get("version") != 2 and model == "grok-4.7":
+        model = ""                               # saved when grok-4.7 was the default: the build model now
     return {"api_key": str(data.get("api_key") or "").strip(),
-            "model": str(data.get("model") or "").strip() or GROK_DEFAULT_MODEL,
+            "model": model or GROK_DEFAULT_MODEL,
             "image_model": str(data.get("image_model") or "").strip() or GROK_DEFAULT_IMAGE_MODEL}
 
 
@@ -6101,6 +6111,10 @@ def grok_error_detail(body: bytes) -> str:
         return ""
 
 
+class GrokToolsRefused(RuntimeError):
+    """The model does not take the X search tool."""
+
+
 def grok_request(api_key: str, body: dict, url: str = "", optional: tuple = ("reasoning",), what: str = "الطلب") -> dict:
     """One call to xAI (the Responses API unless another url is given). An optional field the model does
     not take (named in its refusal) is left out and the call made once more."""
@@ -6126,6 +6140,8 @@ def grok_request(api_key: str, body: dict, url: str = "", optional: tuple = ("re
                 raise RuntimeError("مفتاح Grok غير صالح أو بلا صلاحية. غيّره ثم أعد المحاولة.") from exc
             if exc.code == 429:
                 raise RuntimeError("تجاوزت حد استخدام Grok أو نفد رصيده. حاول لاحقًا.") from exc
+            if exc.code in (400, 422) and body.get("tools") and re.search(r"tool|x_search|search", detail, re.I):
+                raise GrokToolsRefused(detail[:160]) from exc
             if exc.code == 404 or (exc.code == 400 and "model" in detail.lower()):
                 raise RuntimeError("رفض Grok اسم النموذج: " + (detail[:160] or f"رمز {exc.code}")) from exc
             raise RuntimeError((f"رفض Grok {what}: " + detail[:160]) if detail else f"تعذّر الاتصال بـ Grok (رمز {exc.code}).") from exc
@@ -6168,20 +6184,15 @@ def grok_text_estimate(model: str, usage) -> tuple[float | None, int]:
     return (tokens_in * price[0] + tokens_out * price[1]) / 1_000_000 + fetched * GROK_POST_FETCH_PRICE, fetched
 
 
-def grok_write_post(api_key: str, model: str, sources: list[dict]) -> dict:
-    """Grok opens the ticked posts on X and writes ONE new post from their idea, and two image prompts.
-    Returns {"post", "images", "idea", "raw" (its text when it gave no post), "cost", "fetched"}."""
-    listing = []
-    for number, source in enumerate(sources, 1):
-        views = source.get("views")
-        line = f"{number}. {source['url']} (id {source['id']})" + (f" · {views:,} views" if isinstance(views, int) else "")
-        if source.get("text"):
-            line += "\n   Text we have: " + re.sub(r"\s+", " ", source["text"])[:600]
-        listing.append(line)
-    rules = (
-        "You write viral posts for X (Twitter).\n"
-        "1. Open each post listed below with X search (by its link or id) and look at it fully: its text, its "
-        "images or video, and how people reacted to it. You do not need its replies.\n"
+def grok_rules(searching: bool) -> str:
+    """What Grok is asked. searching: it opens the posts itself with X search; else it gets each one's text
+    and photo with the request."""
+    look = ("1. Open each post listed below with X search (by its link or id) and look at it fully: its text, its "
+            "images or video, and how people reacted to it. You do not need its replies.\n") if searching else (
+            "1. Look closely at each post below: its text and its photo (each photo comes right after the line "
+            "naming its post).\n")
+    return (
+        "You write viral posts for X (Twitter).\n" + look +
         "2. From these posts take the idea (what they share, or the strongest hook among them) and write ONE new "
         "post. It must be new content: never copy or lightly reword any of them.\n"
         "3. The post: very short (one line, two at most), in the same language and dialect as the posts, and "
@@ -6196,12 +6207,66 @@ def grok_write_post(api_key: str, model: str, sources: list[dict]) -> dict:
         '{"post": "...", "images": ["first image prompt", "second image prompt"], '
         '"idea": "one short line, in the posts\' language, on the idea you took"}'
     )
-    answer = grok_request(api_key, {
-        "model": model,
-        "input": [{"role": "system", "content": rules}, {"role": "user", "content": "Posts:\n\n" + "\n\n".join(listing)}],
-        "tools": [{"type": "x_search", "enable_image_understanding": True}],
-        "reasoning": {"effort": "medium"},
-    }, what="الطلب")
+
+
+def grok_listing(sources: list[dict]) -> str:
+    lines = []
+    for number, source in enumerate(sources, 1):
+        views = source.get("views")
+        line = f"{number}. {source['url']} (id {source['id']})" + (f" · {views:,} views" if isinstance(views, int) else "")
+        if source.get("text"):
+            line += "\n   Text we have: " + re.sub(r"\s+", " ", source["text"])[:600]
+        if source.get("quote"):
+            line += "\n   It quotes: " + re.sub(r"\s+", " ", source["quote"])[:300]
+        lines.append(line)
+    return "Posts:\n\n" + "\n\n".join(lines)
+
+
+def grok_write_post(api_key: str, model: str, sources: list[dict], on_step=None) -> dict:
+    """Grok opens the ticked posts on X and writes ONE new post from their idea, and two image prompts.
+    A model that cannot use X search gets each post's text and photo (from FxTwitter) instead.
+    Returns {"post", "images", "idea", "raw" (its text when it gave no post), "cost", "fetched", "searched"}."""
+    def ask(searching: bool, photos: dict) -> dict:
+        content: str | list = grok_listing(sources)
+        if photos:
+            content = [{"type": "input_text", "text": content}]
+            for number, source in enumerate(sources, 1):
+                if photos.get(source["id"]):
+                    content += [{"type": "input_text", "text": f"Photo of post {number}:"},
+                                {"type": "input_image", "image_url": photos[source["id"]]}]
+        body = {"model": model, "input": [{"role": "system", "content": grok_rules(searching)}, {"role": "user", "content": content}],
+                "reasoning": {"effort": "medium"}}
+        if searching:
+            body["tools"] = [{"type": "x_search", "enable_image_understanding": True}]
+        return grok_request(api_key, body, what="الطلب")
+    searched = True
+    try:
+        answer = ask(True, {})
+    except GrokToolsRefused:
+        # This model takes no X search: give it each post's own text and first photo instead.
+        searched = False
+        photos: dict[str, str] = {}
+        for number, source in enumerate(sources, 1):
+            if on_step:
+                on_step(f"النموذج لا يفتح التغريدات بالبحث، فيجلب نصوصها وصورها… {number} من {len(sources)}")
+            outcome, _, _, about = fx_tweet_views(source["id"])
+            if outcome == "ok":
+                source["text"] = about["text"] or source["text"]
+                source["quote"] = about["quote"]
+                if about.get("photo"):
+                    photos[source["id"]] = about["photo"]
+            if number < len(sources):
+                time.sleep(1.0)
+        if on_step:
+            on_step("يكتب Grok المنشور…")
+        try:
+            answer = ask(False, photos)
+        except GrokToolsRefused:
+            raise RuntimeError("رفض Grok الطلب.")
+        except RuntimeError as exc:
+            if not photos or not re.search(r"image|photo|url|fetch|download", str(exc), re.I):
+                raise
+            answer = ask(False, {})              # the photos could not be read: the texts alone
     text = grok_answer_text(answer).strip()
     data: dict = {}
     match = re.search(r"\{.*\}", text, re.S)
@@ -6216,7 +6281,8 @@ def grok_write_post(api_key: str, model: str, sources: list[dict]) -> dict:
               if isinstance(prompt, str) and prompt.strip()] if isinstance(data.get("images"), list) else []
     estimate, fetched = grok_text_estimate(model, answer.get("usage"))
     return {"post": post, "images": images[:2], "idea": str(data.get("idea") or "").strip()[:300],
-            "raw": "" if post else text[:4000], "cost": grok_cost(answer.get("usage"), estimate), "fetched": fetched}
+            "raw": "" if post else text[:4000], "cost": grok_cost(answer.get("usage"), estimate), "fetched": fetched,
+            "searched": searched}
 
 
 def grok_make_image(api_key: str, image_model: str, prompt: str) -> tuple[bytes, str, float | None]:
@@ -6259,7 +6325,7 @@ def grok_create(api_key: str, model: str, image_model: str, ids: list[str]) -> N
         if not sources:
             raise RuntimeError("لم تعد هذه التغريدات محفوظة. أعد تحميل الصفحة.")
         step("يفتح Grok التغريدات ويكتب المنشور… (قد يأخذ دقيقة)")
-        written = grok_write_post(api_key, model, sources)
+        written = grok_write_post(api_key, model, sources, step)
         stamp = time.strftime("%Y%m%d%H%M%S") + secrets.token_hex(3)
         images: list[dict] = []
         costs = [written["cost"]]
@@ -6278,6 +6344,7 @@ def grok_create(api_key: str, model: str, image_model: str, ids: list[str]) -> N
         known = [cost for cost in costs if cost is not None]
         result = {"at": time.time(), "model": model, "image_model": image_model, "post": written["post"],
                   "idea": written["idea"], "images": images, "raw": written["raw"], "fetched": written["fetched"],
+                  "searched": written["searched"],
                   "cost": round(sum(known), 5) if known else None, "cost_partial": len(known) < len(costs),
                   "sources": [{"id": source["id"], "url": source["url"], "views": source["views"]} for source in sources]}
         try:
@@ -7663,7 +7730,8 @@ TWEETS_PAGE = r'''<!doctype html>
       }
       $("grok-result").hidden = false;
       const parts = [result.at ? checkedAt(result.at) : "", result.model || ""];
-      if (result.fetched) parts.push("فتح " + number.format(result.fetched) + " منشورًا");
+      if (result.searched === false) parts.push("لم يفتح التغريدات بالبحث، فقرأ نصوصها وصورها");
+      else if (result.fetched) parts.push("فتح " + number.format(result.fetched) + " منشورًا");
       if (typeof result.cost === "number") parts.push("التكلفة " + (result.cost_partial ? "أكثر من " : "") + "\u2066$" + result.cost.toFixed(4) + "\u2069");
       // Each part kept whole on a line (a phone wraps between them, not inside one).
       $("grok-meta").replaceChildren(...parts.filter(Boolean).flatMap((part, index) => {
@@ -8128,7 +8196,7 @@ def tweets_grok_key(access_path: str):
     key = key or grok_settings()["api_key"]
     if not key:
         return jsonify(success=False, message="أدخل مفتاح Grok."), 400
-    write_private_json(GROK_PATH, {"api_key": key, "model": model, "image_model": image_model})
+    write_private_json(GROK_PATH, {"version": 2, "api_key": key, "model": model, "image_model": image_model})
     return jsonify(success=True, key_hint=grok_key_hint(key), model=model, image_model=image_model, message="حُفظ مفتاح Grok.")
 
 
