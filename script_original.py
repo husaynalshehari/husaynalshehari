@@ -5672,14 +5672,15 @@ def collected_payload() -> list[dict]:
 # API (api.fxtwitter.com/status/<id>). It is asked slowly, one tweet every few seconds, so this server
 # is not blocked. If it is (too many requests), or several tweets in a row get no answer, the fetching
 # waits a few minutes (longer each time), then goes on where it stopped, more slowly than before.
-# The counts are kept with the saved tweets.
+# The counts are kept with the saved tweets. Only the days from 2 to 6 days ago can be checked (today's
+# and yesterday's views still grow), each once a day: after its check, its button waits for tomorrow.
 FX_STATUS_URL = "https://api.fxtwitter.com/status/{}"
 FX_GAP_SECONDS = (2.0, 3.5)          # between two tweets
 FX_SLOW_GAP_SECONDS = (5.0, 8.0)     # the same, once the service has asked to slow down
 FX_PAUSE_SECONDS = 180               # the first wait; the next ones wait 6, 9, 12 then 15 minutes
 FX_PAUSE_MAX_SECONDS = 900
 FX_MAX_PAUSES = 6                    # waits in a row with no answer between them: then it stops
-FX_FRESH_SECONDS = 600               # a count newer than this is not asked again
+VIEWS_DAYS = (2, 6)                  # the days that can be checked: 2 to 6 days ago (not today or yesterday)
 views_lock = threading.Lock()
 views_queue: deque = deque()
 views_state: dict = {"running": False, "paused_until": 0.0, "error": "", "removed": []}
@@ -5835,6 +5836,11 @@ def views_status_payload(since: float) -> dict:
                           if row.get("views_at") and row["views_at"] >= since - 2}
     state["now"] = now
     return state
+
+
+def local_day_number(seconds: float, offset_minutes: int) -> int:
+    """The calendar day (days since 1970) a moment falls on, at the viewer's UTC offset."""
+    return math.floor((seconds + offset_minutes * 60) / 86400)
 
 
 def day_spans(data: dict) -> list[tuple[int, int]]:
@@ -6992,8 +6998,16 @@ TWEETS_PAGE = r'''<!doctype html>
     const clock = new Intl.DateTimeFormat("ar-u-nu-latn", {hour: "numeric", minute: "2-digit"});
     const number = new Intl.NumberFormat("ar-u-nu-latn");
     const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
     const label = (key, when) => key === dayKey(now) ? "اليوم" : key === dayKey(yesterday) ? "أمس" : dayName.format(when);
+    // «عرض المشاهدات» is for the days from 2 to 6 days ago: today's and yesterday's views still grow.
+    const daysAgo = (key) => {
+      const [year, month, date] = key.split("-").map(Number);
+      return Math.round((todayStart - new Date(year, month - 1, date)) / 86400000);
+    };
+    const canCheck = (key) => daysAgo(key) >= 2 && daysAgo(key) <= 6;
+    const isToday = (seconds) => dayKey(new Date(seconds * 1000)) === dayKey(new Date());
     const safeLink = (url) => /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[^\s"'<>]+$/.test(url || "") ? url : "";
     const viewsText = (tweet) => !tweet.views_at ? "" : tweet.views == null ? "لا يوجد رقم" : number.format(tweet.views) + " مشاهدة";
     const showViews = (span, tweet) => {
@@ -7039,29 +7053,36 @@ TWEETS_PAGE = r'''<!doctype html>
     }
 
     function showDay(day, state) {
+      const status = day.status;
       const waiting = day.items.filter((item) => state && state.waiting.has(item.tweet.id)).length;
-      day.button.disabled = waiting > 0;
-      day.status.className = "vstatus";
+      status.className = "vstatus";
       if (waiting) {
+        if (day.button) day.button.disabled = true;
         let text = "يجلب المشاهدات ببطء لتجنّب الحظر… بقي " + waiting + " من " + day.items.length;
         if (state.paused) text = "متوقف مؤقتًا لتجنّب الحظر · يتابع بعد " + Math.floor(state.paused / 60) + ":" + pad(state.paused % 60) + " · بقي " + waiting + " من " + day.items.length;
-        day.status.textContent = text;
-        day.status.hidden = false;
+        status.textContent = text;
+        status.hidden = false;
         day.busy = true;
         return;
       }
       if (day.busy) order(day);      // just finished: sort it now (not while numbers arrive)
       day.busy = false;
-      if (state && state.error && day.asked) {
-        day.status.textContent = state.error;
-        day.status.className = "vstatus is-bad";
-        day.status.hidden = false;
-        return;
+      // Once a day: when every tweet of the day has today's count, its button waits for tomorrow.
+      const today = day.items.filter((item) => item.tweet.views_at && isToday(item.tweet.views_at)).length;
+      const done = today > 0 && today === day.items.length;
+      if (day.button) day.button.disabled = done;
+      const last = Math.max(0, ...day.items.map((item) => item.tweet.views_at || 0));
+      if (done) {
+        status.textContent = "مرتّبة من الأكثر مشاهدة · فُحصت " + clock.format(new Date(last * 1000)) + " · يُتاح الفحص مجددًا غدًا";
+      } else if (state && state.error && day.asked) {
+        status.textContent = state.error;
+        status.className = "vstatus is-bad";
+      } else if (today && day.button) {
+        status.textContent = "فُحصت " + today + " من " + day.items.length + " اليوم · اضغط «عرض المشاهدات» ليكمل";
+      } else {
+        status.textContent = last ? "مرتّبة من الأكثر مشاهدة · آخر فحص " + checkedAt(last) : "";
       }
-      const checked = day.items.map((item) => item.tweet.views_at || 0);
-      const last = Math.max(0, ...checked);
-      day.status.textContent = last ? "مرتّبة من الأكثر مشاهدة · آخر فحص " + checkedAt(last) : "";
-      day.status.hidden = !last;
+      status.hidden = !status.textContent;
     }
 
     list.forEach((day, index) => {
@@ -7074,11 +7095,15 @@ TWEETS_PAGE = r'''<!doctype html>
       const count = document.createElement("span");
       count.className = "count";
       count.textContent = day.items.length + " تغريدة";
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "vbtn";
-      button.textContent = "عرض المشاهدات";
-      summary.append(title, count, button);
+      summary.append(title, count);
+      let button = null;
+      if (canCheck(day.key)) {
+        button = document.createElement("button");
+        button.type = "button";
+        button.className = "vbtn";
+        button.textContent = "عرض المشاهدات";
+        summary.append(button);
+      }
       const status = document.createElement("p");
       status.className = "vstatus";
       status.hidden = true;
@@ -7117,7 +7142,7 @@ TWEETS_PAGE = r'''<!doctype html>
       }
       order(day);
       showDay(day, null);
-      button.addEventListener("click", async (event) => {
+      if (button) button.addEventListener("click", async (event) => {
         event.preventDefault();
         event.stopPropagation();
         details.open = true;
@@ -7133,7 +7158,7 @@ TWEETS_PAGE = r'''<!doctype html>
           const response = await fetch(apiRoot + "/tweets/views", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({ranges: [range], csrf_token: csrf})
+            body: JSON.stringify({ranges: [range], offset: -new Date().getTimezoneOffset(), csrf_token: csrf})
           });
           data = await response.json();
         } catch (_) {
@@ -7141,8 +7166,8 @@ TWEETS_PAGE = r'''<!doctype html>
         }
         if (!data.success) {
           status.textContent = data.message || "تعذّر البدء.";
-          status.className = "vstatus is-bad";
-          button.disabled = false;
+          status.className = data.done ? "vstatus" : "vstatus is-bad";
+          button.disabled = !!data.done;     // already checked today: the server refuses until tomorrow
           return;
         }
         apply(data);
@@ -7221,24 +7246,37 @@ def tweets_page(access_path: str):
 
 @app.post("/<access_path>/tweets/views")
 def tweets_views_start(access_path: str):
-    """«عرض المشاهدات»: queue a day's tweets for their current view count."""
+    """«عرض المشاهدات»: queue a day's tweets for their current view count. Only the days from 2 to 6
+    days ago (in the viewer's time zone), each once a day: a tweet already checked today is not asked
+    again, so a day whose tweets were all checked today waits for tomorrow."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
     data = request.get_json(silent=True) or {}
     if not csrf_ok(data):
         return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها."), 400
     spans = day_spans(data)
+    try:
+        offset = int(data.get("offset"))
+    except (TypeError, ValueError):
+        offset = None
+    if not spans or offset is None or abs(offset) > 14 * 60:
+        return jsonify(success=False, message="أعد تحميل الصفحة ثم حاول مرة أخرى."), 400
     now = time.time()
+    today = local_day_number(now, offset)
+    if any(not VIEWS_DAYS[0] <= today - local_day_number((start + end) / 2, offset) <= VIEWS_DAYS[1] for start, end in spans):
+        return jsonify(success=False, message="فحص المشاهدات متاح للأيام من قبل يومين إلى قبل ٦ أيام فقط."), 400
     with collected_lock:
         rows = [(row.get("views_at") or 0, -row["at"], status_id, row["url"]) for status_id, row in collected_tweets.items()
                 if any(start <= row["at"] < end for start, end in spans)]
+    rows = [entry for entry in rows if not tweet_is_ignored(entry[3])]
     if not rows:
         return jsonify(success=False, message="لا توجد تغريدات في هذا اليوم."), 400
-    # The ones never counted first (newest first), then the oldest counts; a count from the last
-    # 10 minutes is new enough. So pressing again after a stop goes on from where it stopped.
+    # The tweets not checked today: the never counted first (newest first), then the oldest counts.
+    # So pressing again after a stop goes on from where it stopped.
     rows.sort()
-    ids = [status_id for checked, _, status_id, url in rows
-           if checked < now - FX_FRESH_SECONDS and not tweet_is_ignored(url)]
+    ids = [status_id for checked, _, status_id, _ in rows if not checked or local_day_number(checked, offset) != today]
+    if not ids:
+        return jsonify(success=False, done=True, message="تم فحص هذا اليوم. يُتاح الفحص مجددًا غدًا."), 409
     queued = queue_views(ids)
     return jsonify(success=True, queued=queued, **views_status_payload(now))
 
