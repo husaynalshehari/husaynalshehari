@@ -748,7 +748,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
           </div>
           <div class="token-row groups-row">
             <button id="groups-button" class="btn btn-ghost" type="button">عرض القروبات</button>
-            <label class="wait-groups" for="wait-groups">
+            <label id="wait-groups-label" class="wait-groups" for="wait-groups">
               <input id="wait-groups" type="checkbox" checked>
               انتظار
               <input id="wait-groups-sec" class="wait-sec" type="number" min="1" max="120" step="1" value="30" inputmode="numeric" aria-label="ثواني الانتظار قبل التقاط القروبات">
@@ -965,13 +965,15 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const groupBox = document.getElementById("group-box");
   const groupList = document.getElementById("group-list");
   // «روابط التغريدات»: instead of a group, the task runs on the tweets pasted in this box. Meanwhile the
-  // groups, the group's tweet and the wait before collecting hide; «عرض القروبات» brings them back.
+  // groups, the group's tweet and the waits hide, and «عرض القروبات» reads «القروبات»: it brings back
+  // the groups already shown, without opening the browser and the chat again.
   const linksButton = document.getElementById("links-button");
   const linksBox = document.getElementById("links-box");
   const linksField = document.getElementById("tweet-links");
   const linksCount = document.getElementById("links-count");
   const stopRow = document.getElementById("stop-row");
   const groupWaitOpt = document.getElementById("group-wait-opt");
+  const waitGroupsLabel = document.getElementById("wait-groups-label");
   const MAX_LINKS = {{ max_links|tojson }};
   let linksMode = false;
   // Each tweet in the pasted text once, in order: "handle/id", or "id" for a link without the
@@ -1007,6 +1009,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
     linksBox.hidden = !on;
     stopRow.hidden = on;
     groupWaitOpt.hidden = on;
+    waitGroupsLabel.hidden = on;
+    groupsButton.textContent = on ? "القروبات" : "عرض القروبات";
     groupBox.hidden = on || groupNames.length === 0;
     try {
       localStorage.setItem("x_links_mode", on ? "1" : "0");
@@ -1766,7 +1770,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
   }
 
   groupsButton.addEventListener("click", async () => {
-    if (linksMode) setLinksMode(false);
+    if (linksMode) {
+      // «القروبات»: back to the groups shown before, at once (no browser, no chat).
+      setLinksMode(false);
+      if (!groupNames.length) showNotice("لا توجد قروبات معروضة بعد. اضغط «عرض القروبات» لجلبها.", true);
+      return;
+    }
     const authToken = tokenField.value.trim();
     const pin = pinField.value.trim();
     if (!authToken) { showNotice("أدخل رمز الجلسة أولًا.", false); revealField(tokenField); return; }
