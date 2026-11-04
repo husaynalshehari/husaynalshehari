@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import atexit
 import base64
-import concurrent.futures
 import gzip
 import hashlib
 import hmac
@@ -5661,161 +5660,6 @@ def collected_payload() -> list[dict]:
     return rows
 
 
-# «عرض الأكثر مشاهدة» in «عرض التغريدات»: Grok (xAI) opens each selected tweet on X with its X search
-# tool and reports the view count it sees there; this script keeps the 20 with the most. The key is
-# set in «توزيع البرنامج» and stays on the owner's server, so this works in the owner's copy only.
-GROK_URL = "https://api.x.ai/v1/responses"
-GROK_MODEL = "grok-4.7"
-GROK_POSTS_PER_ASK = 25
-GROK_PARALLEL = 3
-GROK_MAX_POSTS = 500
-GROK_TOP = 20
-# xAI's published prices (USD), for the approximate cost shown after a lookup.
-GROK_PRICE_INPUT = 2.00 / 1_000_000
-GROK_PRICE_OUTPUT = 6.00 / 1_000_000
-GROK_PRICE_POST = 5.00 / 1000
-grok_jobs_lock = threading.Lock()
-grok_jobs: dict[str, dict] = {}
-
-
-def owner_grok_key() -> str:
-    """The Grok key saved in «توزيع البرنامج» (beside this script); "" when there is none."""
-    return str((read_private_json(DATA_DIR / "distribution.json") or {}).get("grok_key") or "").strip()
-
-
-def views_number(value) -> int | None:
-    """A view count from Grok's answer (15300, "15,300", "15.3K", "1.2M") as an int; None if unknown."""
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return int(value) if value >= 0 else None
-    text = str(value).strip().replace(",", "").replace("٬", "").upper()
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([KMB])?", text)
-    if not match:
-        return None
-    return int(float(match.group(1)) * {"K": 1e3, "M": 1e6, "B": 1e9}.get(match.group(2) or "", 1))
-
-
-def grok_answer_text(answer: dict) -> str:
-    """The text of a Responses API answer: output[] → message → content[] → output_text."""
-    parts = []
-    for item in answer.get("output") or []:
-        if isinstance(item, dict) and item.get("type") == "message":
-            for content in item.get("content") or []:
-                if isinstance(content, dict) and content.get("type") == "output_text":
-                    parts.append(str(content.get("text") or ""))
-    return "\n".join(parts) or str(answer.get("output_text") or "")
-
-
-def grok_error_message(status: int, body: bytes) -> str:
-    detail = ""
-    try:
-        data = json.loads(body.decode("utf-8"))
-        error = data.get("error") if isinstance(data, dict) else None
-        detail = str((error.get("message") if isinstance(error, dict) else error) or data.get("message") or "")
-    except Exception:
-        detail = ""
-    if status in (401, 403):
-        return "مفتاح Grok غير صالح أو بلا صلاحية. راجعه في «توزيع البرنامج»."
-    if status == 429:
-        return "تجاوزت حد استخدام Grok أو نفد رصيده. حاول لاحقًا."
-    return ("رفض Grok الطلب: " + detail[:160]) if detail else f"تعذّر الاتصال بـ Grok (رمز {status})."
-
-
-def grok_usage_cost(usage: dict) -> float:
-    """Approximate cost of one answer from its usage: tokens and the posts its X search fetched."""
-    try:
-        tokens_in = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-        tokens_out = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
-        tools = usage.get("server_side_tool_usage_details") or {}
-        posts = int(tools.get("x_posts_fetched") or 0) if isinstance(tools, dict) else 0
-    except (TypeError, ValueError, AttributeError):
-        return 0.0
-    return tokens_in * GROK_PRICE_INPUT + tokens_out * GROK_PRICE_OUTPUT + posts * GROK_PRICE_POST
-
-
-def grok_post_views(api_key: str, posts: list[tuple[str, str]]) -> tuple[dict[str, int | None], dict]:
-    """Ask Grok how many views each post [(id, link)] has on X. Returns ({id: views or None}, usage).
-    A post Grok could not open, or whose count it did not see, is None: it is told never to guess."""
-    listing = "\n".join(f"{number}. id={post_id} {url}" for number, (post_id, url) in enumerate(posts, 1))
-    prompt = (
-        "For each X post below, use X search to open that post itself (by its id or link; its replies are not "
-        "needed) and read how many views X shows for it.\n"
-        "Reply with ONLY a JSON array, no other text, one object per post, exactly like:\n"
-        '[{"id": "1234567890123456789", "views": 15300}]\n'
-        'Rules: keep each id exactly as given. "views" is the number of views you actually saw on the post, as a '
-        "plain integer (12.3K = 12300). If you could not open the post, or it shows no view count, use null. "
-        "Never estimate or guess a number.\n\nPosts:\n" + listing
-    )
-    body = {
-        "model": GROK_MODEL,
-        "input": [{"role": "user", "content": prompt}],
-        "tools": [{"type": "x_search"}],
-        "include": ["no_inline_citations"],
-    }
-    asking = urllib.request.Request(GROK_URL, data=json.dumps(body).encode("utf-8"), method="POST", headers={
-        "Content-Type": "application/json", "Authorization": "Bearer " + api_key})
-    try:
-        with urllib.request.urlopen(asking, timeout=300) as response:
-            answer = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(grok_error_message(exc.code, exc.read(4096))) from exc
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise RuntimeError("تعذّر الوصول إلى Grok. تأكد أن الخادم متصل بالإنترنت.") from exc
-    if not isinstance(answer, dict):
-        raise RuntimeError("وصل رد غير مفهوم من Grok.")
-    wanted = {post_id for post_id, _ in posts}
-    views: dict[str, int | None] = {}
-    rows: list = []
-    match = re.search(r"\[.*\]", grok_answer_text(answer), re.S)
-    if match:
-        try:
-            rows = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            rows = []
-    for row in rows if isinstance(rows, list) else []:
-        if isinstance(row, dict):
-            post_id = re.sub(r"\D", "", str(row.get("id") or ""))
-            if post_id in wanted:
-                views[post_id] = views_number(row.get("views"))
-    usage = answer.get("usage") if isinstance(answer.get("usage"), dict) else {}
-    return views, usage
-
-
-def run_grok_top(job_id: str, api_key: str, posts: list[tuple[str, str]]) -> None:
-    """Ask Grok about the posts in groups of GROK_POSTS_PER_ASK, a few at a time, then keep the 20
-    with the most views."""
-    groups = [posts[i:i + GROK_POSTS_PER_ASK] for i in range(0, len(posts), GROK_POSTS_PER_ASK)]
-    found: dict[str, int | None] = {}
-    errors: list[str] = []
-    cost = 0.0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=GROK_PARALLEL) as pool:
-        asked = [pool.submit(grok_post_views, api_key, group) for group in groups]
-        for future in concurrent.futures.as_completed(asked):
-            try:
-                views, usage = future.result()
-                found.update(views)
-                cost += grok_usage_cost(usage)
-            except Exception as exc:
-                errors.append(str(exc) or "تعذّر سؤال Grok.")
-            with grok_jobs_lock:
-                grok_jobs[job_id]["done"] += 1
-                grok_jobs[job_id]["cost"] = round(cost, 4)
-    counted = {post_id: number for post_id, number in found.items() if number is not None}
-    top = sorted(counted.items(), key=lambda pair: pair[1], reverse=True)[:GROK_TOP]
-    with grok_jobs_lock:
-        job = grok_jobs[job_id]
-        job["top"] = [{"id": post_id, "views": number} for post_id, number in top]
-        job["unknown"] = len(posts) - len(counted)
-        job["cost"] = round(cost, 4)
-        if errors and len(errors) == len(groups):
-            job["status"], job["error"] = "error", errors[0]
-        else:
-            job["status"] = "done"
-            if errors:
-                job["warning"] = f"تعذّر فحص {len(errors)} من {len(groups)} دفعات: {errors[0]}"
-
-
 # Updates. Users and their keys live in g.py beside the owner's script ("توزيع البرنامج"),
 # which this script starts on its own port; a user's copy takes updates from it with its key.
 CONTROL_FILE = Path(__file__).resolve().with_name("g.py")
@@ -6903,7 +6747,7 @@ TWEETS_PAGE = r'''<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>التغريدات المجموعة</title>
   <style>
-    :root { --paper: #f3efe6; --sheet: #fffdf8; --ink: #1c1915; --muted: #6e675e; --line: #e4dcd0; --pine: #0f6b50; --clay: #8d3a32; color-scheme: light; }
+    :root { --paper: #f3efe6; --sheet: #fffdf8; --ink: #1c1915; --muted: #6e675e; --line: #e4dcd0; --pine: #0f6b50; color-scheme: light; }
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
     body { margin: 0; background: var(--paper); color: var(--ink); font-family: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif; line-height: 1.55; }
@@ -6925,22 +6769,6 @@ TWEETS_PAGE = r'''<!doctype html>
     .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 4px; color: var(--muted); font-size: 12px; }
     .meta .open { margin-inline-start: auto; color: var(--pine); font-weight: 700; text-decoration: none; }
     .empty { margin-top: 28px; text-align: center; color: var(--muted); }
-    summary .pick { flex: 0 0 auto; width: 20px; height: 20px; margin: 0; accent-color: var(--pine); cursor: pointer; }
-    .bar { position: sticky; bottom: 0; margin: 12px -12px 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); background: var(--sheet);
-      box-shadow: 0 -1px 0 var(--line), 0 -10px 24px rgba(28, 25, 21, 0.06); display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
-    #picked { color: var(--muted); font-size: 13px; }
-    .bar button { margin-inline-start: auto; min-height: 38px; padding: 0 14px; border: 0; border-radius: 8px; background: var(--pine); color: #f4fbf7;
-      font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; }
-    .bar button:disabled { opacity: 0.45; cursor: default; }
-    .note { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 12px; }
-    .note.is-bad { color: var(--clay); }
-    #top { margin-top: 10px; padding: 10px; border-radius: 14px; background: var(--sheet); box-shadow: inset 0 0 0 2px var(--pine); }
-    #top h2 { margin: 0 2px 6px; font-size: 16px; }
-    #top ol { padding: 0; }
-    #top li { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: start; }
-    .rank { grid-row: span 2; min-width: 26px; height: 26px; border-radius: 50%; background: var(--pine); color: #f4fbf7; font-size: 13px; font-weight: 700;
-      display: grid; place-items: center; }
-    .views { color: var(--pine); font-weight: 800; }
   </style>
 </head>
 <body>
@@ -6952,28 +6780,12 @@ TWEETS_PAGE = r'''<!doctype html>
       </div>
       <a class="back" href="{{ back }}">رجوع</a>
     </header>
-    <section id="top" hidden>
-      <h2>الأكثر مشاهدة</h2>
-      <ol id="top-list"></ol>
-    </section>
     <div id="days"></div>
     <p id="empty" class="empty" hidden>لم تُجمع تغريدات خلال آخر ٧ أيام.</p>
-    {% if grok %}
-    <div class="bar">
-      <span id="picked">حدّد يومًا أو أكثر</span>
-      <button id="top-button" type="button" disabled>عرض الأكثر مشاهدة</button>
-      <p id="bar-note" class="note"></p>
-    </div>
-    {% endif %}
   </main>
   <script>
   (() => {
     const tweets = {{ tweets|tojson }};
-    const grok = {{ grok|tojson }};
-    const grokReady = {{ grok_ready|tojson }};
-    const grokMax = {{ grok_max|tojson }};
-    const csrf = {{ csrf_token|tojson }};
-    const apiRoot = {{ api_root|tojson }};
     const pad = (n) => String(n).padStart(2, "0");
     const dayKey = (when) => when.getFullYear() + "-" + pad(when.getMonth() + 1) + "-" + pad(when.getDate());
     const dayName = new Intl.DateTimeFormat("ar-u-nu-latn", {weekday: "long", day: "numeric", month: "long"});
@@ -7006,19 +6818,6 @@ TWEETS_PAGE = r'''<!doctype html>
       count.className = "count";
       count.textContent = day.items.length + " تغريدة";
       summary.append(title, count);
-      if (grok) {
-        // Ticking a day selects all of that day's tweets.
-        const pick = document.createElement("input");
-        pick.type = "checkbox";
-        pick.className = "pick";
-        pick.setAttribute("aria-label", "تحديد تغريدات " + title.textContent);
-        pick.dataset.ids = day.items.map((item) => item.tweet.id).join(",");
-        const [year, month, date] = day.key.split("-").map(Number);
-        pick.dataset.start = new Date(year, month - 1, date).getTime() / 1000;
-        pick.dataset.end = new Date(year, month - 1, date + 1).getTime() / 1000;
-        pick.addEventListener("change", updatePicked);
-        summary.prepend(pick);
-      }
       const ol = document.createElement("ol");
       for (const item of day.items) {
         const li = document.createElement("li");
@@ -7052,158 +6851,6 @@ TWEETS_PAGE = r'''<!doctype html>
       details.append(summary, ol);
       box.append(details);
     });
-
-    // «عرض الأكثر مشاهدة»: the ticked days' tweets go to Grok, which reports each one's views on X.
-    const byId = new Map(tweets.map((tweet) => [tweet.id, tweet]));
-    const button = document.getElementById("top-button");
-    const picked = document.getElementById("picked");
-    const note = document.getElementById("bar-note");
-    let running = false;
-    let warned = false;   // the note holds a selection warning (cleared when it no longer applies)
-    function say(text, bad) {
-      if (!note) return;
-      note.textContent = text || "";
-      note.className = "note" + (bad ? " is-bad" : "");
-      warned = false;
-    }
-    function pickedIds() {
-      const ids = [];
-      for (const box of document.querySelectorAll("summary .pick:checked")) ids.push(...box.dataset.ids.split(",").filter(Boolean));
-      return [...new Set(ids)];
-    }
-    function updatePicked() {
-      if (!button) return;
-      const count = pickedIds().length;
-      picked.textContent = count ? "المحدد: " + count + " تغريدة" : "حدّد يومًا أو أكثر";
-      button.disabled = running || !count || !grokReady || count > grokMax;
-      if (running) return;
-      if (!grokReady) {
-        say("أضف مفتاح Grok من «توزيع البرنامج» أولًا.", true);
-        warned = true;
-      } else if (count > grokMax) {
-        say("الحد " + grokMax + " تغريدة في المرة الواحدة. حدّد أيامًا أقل.", true);
-        warned = true;
-      } else if (warned) {
-        say("");
-      }
-    }
-    const views = new Intl.NumberFormat("ar-u-nu-latn");
-    function showTop(data) {
-      const section = document.getElementById("top");
-      const list = document.getElementById("top-list");
-      list.replaceChildren();
-      (data.top || []).forEach((row, index) => {
-        const tweet = byId.get(row.id) || {id: row.id, text: "", url: "", group: "", at: 0};
-        const li = document.createElement("li");
-        const rank = document.createElement("span");
-        rank.className = "rank";
-        rank.textContent = index + 1;
-        const text = document.createElement("p");
-        text.className = "text";
-        text.dir = "auto";
-        text.textContent = tweet.text || "تغريدة";
-        const meta = document.createElement("div");
-        meta.className = "meta";
-        const count = document.createElement("span");
-        count.className = "views";
-        count.textContent = views.format(row.views) + " مشاهدة";
-        meta.append(count);
-        if (tweet.at) {
-          const when = new Date(tweet.at * 1000);
-          const day = document.createElement("span");
-          day.textContent = label(dayKey(when), when);
-          meta.append(day);
-        }
-        if (tweet.group) {
-          const group = document.createElement("span");
-          group.textContent = tweet.group;
-          meta.append(group);
-        }
-        const link = safeLink(tweet.url) || ("https://x.com/i/web/status/" + row.id);
-        const open = document.createElement("a");
-        open.className = "open";
-        open.href = link;
-        open.target = "_blank";
-        open.rel = "noopener noreferrer";
-        open.textContent = "فتح";
-        meta.append(open);
-        li.append(rank, text, meta);
-        list.append(li);
-      });
-      section.hidden = !(data.top || []).length;
-      if (!section.hidden) section.scrollIntoView({behavior: "smooth", block: "start"});
-    }
-    function finished(data) {
-      running = false;
-      const parts = ["فُحصت " + data.posts + " تغريدة"];
-      if (data.unknown) parts.push("لم يجد Grok عدد المشاهدات لـ " + data.unknown);
-      // The amount isolated left-to-right, so the dollar sign stays before the number.
-      if (data.cost) parts.push("التكلفة التقريبية \u2066$" + Number(data.cost).toFixed(3) + "\u2069");
-      if (data.warning) parts.push(data.warning);
-      if (!(data.top || []).length) parts.unshift("لم يُرجع Grok عدد مشاهدات لأي تغريدة");
-      say(parts.join(" · "), !(data.top || []).length);
-      updatePicked();
-    }
-    async function follow(job) {
-      for (;;) {
-        await new Promise((done) => setTimeout(done, 2500));
-        let data;
-        try {
-          data = await (await fetch(apiRoot + "/tweets/top/" + job, {cache: "no-store"})).json();
-        } catch (_) {
-          continue;
-        }
-        if (!data.success) {
-          running = false;
-          say(data.message || "تعذّر متابعة الطلب.", true);
-          updatePicked();
-          return;
-        }
-        if (data.status === "running") {
-          say("Grok يفحص التغريدات… دفعة " + data.done + " من " + data.total);
-          continue;
-        }
-        if (data.status === "error") {
-          running = false;
-          say(data.error || "تعذّر سؤال Grok.", true);
-          updatePicked();
-          return;
-        }
-        showTop(data);
-        finished(data);
-        return;
-      }
-    }
-    if (button) {
-      updatePicked();
-      button.addEventListener("click", async () => {
-        const ids = pickedIds();
-        if (!ids.length) return;
-        if (!window.confirm("سيُرسل " + ids.length + " تغريدة إلى Grok ليعرف عدد مشاهدات كل منها، وتُحسب التكلفة على مفتاح Grok. متابعة؟")) return;
-        running = true;
-        updatePicked();
-        say("يُرسل إلى Grok…");
-        let data;
-        try {
-          const response = await fetch(apiRoot + "/tweets/top", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({ranges: [...document.querySelectorAll("summary .pick:checked")].map((box) => [Number(box.dataset.start), Number(box.dataset.end)]), csrf_token: csrf})
-          });
-          data = await response.json();
-        } catch (_) {
-          data = {success: false, message: "تعذّر الاتصال بالسكربت."};
-        }
-        if (!data.success) {
-          running = false;
-          say(data.message || "تعذّر البدء.", true);
-          updatePicked();
-          return;
-        }
-        say("Grok يفحص التغريدات… دفعة 0 من " + data.total);
-        follow(data.job);
-      });
-    }
   })();
   </script>
 </body>
@@ -7216,71 +6863,7 @@ def tweets_page(access_path: str):
     """«عرض التغريدات»: the tweets collected in the last 7 days, day by day."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
-    csrf_token = session.get("csrf_token")
-    if not csrf_token:
-        csrf_token = secrets.token_urlsafe(32)
-        session["csrf_token"] = csrf_token
-    owner = is_owner_copy()
-    return render_template_string(
-        TWEETS_PAGE, tweets=collected_payload(), back="/" + ACCESS_PATH, api_root="/" + ACCESS_PATH,
-        csrf_token=csrf_token, grok=owner, grok_ready=owner and bool(owner_grok_key()), grok_max=GROK_MAX_POSTS,
-    )
-
-
-@app.post("/<access_path>/tweets/top")
-def tweets_top_start(access_path: str):
-    """«عرض الأكثر مشاهدة»: start asking Grok about the selected tweets."""
-    if not hmac.compare_digest(access_path, ACCESS_PATH):
-        abort(404)
-    data = request.get_json(silent=True) or {}
-    if not csrf_ok(data):
-        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها."), 400
-    if not is_owner_copy():
-        return jsonify(success=False, message="هذه الميزة في نسخة صاحب البرنامج فقط."), 403
-    api_key = owner_grok_key()
-    if not api_key:
-        return jsonify(success=False, message="لم يُضف مفتاح Grok بعد. أضفه من «توزيع البرنامج»."), 400
-    # The ticked days, as [start, end) in seconds (the page knows the viewer's own day boundaries).
-    spans = []
-    for pair in (data.get("ranges") or [])[:10]:
-        try:
-            start, end = int(pair[0]), int(pair[1])
-        except (TypeError, ValueError, IndexError):
-            continue
-        if 0 < end - start <= 26 * 3600:
-            spans.append((start, end))
-    with collected_lock:
-        rows = sorted(((row["at"], post_id, row["url"]) for post_id, row in collected_tweets.items()
-                       if any(start <= row["at"] < end for start, end in spans)), reverse=True)
-    rows = [(post_id, url) for _, post_id, url in rows]
-    posts = [(post_id, url if re.match(r"https://(?:www\.)?(?:x|twitter)\.com/", url) else f"https://x.com/i/web/status/{post_id}")
-             for post_id, url in rows if not tweet_is_ignored(url)]
-    if not posts:
-        return jsonify(success=False, message="حدّد يومًا فيه تغريدات أولًا."), 400
-    if len(posts) > GROK_MAX_POSTS:
-        return jsonify(success=False, message=f"الحد {GROK_MAX_POSTS} تغريدة في المرة الواحدة. حدّد أيامًا أقل."), 400
-    job_id = secrets.token_hex(8)
-    total = math.ceil(len(posts) / GROK_POSTS_PER_ASK)
-    with grok_jobs_lock:
-        for old in [key for key, job in grok_jobs.items() if job["started"] < time.time() - 3600]:
-            del grok_jobs[old]
-        grok_jobs[job_id] = {"status": "running", "done": 0, "total": total, "posts": len(posts), "started": time.time(),
-                             "top": [], "unknown": 0, "cost": 0.0, "error": "", "warning": ""}
-    threading.Thread(target=run_grok_top, args=(job_id, api_key, posts), name="grok-top", daemon=True).start()
-    return jsonify(success=True, job=job_id, total=total, posts=len(posts))
-
-
-@app.get("/<access_path>/tweets/top/<job_id>")
-def tweets_top_status(access_path: str, job_id: str):
-    """How far a «عرض الأكثر مشاهدة» lookup has got, and its result once done."""
-    if not hmac.compare_digest(access_path, ACCESS_PATH) or not is_owner_copy():
-        abort(404)
-    with grok_jobs_lock:
-        job = dict(grok_jobs.get(job_id) or {})
-    if not job:
-        return jsonify(success=False, message="انتهت هذه العملية. أعد المحاولة."), 404
-    job.pop("started", None)
-    return jsonify(success=True, **job)
+    return render_template_string(TWEETS_PAGE, tweets=collected_payload(), back="/" + ACCESS_PATH)
 
 
 # «إنشاء محتوى»: content.py beside the script adds its page to this panel.
