@@ -6045,18 +6045,26 @@ def day_spans(data: dict) -> list[tuple[int, int]]:
     return spans
 
 
-# «إنشاء» in «عرض التغريدات» (the owner's copy; a trial, before it moves to «توزيع البرنامج»): the
-# most viewed tweets ticked on the page go to Grok (xAI), which writes a new post from each one's idea,
-# in new words, not a copy. Each tweet's full text comes from FxTwitter (kept when its views are
-# fetched, else asked then). Grok gets only the texts, no search tool, so a request costs its tokens.
+# «إنشاء» in «عرض التغريدات» (the owner's copy; a trial, before it moves to «توزيع البرنامج»): Grok
+# (xAI) opens the most viewed tweets ticked on the page with its X search, takes their idea and writes
+# ONE new post: short and viral (curious, spontaneous, silly on purpose, or teasing without saying it),
+# never a copy. It also describes two images for it, which Grok Imagine then makes. The page shows
+# the post with its two images, ready to copy and download, and what it all cost.
 GROK_URL = "https://api.x.ai/v1/responses"
+GROK_IMAGES_URL = "https://api.x.ai/v1/images/generations"
 GROK_DEFAULT_MODEL = "grok-4.7"
+GROK_DEFAULT_IMAGE_MODEL = "grok-imagine-image-2.0"
 GROK_PATH = DATA_DIR / "grok.json"
 GROK_LAST_PATH = DATA_DIR / "grok_last.json"
-GROK_MAX_TWEETS = 40
-# xAI's prices in USD per 1M tokens (input, output), for the approximate cost shown after «إنشاء».
+GROK_IMAGES_DIR = DATA_DIR / "grok_images"
+GROK_MAX_TWEETS = 20
+GROK_TICKS_PER_USD = 10_000_000_000        # xAI reports each request's exact cost in these ticks
+# xAI's prices (USD), only for an answer that does not report its exact cost: per 1M tokens (input,
+# output), per post its X search fetched, per image.
 GROK_PRICES = (("grok-4.7", 2.00, 6.00), ("grok-4.6", 2.00, 6.00), ("grok-4.5", 2.00, 6.00),
                ("grok-4.3", 1.25, 2.50), ("grok-4.20", 1.25, 2.50), ("grok-build", 1.00, 2.00))
+GROK_POST_FETCH_PRICE = 5.00 / 1000
+GROK_IMAGE_PRICES = (("grok-imagine-image-quality", 0.05), ("grok-imagine-image-2.0", 0.04), ("grok-imagine-image", 0.02))
 grok_lock = threading.Lock()
 grok_state: dict = {"running": False, "step": "", "error": "", "result": None, "loaded": False}
 
@@ -6064,7 +6072,8 @@ grok_state: dict = {"running": False, "step": "", "error": "", "result": None, "
 def grok_settings() -> dict:
     data = read_private_json(GROK_PATH) or {}
     return {"api_key": str(data.get("api_key") or "").strip(),
-            "model": str(data.get("model") or "").strip() or GROK_DEFAULT_MODEL}
+            "model": str(data.get("model") or "").strip() or GROK_DEFAULT_MODEL,
+            "image_model": str(data.get("image_model") or "").strip() or GROK_DEFAULT_IMAGE_MODEL}
 
 
 def grok_key_hint(key: str) -> str:
@@ -6092,17 +6101,26 @@ def grok_error_detail(body: bytes) -> str:
         return ""
 
 
-def grok_request(api_key: str, body: dict) -> dict:
-    """One Responses API call. A model that does not take a reasoning effort is asked again without it."""
-    for attempt in (body, {key: value for key, value in body.items() if key != "reasoning"}):
-        asking = urllib.request.Request(GROK_URL, data=json.dumps(attempt).encode("utf-8"), method="POST", headers={
+def grok_request(api_key: str, body: dict, url: str = "", optional: tuple = ("reasoning",), what: str = "الطلب") -> dict:
+    """One call to xAI (the Responses API unless another url is given). An optional field the model does
+    not take (named in its refusal) is left out and the call made once more."""
+    body = dict(body)
+    url = url or GROK_URL
+    while True:
+        asking = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST", headers={
             "Content-Type": "application/json", "Authorization": "Bearer " + api_key})
         try:
-            with urllib.request.urlopen(asking, timeout=240) as response:
+            with urllib.request.urlopen(asking, timeout=300) as response:
                 answer = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = grok_error_detail(exc.read(4096))
-            if exc.code == 400 and "reasoning" in attempt and "reasoning" in detail.lower():
+            dropped = next((field for field in optional if field in body and field in detail.lower()), None)
+            if exc.code in (400, 422) and dropped:
+                body.pop(dropped)
+                continue
+            tools = body.get("tools") or []
+            if exc.code in (400, 422) and "image_understanding" in detail.lower() and any("enable_image_understanding" in tool for tool in tools):
+                body["tools"] = [{key: value for key, value in tool.items() if key != "enable_image_understanding"} for tool in tools]
                 continue
             if exc.code in (401, 403):
                 raise RuntimeError("مفتاح Grok غير صالح أو بلا صلاحية. غيّره ثم أعد المحاولة.") from exc
@@ -6110,17 +6128,27 @@ def grok_request(api_key: str, body: dict) -> dict:
                 raise RuntimeError("تجاوزت حد استخدام Grok أو نفد رصيده. حاول لاحقًا.") from exc
             if exc.code == 404 or (exc.code == 400 and "model" in detail.lower()):
                 raise RuntimeError("رفض Grok اسم النموذج: " + (detail[:160] or f"رمز {exc.code}")) from exc
-            raise RuntimeError(("رفض Grok الطلب: " + detail[:160]) if detail else f"تعذّر الاتصال بـ Grok (رمز {exc.code}).") from exc
+            raise RuntimeError((f"رفض Grok {what}: " + detail[:160]) if detail else f"تعذّر الاتصال بـ Grok (رمز {exc.code}).") from exc
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise RuntimeError("تعذّر الوصول إلى Grok. تأكد أن الخادم متصل بالإنترنت.") from exc
         if not isinstance(answer, dict):
             raise RuntimeError("وصل رد غير مفهوم من Grok.")
         return answer
-    raise RuntimeError("رفض Grok الطلب.")
 
 
-def grok_usage(model: str, usage) -> dict:
-    """Tokens in and out of one answer, and its approximate cost (None for a model whose price is not known)."""
+def grok_cost(usage, estimate: float | None) -> float | None:
+    """What one request cost: xAI's exact figure (cost_in_usd_ticks) when it gives one, else the estimate."""
+    try:
+        ticks = usage.get("cost_in_usd_ticks") if isinstance(usage, dict) else None
+        if ticks is not None:
+            return int(ticks) / GROK_TICKS_PER_USD
+    except (TypeError, ValueError):
+        pass
+    return estimate
+
+
+def grok_text_estimate(model: str, usage) -> tuple[float | None, int]:
+    """The estimated cost of a text answer (tokens and the posts its X search fetched), and those posts."""
     usage = usage if isinstance(usage, dict) else {}
     try:
         tokens_in = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
@@ -6128,68 +6156,95 @@ def grok_usage(model: str, usage) -> dict:
         details = usage.get("output_tokens_details") or usage.get("completion_tokens_details") or {}
         thinking = int(details.get("reasoning_tokens") or 0) if isinstance(details, dict) else 0
         total = int(usage.get("total_tokens") or 0)
+        tools = usage.get("server_side_tool_usage_details") or {}
+        fetched = int(tools.get("x_posts_fetched") or 0) if isinstance(tools, dict) else 0
     except (TypeError, ValueError, AttributeError):
-        return {"tokens_in": 0, "tokens_out": 0, "cost": None}
+        return None, 0
     if thinking and (not total or total >= tokens_in + tokens_out + thinking):
         tokens_out += thinking               # thinking counted apart from the answer: paid as output too
     price = next(((p_in, p_out) for prefix, p_in, p_out in GROK_PRICES if model.startswith(prefix)), None)
-    cost = None if price is None else round((tokens_in * price[0] + tokens_out * price[1]) / 1_000_000, 5)
-    return {"tokens_in": tokens_in, "tokens_out": tokens_out, "cost": cost}
+    if price is None:
+        return None, fetched
+    return (tokens_in * price[0] + tokens_out * price[1]) / 1_000_000 + fetched * GROK_POST_FETCH_PRICE, fetched
 
 
-def grok_write_posts(api_key: str, model: str, sources: list[dict]) -> tuple[list[str], str, dict]:
-    """Ask Grok for one new post from each source's idea. Returns (posts in the same order, "" for one it
-    did not give; Grok's text when it gave no list; usage)."""
+def grok_write_post(api_key: str, model: str, sources: list[dict]) -> dict:
+    """Grok opens the ticked posts on X and writes ONE new post from their idea, and two image prompts.
+    Returns {"post", "images", "idea", "raw" (its text when it gave no post), "cost", "fetched"}."""
     listing = []
     for number, source in enumerate(sources, 1):
         views = source.get("views")
-        head = f"{number}. ({views:,} views)" if isinstance(views, int) else f"{number}."
-        if source.get("media"):
-            head += " [the post also has a photo or video]"
-        entry = head + "\n" + source["text"]
-        if source.get("quote"):
-            entry += "\n[it quotes this post: " + source["quote"] + "]"
-        listing.append(entry)
+        line = f"{number}. {source['url']} (id {source['id']})" + (f" · {views:,} views" if isinstance(views, int) else "")
+        if source.get("text"):
+            line += "\n   Text we have: " + re.sub(r"\s+", " ", source["text"])[:600]
+        listing.append(line)
     rules = (
-        "You write posts for X (Twitter). You get popular posts with their view counts. For each post, write ONE "
-        "new post that carries the same idea but is genuinely new content: new wording, a new opening and "
-        "structure, a fresh angle or example. You may rework the post, but never copy it or lightly paraphrase "
-        "it: do not reuse its sentences or its distinctive phrases.\n"
-        "Write each new post in the same language and dialect as its original. Natural and human, ready to "
-        "publish, at most 280 characters. No hashtags unless the original has them, no links, no @mentions, no "
-        "quotation marks around the post, no notes or explanations.\n"
-        "Reply with ONLY a JSON array, one object per post, in the same order, exactly like:\n"
-        '[{"n": 1, "post": "..."}]'
+        "You write viral posts for X (Twitter).\n"
+        "1. Open each post listed below with X search (by its link or id) and look at it fully: its text, its "
+        "images or video, and how people reacted to it. You do not need its replies.\n"
+        "2. From these posts take the idea (what they share, or the strongest hook among them) and write ONE new "
+        "post. It must be new content: never copy or lightly reword any of them.\n"
+        "3. The post: very short (one line, two at most), in the same language and dialect as the posts, and "
+        "viral. Pick ONE style: curiosity (a hook that leaves something out), spontaneous and casual, naive or "
+        "silly on purpose, or provocative and teasing in an indirect, unclear way. Never explain the hook or the "
+        "joke. No hashtags, no links, no @mentions, no quotation marks; an emoji only if it adds to the hook.\n"
+        "4. The post goes out with TWO images. Write two prompts in English for an image generator: two images "
+        "that belong together and play with the post's hook (for example before/after, question/answer, two "
+        "sides of one thing). Photorealistic unless the idea needs otherwise. No text, letters, logos or "
+        "watermarks in the images, and no real, identifiable person.\n"
+        "Reply with ONLY a JSON object, no other text, exactly like:\n"
+        '{"post": "...", "images": ["first image prompt", "second image prompt"], '
+        '"idea": "one short line, in the posts\' language, on the idea you took"}'
     )
     answer = grok_request(api_key, {
         "model": model,
         "input": [{"role": "system", "content": rules}, {"role": "user", "content": "Posts:\n\n" + "\n\n".join(listing)}],
-        "reasoning": {"effort": "low"},
-    })
+        "tools": [{"type": "x_search", "enable_image_understanding": True}],
+        "reasoning": {"effort": "medium"},
+    }, what="الطلب")
     text = grok_answer_text(answer).strip()
-    posts = [""] * len(sources)
-    rows: list = []
-    match = re.search(r"\[.*\]", text, re.S)
+    data: dict = {}
+    match = re.search(r"\{.*\}", text, re.S)
     if match:
         try:
-            rows = json.loads(match.group(0))
+            loaded = json.loads(match.group(0))
+            data = loaded if isinstance(loaded, dict) else {}
         except json.JSONDecodeError:
-            rows = []
-    for index, row in enumerate(rows if isinstance(rows, list) else []):
-        if not isinstance(row, dict):
-            continue
-        try:
-            number = int(row.get("n") or index + 1)
-        except (TypeError, ValueError):
-            number = index + 1
-        post = re.sub(r"[ \t]+", " ", str(row.get("post") or "")).strip()
-        if 1 <= number <= len(sources) and post and not posts[number - 1]:
-            posts[number - 1] = post[:1000]
-    return posts, ("" if any(posts) else text[:4000]), grok_usage(model, answer.get("usage"))
+            data = {}
+    post = re.sub(r"[ \t]+", " ", str(data.get("post") or "")).strip()[:1000]
+    images = [re.sub(r"\s+", " ", str(prompt)).strip()[:1500] for prompt in (data.get("images") or [])
+              if isinstance(prompt, str) and prompt.strip()] if isinstance(data.get("images"), list) else []
+    estimate, fetched = grok_text_estimate(model, answer.get("usage"))
+    return {"post": post, "images": images[:2], "idea": str(data.get("idea") or "").strip()[:300],
+            "raw": "" if post else text[:4000], "cost": grok_cost(answer.get("usage"), estimate), "fetched": fetched}
 
 
-def grok_create(api_key: str, model: str, ids: list[str]) -> None:
-    """«إنشاء»: the ticked tweets' texts, then Grok's new posts; the result is kept until the next one."""
+def grok_make_image(api_key: str, image_model: str, prompt: str) -> tuple[bytes, str, float | None]:
+    """One 3:4 image from a prompt (Grok Imagine). Returns (the image, its file type, what it cost)."""
+    answer = grok_request(api_key, {"model": image_model, "prompt": prompt, "n": 1, "aspect_ratio": "3:4",
+                                    "response_format": "b64_json"},
+                          url=GROK_IMAGES_URL, optional=("aspect_ratio",), what="إنشاء الصورة")
+    rows = answer.get("data") if isinstance(answer.get("data"), list) else []
+    row = rows[0] if rows and isinstance(rows[0], dict) else {}
+    try:
+        image = base64.b64decode(str(row.get("b64_json") or ""), validate=True)
+    except ValueError:
+        image = b""
+    if len(image) < 100:
+        raise RuntimeError("لم تصل صورة من Grok.")
+    kind = {"image/png": "png", "image/webp": "webp"}.get(str(row.get("mime_type") or "").lower(), "jpg")
+    if image[:8] == b"\x89PNG\r\n\x1a\n":
+        kind = "png"
+    elif image[:4] == b"RIFF" and image[8:12] == b"WEBP":
+        kind = "webp"
+    elif image[:3] == b"\xff\xd8\xff":
+        kind = "jpg"
+    price = next((value for prefix, value in GROK_IMAGE_PRICES if image_model.startswith(prefix)), None)
+    return image, kind, grok_cost(answer.get("usage"), price)
+
+
+def grok_create(api_key: str, model: str, image_model: str, ids: list[str]) -> None:
+    """«إنشاء»: Grok's post from the ticked tweets, then its two images; kept until the next one."""
     def step(text: str) -> None:
         with grok_lock:
             grok_state["step"] = text
@@ -6199,42 +6254,41 @@ def grok_create(api_key: str, model: str, ids: list[str]) -> None:
             for status_id in ids:
                 row = collected_tweets.get(status_id)
                 if row is not None and not tweet_is_ignored(row["url"]):
-                    sources.append({"id": status_id, "url": row["url"], "views": row.get("views"), "known": "fx_text" in row,
-                                    "text": row.get("fx_text") or "", "quote": row.get("fx_quote") or "",
-                                    "media": bool(row.get("fx_media")), "collected": row.get("text") or ""})
+                    sources.append({"id": status_id, "url": row["url"], "views": row.get("views"),
+                                    "text": row.get("fx_text") or row.get("text") or ""})
         if not sources:
             raise RuntimeError("لم تعد هذه التغريدات محفوظة. أعد تحميل الصفحة.")
-        # A count fetched before this version kept no text: ask FxTwitter for it now (slowly).
-        missing = [source for source in sources if not source["known"]]
-        for number, source in enumerate(missing, 1):
-            step(f"يجلب نص التغريدات… {number} من {len(missing)}")
-            outcome, _, _, about = fx_tweet_views(source["id"])
-            if outcome == "ok":
-                source.update(text=about["text"], quote=about["quote"], media=about["media"])
-                with collected_lock:
-                    row = collected_tweets.get(source["id"])
-                    if row is not None:
-                        row.update(fx_text=about["text"], fx_quote=about["quote"], fx_media=about["media"])
-                        persist_collected_unlocked()
-            if number < len(missing):
-                time.sleep(1.5)
-        for source in sources:
-            if not source["text"]:
-                source["text"] = source["collected"]
-        usable = [source for source in sources if source["text"]]
-        if not usable:
-            raise RuntimeError("التغريدات المحددة بلا نص (صور أو فيديو فقط)، فلا يوجد ما يُرسل إلى Grok.")
-        step("يكتب Grok المحتوى الجديد…")
-        posts, raw, usage = grok_write_posts(api_key, model, usable)
-        written = dict(zip((source["id"] for source in usable), posts))
-        items = [{"id": source["id"], "url": source["url"], "views": source["views"], "source": source["text"][:400],
-                  "post": written.get(source["id"], ""),
-                  "note": "" if source["text"] else "بلا نص (صورة أو فيديو فقط)، لم تُرسل إلى Grok"} for source in sources]
-        result = {"at": time.time(), "model": model, "items": items, "raw": raw, **usage}
+        step("يفتح Grok التغريدات ويكتب المنشور… (قد يأخذ دقيقة)")
+        written = grok_write_post(api_key, model, sources)
+        stamp = time.strftime("%Y%m%d%H%M%S") + secrets.token_hex(3)
+        images: list[dict] = []
+        costs = [written["cost"]]
+        prompts = (written["images"] * 2)[:2] if written["post"] and written["images"] else []
+        for number, prompt in enumerate(prompts, 1):
+            step(f"ينشئ الصورة {number} من 2…")
+            try:
+                image, kind, cost = grok_make_image(api_key, image_model, prompt)
+                GROK_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+                name = f"post_{stamp}_{number}.{kind}"
+                (GROK_IMAGES_DIR / name).write_bytes(image)
+                images.append({"file": name, "prompt": prompt, "error": ""})
+                costs.append(cost)
+            except RuntimeError as exc:
+                images.append({"file": "", "prompt": prompt, "error": str(exc)})
+        known = [cost for cost in costs if cost is not None]
+        result = {"at": time.time(), "model": model, "image_model": image_model, "post": written["post"],
+                  "idea": written["idea"], "images": images, "raw": written["raw"], "fetched": written["fetched"],
+                  "cost": round(sum(known), 5) if known else None, "cost_partial": len(known) < len(costs),
+                  "sources": [{"id": source["id"], "url": source["url"], "views": source["views"]} for source in sources]}
         try:
             write_private_json(GROK_LAST_PATH, result)
         except OSError:
             pass
+        # Only the last post's images are kept.
+        keep = {image["file"] for image in images if image["file"]}
+        for old in GROK_IMAGES_DIR.glob("post_*") if GROK_IMAGES_DIR.is_dir() else []:
+            if old.name not in keep:
+                old.unlink(missing_ok=True)
         with grok_lock:
             grok_state.update(running=False, step="", error="", result=result, loaded=True)
     except Exception as exc:
@@ -6249,7 +6303,7 @@ def grok_status_payload() -> dict:
     with grok_lock:
         if not grok_state["loaded"]:
             last = read_private_json(GROK_LAST_PATH)
-            grok_state["result"] = last if isinstance(last, dict) and isinstance(last.get("items"), list) else None
+            grok_state["result"] = last if isinstance(last, dict) and isinstance(last.get("post"), str) else None
             grok_state["loaded"] = True
         return {"running": grok_state["running"], "step": grok_state["step"], "error": grok_state["error"],
                 "result": grok_state["result"]}
@@ -7407,15 +7461,19 @@ TWEETS_PAGE = r'''<!doctype html>
     .grok-form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .grok-form input { flex: 1 1 170px; min-width: 0; height: 36px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px;
       background: #fff; color: var(--ink); font: inherit; font-size: 16px; }
-    .grok-form #grok-model { flex: 0 1 140px; }
+    .grok-form #grok-model { flex: 0 1 120px; }
+    .grok-form #grok-image-model { flex: 0 1 190px; }
     .grok-form .vbtn { min-height: 36px; padding: 0 14px; }
     .grok .vstatus { margin: 6px 0 0; }
     .grok-result-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-size: 14px; }
     .grok-meta { color: var(--muted); font-size: 12px; }
     .nobr { white-space: nowrap; }
-    .grok-result ol { padding: 8px 0 0; }
-    .grok-result li { background: #fff; }
-    .gpost { margin: 0; font-size: 15px; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+    .gcard { margin-top: 8px; padding: 10px; border-radius: 10px; background: #fff; box-shadow: inset 0 0 0 1px var(--line); }
+    .gimages { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+    .gimages figure { margin: 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .gimages img { display: block; width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 8px; background: var(--paper); }
+    .gimages .mini { margin: 0; text-align: center; text-decoration: none; line-height: 28px; }
+    .gpost { margin: 0; font-size: 18px; font-weight: 600; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
     .gtools { display: flex; align-items: center; gap: 8px; margin-top: 6px; color: var(--muted); font-size: 12px; }
     .gtools .mini { margin-inline-start: 0; }
     .gfrom { margin: 6px 0 0; padding-top: 6px; border-top: 1px dashed var(--line); color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
@@ -7447,14 +7505,15 @@ TWEETS_PAGE = r'''<!doctype html>
       </div>
       <div id="grok-form" class="grok-form" hidden>
         <input id="grok-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" dir="ltr" placeholder="xai-…" aria-label="مفتاح Grok">
-        <input id="grok-model" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" dir="ltr" placeholder="{{ grok_default }}" aria-label="نموذج Grok">
+        <input id="grok-model" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" dir="ltr" placeholder="{{ grok_default }}" aria-label="نموذج Grok للنص">
+        <input id="grok-image-model" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" dir="ltr" placeholder="{{ grok_image_default }}" aria-label="نموذج Grok للصور">
         <button id="grok-save" class="vbtn" type="button">حفظ</button>
       </div>
       <p id="grok-msg" class="vstatus" hidden></p>
     </section>
     <section id="grok-result" class="grok-result" hidden>
-      <div class="grok-result-head"><b>محتوى جديد من Grok</b><span id="grok-meta" class="grok-meta"></span></div>
-      <ol id="grok-items"></ol>
+      <div class="grok-result-head"><b>منشور جديد من Grok</b><span id="grok-meta" class="grok-meta"></span></div>
+      <div id="grok-card" class="gcard"></div>
       <pre id="grok-raw" class="grok-raw" hidden></pre>
     </section>
     {% endif %}
@@ -7525,6 +7584,7 @@ TWEETS_PAGE = r'''<!doctype html>
     const grokMax = {{ grok_max|tojson }};
     let grokHint = {{ grok_hint|tojson }};
     let grokModel = {{ grok_model|tojson }};
+    let grokImageModel = {{ grok_image_model|tojson }};
     let grokRunning = false;
     const picked = new Set();
     const $ = (id) => document.getElementById(id);
@@ -7569,9 +7629,10 @@ TWEETS_PAGE = r'''<!doctype html>
       $("grok-msg").hidden = !text;
     }
     function showGrokKey() {
-      $("grok-line").textContent = grokHint ? "المفتاح محفوظ: " + grokHint + " · " + grokModel : "أدخل مفتاح Grok لتجربة «إنشاء».";
+      $("grok-line").textContent = grokHint ? "المفتاح محفوظ: " + grokHint + " · " + grokModel + " · " + grokImageModel : "أدخل مفتاح Grok لتجربة «إنشاء».";
       $("grok-edit").hidden = !grokHint;
       $("grok-model").value = grokModel;
+      $("grok-image-model").value = grokImageModel;
     }
     // Pages opened over plain http (a server IP) have no navigator.clipboard, so fall back to execCommand.
     async function copyText(text) {
@@ -7596,14 +7657,14 @@ TWEETS_PAGE = r'''<!doctype html>
       return copied;
     }
     function showResult(result) {
-      if (!result || !Array.isArray(result.items)) {
+      if (!result || typeof result.post !== "string") {
         $("grok-result").hidden = true;
         return;
       }
       $("grok-result").hidden = false;
       const parts = [result.at ? checkedAt(result.at) : "", result.model || ""];
-      if (result.tokens_in || result.tokens_out) parts.push("مدخلات " + number.format(result.tokens_in || 0) + " · مخرجات " + number.format(result.tokens_out || 0));
-      if (typeof result.cost === "number") parts.push("التكلفة ≈ \u2066$" + result.cost.toFixed(4) + "\u2069");
+      if (result.fetched) parts.push("فتح " + number.format(result.fetched) + " منشورًا");
+      if (typeof result.cost === "number") parts.push("التكلفة " + (result.cost_partial ? "أكثر من " : "") + "\u2066$" + result.cost.toFixed(4) + "\u2069");
       // Each part kept whole on a line (a phone wraps between them, not inside one).
       $("grok-meta").replaceChildren(...parts.filter(Boolean).flatMap((part, index) => {
         const piece = document.createElement("span");
@@ -7611,56 +7672,79 @@ TWEETS_PAGE = r'''<!doctype html>
         piece.textContent = part;
         return index ? [" · ", piece] : [piece];
       }));
-      $("grok-items").replaceChildren(...result.items.map((item) => {
-        const li = document.createElement("li");
-        const body = document.createElement("div");
-        body.className = "tbody";
-        if (item.post) {
-          const post = document.createElement("p");
-          post.className = "gpost";
-          post.dir = "auto";
-          post.textContent = item.post;
-          const tools = document.createElement("div");
-          tools.className = "gtools";
-          const copy = document.createElement("button");
-          copy.type = "button";
-          copy.className = "mini";
-          copy.textContent = "نسخ";
-          copy.addEventListener("click", async () => {
-            copy.textContent = (await copyText(item.post)) ? "نُسخ" : "تعذّر النسخ";
-            setTimeout(() => { copy.textContent = "نسخ"; }, 1500);
-          });
-          const length = document.createElement("span");
-          length.textContent = [...item.post].length + " حرف";
-          tools.append(copy, length);
-          body.append(post, tools);
-        } else {
-          const note = document.createElement("p");
-          note.className = "gnote";
-          note.textContent = item.note || "لم يكتب Grok شيئًا لهذه التغريدة.";
-          body.append(note);
-        }
-        const from = document.createElement("p");
-        from.className = "gfrom";
-        const source = String(item.source || "").replace(/\s+/g, " ").trim();
-        const said = document.createElement("span");
-        said.dir = "auto";
-        said.textContent = "من: " + (source.length > 90 ? source.slice(0, 90) + "…" : source || "تغريدة")
-          + (item.views != null ? " · " + number.format(item.views) + " مشاهدة" : "");
-        from.append(said);
-        const link = safeLink(item.url);
+      const card = $("grok-card");
+      card.replaceChildren();
+      if (result.post) {
+        const post = document.createElement("p");
+        post.className = "gpost";
+        post.dir = "auto";
+        post.textContent = result.post;
+        const tools = document.createElement("div");
+        tools.className = "gtools";
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.className = "mini";
+        copy.textContent = "نسخ النص";
+        copy.addEventListener("click", async () => {
+          copy.textContent = (await copyText(result.post)) ? "نُسخ" : "تعذّر النسخ";
+          setTimeout(() => { copy.textContent = "نسخ النص"; }, 1500);
+        });
+        const length = document.createElement("span");
+        length.textContent = [...result.post].length + " حرف";
+        tools.append(copy, length);
+        card.append(post, tools);
+      }
+      if (Array.isArray(result.images) && result.images.length) {
+        const grid = document.createElement("div");
+        grid.className = "gimages";
+        result.images.forEach((image, index) => {
+          const figure = document.createElement("figure");
+          if (image.file) {
+            const src = apiRoot + "/tweets/create/image/" + encodeURIComponent(image.file);
+            const img = document.createElement("img");
+            img.src = src;
+            img.alt = "الصورة " + (index + 1);
+            img.loading = "lazy";
+            const save = document.createElement("a");
+            save.className = "mini";
+            save.href = src;
+            save.download = "post-" + (index + 1) + "." + image.file.split(".").pop();
+            save.textContent = "تحميل الصورة " + (index + 1);
+            figure.append(img, save);
+          } else {
+            const note = document.createElement("p");
+            note.className = "gnote";
+            note.textContent = "الصورة " + (index + 1) + ": " + (image.error || "لم تُنشأ.");
+            figure.append(note);
+          }
+          grid.append(figure);
+        });
+        card.append(grid);
+      }
+      if (result.idea) {
+        const idea = document.createElement("p");
+        idea.className = "gfrom";
+        idea.dir = "auto";
+        idea.textContent = "الفكرة: " + result.idea;
+        card.append(idea);
+      }
+      const from = document.createElement("p");
+      from.className = "gfrom";
+      from.append("من التغريدات: ");
+      (result.sources || []).forEach((source, index) => {
+        if (index) from.append(" · ");
+        const link = safeLink(source.url);
+        const label = (index + 1) + (source.views != null ? " (" + number.format(source.views) + ")" : "");
         if (link) {
           const open = document.createElement("a");
           open.href = link;
           open.target = "_blank";
           open.rel = "noopener noreferrer";
-          open.textContent = " · فتح";
+          open.textContent = label;
           from.append(open);
-        }
-        body.append(from);
-        li.append(body);
-        return li;
-      }));
+        } else from.append(label);
+      });
+      card.append(from);
       $("grok-raw").textContent = result.raw || "";
       $("grok-raw").hidden = !result.raw;
     }
@@ -7713,7 +7797,7 @@ TWEETS_PAGE = r'''<!doctype html>
           data = await (await fetch(apiRoot + "/tweets/grok-key", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({api_key: key, model: $("grok-model").value.trim(), csrf_token: csrf})
+            body: JSON.stringify({api_key: key, model: $("grok-model").value.trim(), image_model: $("grok-image-model").value.trim(), csrf_token: csrf})
           })).json();
         } catch (_) {
           data = {success: false, message: "تعذّر الاتصال بالسكربت."};
@@ -7725,6 +7809,7 @@ TWEETS_PAGE = r'''<!doctype html>
         }
         grokHint = data.key_hint;
         grokModel = data.model;
+        grokImageModel = data.image_model;
         $("grok-key").value = "";
         $("grok-form").hidden = true;
         showGrokKey();
@@ -7980,11 +8065,12 @@ def tweets_page(access_path: str):
         csrf_token = secrets.token_urlsafe(32)
         session["csrf_token"] = csrf_token
     grok = is_owner_copy()
-    settings = grok_settings() if grok else {"api_key": "", "model": ""}
+    settings = grok_settings() if grok else {"api_key": "", "model": "", "image_model": ""}
     return render_template_string(TWEETS_PAGE, tweets=collected_payload(), back="/" + ACCESS_PATH,
                                   api_root="/" + ACCESS_PATH, csrf_token=csrf_token, server_now=time.time(),
                                   grok=grok, grok_hint=grok_key_hint(settings["api_key"]), grok_model=settings["model"],
-                                  grok_default=GROK_DEFAULT_MODEL, grok_max=GROK_MAX_TWEETS)
+                                  grok_image_model=settings.get("image_model", ""), grok_default=GROK_DEFAULT_MODEL,
+                                  grok_image_default=GROK_DEFAULT_IMAGE_MODEL, grok_max=GROK_MAX_TWEETS)
 
 
 @app.post("/<access_path>/tweets/views")
@@ -8034,20 +8120,21 @@ def tweets_grok_key(access_path: str):
         return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها."), 400
     key = str(data.get("api_key") or "").strip()
     model = str(data.get("model") or "").strip() or GROK_DEFAULT_MODEL
+    image_model = str(data.get("image_model") or "").strip() or GROK_DEFAULT_IMAGE_MODEL
     if key and not re.fullmatch(r"xai-[A-Za-z0-9_-]{16,200}", key):
         return jsonify(success=False, message="مفتاح Grok يبدأ بـ xai- ثم حروف وأرقام. انسخه كاملًا من console.x.ai."), 400
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,59}", model):
+    if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,59}", name) for name in (model, image_model)):
         return jsonify(success=False, message="اسم النموذج غير صالح."), 400
     key = key or grok_settings()["api_key"]
     if not key:
         return jsonify(success=False, message="أدخل مفتاح Grok."), 400
-    write_private_json(GROK_PATH, {"api_key": key, "model": model})
-    return jsonify(success=True, key_hint=grok_key_hint(key), model=model, message="حُفظ مفتاح Grok.")
+    write_private_json(GROK_PATH, {"api_key": key, "model": model, "image_model": image_model})
+    return jsonify(success=True, key_hint=grok_key_hint(key), model=model, image_model=image_model, message="حُفظ مفتاح Grok.")
 
 
 @app.post("/<access_path>/tweets/create")
 def tweets_create_start(access_path: str):
-    """«إنشاء» (the owner's copy): the ticked tweets go to Grok for new posts from their ideas."""
+    """«إنشاء» (the owner's copy): Grok opens the ticked tweets and writes one post with two images."""
     if not hmac.compare_digest(access_path, ACCESS_PATH) or not is_owner_copy():
         abort(404)
     data = request.get_json(silent=True) or {}
@@ -8066,7 +8153,8 @@ def tweets_create_start(access_path: str):
         if grok_state["running"]:
             return jsonify(success=False, message="يجري إنشاء محتوى الآن. انتظر حتى ينتهي."), 409
         grok_state.update(running=True, step="يبدأ…", error="")
-    threading.Thread(target=grok_create, args=(settings["api_key"], settings["model"], ids), name="grok-create", daemon=True).start()
+    threading.Thread(target=grok_create, args=(settings["api_key"], settings["model"], settings["image_model"], ids),
+                     name="grok-create", daemon=True).start()
     return jsonify(success=True, **grok_status_payload())
 
 
@@ -8075,6 +8163,19 @@ def tweets_create_status(access_path: str):
     if not hmac.compare_digest(access_path, ACCESS_PATH) or not is_owner_copy():
         abort(404)
     return jsonify(success=True, **grok_status_payload())
+
+
+@app.get("/<access_path>/tweets/create/image/<name>")
+def tweets_create_image(access_path: str, name: str):
+    """One of the last post's images (the owner's copy)."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH) or not is_owner_copy():
+        abort(404)
+    match = re.fullmatch(r"post_[0-9a-f]{17,24}_[12]\.(jpg|png|webp)", name)
+    path = GROK_IMAGES_DIR / name
+    if not match or not path.is_file():
+        abort(404)
+    kind = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}[match.group(1)]
+    return app.response_class(path.read_bytes(), mimetype=kind)
 
 
 @app.get("/<access_path>/tweets/views")
