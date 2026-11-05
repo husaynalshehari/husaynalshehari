@@ -9,6 +9,8 @@ script itself (same address and port), which then shows «إنشاء محتوى�
 3. Ticked kept posts are sent to a Gemini picture model («توليد»), which makes one new post from their
    idea: a short text and one or two pictures. Every generated post is kept, each in its own folder
    data/content_generated/<user>/<time>/.
+4. «من رابط تغريدة»: the tweets pasted there (their text and photos, read through FxTwitter, no
+   browser needed) go to Gemini the same way. Those posts are kept in data/content_generated/from-links/.
 """
 from __future__ import annotations
 
@@ -74,6 +76,12 @@ GENERATE_DIFFERENT = (
 )
 # How many posts one «توليد» makes (offered on the page; the first is the default).
 GENERATE_COUNTS = (3, 2, 1)
+# «من رابط تغريدة»: the pasted tweets are read through FxTwitter's free API, at most this many at once.
+FX_STATUS_URL = "https://api.fxtwitter.com/status/{}"
+LINK_MAX_TWEETS = 10
+# Their generated posts' folder under data/content_generated: not an X username (it has a hyphen), so
+# never an account's.
+LINKS_FOLDER = "from-links"
 IMAGE_TYPES = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif"}
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 # A 1×1 picture the profile gets in place of each post photo (see extract_posts).
@@ -169,6 +177,62 @@ def username_from(value: str) -> str:
     link = re.search(r"(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})(?:[/?#]|$)", raw)
     name = link.group(1) if link else raw.lstrip("@")
     return name if re.fullmatch(r"[A-Za-z0-9_]{1,15}", name) else ""
+
+
+def tweet_ids_from(text: str) -> list[str]:
+    """The tweets in pasted text, each once and in order: x.com / twitter.com links (with or without the
+    author's name) or bare tweet numbers."""
+    found: list[str] = []
+    for match in re.finditer(r"(?:x|twitter)\.com/[A-Za-z0-9_]{1,15}(?:/web)?/status(?:es)?/(\d{6,25})|(?<![\d/])(\d{15,25})(?!\d)", text or ""):
+        status_id = match.group(1) or match.group(2)
+        if status_id not in found:
+            found.append(status_id)
+    return found
+
+
+def read_tweet(status_id: str) -> dict:
+    """One tweet through FxTwitter: its link, text (with the post it quotes), and its photos' addresses
+    (a video's picture for a video). A tweet that cannot be read raises GenerateError, said plainly."""
+    link = f"https://x.com/i/status/{status_id}"
+    ask = urllib.request.Request(FX_STATUS_URL.format(status_id), headers={"User-Agent": "x-group-tool/1.0", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(ask, timeout=20) as answer:
+            data = json.loads(answer.read(4 * 1024 * 1024).decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403, 404, 410):
+            raise GenerateError(f"التغريدة غير موجودة أو حسابها خاص: {link}") from None
+        if exc.code in (429, 503):
+            raise GenerateError("خدمة قراءة التغريدات مشغولة الآن. أعد المحاولة بعد دقائق.") from None
+        raise GenerateError(f"تعذّرت قراءة التغريدة (رمز {exc.code}).") from None
+    except (urllib.error.URLError, OSError, ValueError):
+        raise GenerateError("تعذّرت قراءة التغريدة. تأكد أن الخادم متصل بالإنترنت.") from None
+    tweet = data.get("tweet") if isinstance(data, dict) else None
+    if not isinstance(tweet, dict):
+        raise GenerateError(f"التغريدة غير موجودة أو حسابها خاص: {link}")
+    photos = []
+    media = tweet.get("media") if isinstance(tweet.get("media"), dict) else {}
+    for item in media.get("all") or []:
+        if isinstance(item, dict):
+            address = str((item.get("url") if item.get("type") == "photo" else item.get("thumbnail_url")) or "")
+            if address.startswith("https://pbs.twimg.com/") and address not in photos:
+                photos.append(address)
+    quote = tweet.get("quote") if isinstance(tweet.get("quote"), dict) else {}
+    return {"status_id": status_id, "url": str(tweet.get("url") or link)[:300], "text": str(tweet.get("text") or "").strip()[:1000],
+            "quote": str(quote.get("text") or "").strip()[:500], "photos": photos[:4]}
+
+
+def download_photo(address: str) -> tuple[str, bytes] | None:
+    """One tweet photo, in its large size: (type, bytes), or None when it cannot be had."""
+    url = re.sub(r"name=[A-Za-z0-9]+", "name=large", address) if "name=" in address else address
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "x-group-tool/1.0"}), timeout=30) as answer:
+            kind = (answer.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            body = answer.read(12 * 1024 * 1024)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if not body or not kind.startswith("image/"):
+        return None
+    return kind, body
 
 
 class GenerateError(Exception):
@@ -325,6 +389,9 @@ def attach(app, access_path: str, tools) -> None:
     generating = threading.Lock()
     generations: dict[str, dict] = {}
     generated_lock = threading.Lock()
+    # «من رابط تغريدة»: its posts' folder and its last «إرسال إلى Gemini» (it shares «توليد»'s turn).
+    links_folder = generated_root / LINKS_FOLDER
+    link_job: dict = {}
 
     def read_saved() -> list[dict]:
         try:
@@ -390,8 +457,13 @@ def attach(app, access_path: str, tools) -> None:
         """The account's generated posts, newest first. Each has its folder's name as "id"."""
         with generated_lock:
             move_old_generated(username)
+        return read_results(generated_folder(username))
+
+    def read_results(base: Path) -> list[dict]:
+        """The generated posts kept under base (one folder each), newest first, with the folder's name as "id"."""
+        with generated_lock:
             try:
-                folders = [entry for entry in generated_folder(username).iterdir() if entry.is_dir() and re.fullmatch(r"\d{10,16}", entry.name)]
+                folders = [entry for entry in base.iterdir() if entry.is_dir() and re.fullmatch(r"\d{10,16}", entry.name)]
             except OSError:
                 return []
             found = []
@@ -849,6 +921,149 @@ def attach(app, access_path: str, tools) -> None:
         threading.Thread(target=run_generation, args=(api_key, kept, model, post_ids, count), name="content-generate", daemon=True).start()
         return jsonify(success=True, message="بدأ التوليد.", job=generations[kept.lower()])
 
+    def link_parts(model: str, tweets: list[dict]) -> tuple[list[dict], dict]:
+        """The request made of the pasted tweets (their texts and photos), as «توليد» makes it of kept posts."""
+        order = []
+        for depth in range(4):
+            for index, tweet in enumerate(tweets):
+                if depth < len(tweet["files"]):
+                    order.append((index, depth))
+        picked: set[tuple[int, int]] = set()
+        size = 0
+        for index, depth in order:
+            if len(picked) >= GENERATE_MODELS[model]["max_photos"]:
+                break
+            data = tweets[index]["files"][depth][1]
+            if size + len(data) > GENERATE_MAX_BYTES:
+                continue
+            picked.add((index, depth))
+            size += len(data)
+        parts: list[dict] = [{"text": GENERATE_PROMPT.replace("posts from one account, each", "posts, each")}]
+        for index, tweet in enumerate(tweets):
+            text = tweet["text"] or "(no text)"
+            if tweet["quote"]:
+                text += "\n(It quotes: " + tweet["quote"] + ")"
+            parts.append({"text": f"Post {index + 1}:\n" + text})
+            for depth, (kind, data) in enumerate(tweet["files"]):
+                if (index, depth) in picked:
+                    parts.append({"inlineData": {"mimeType": kind, "data": base64.b64encode(data).decode("ascii")}})
+        total = sum(len(tweet["files"]) for tweet in tweets)
+        return parts, {"posts": [tweet["status_id"] for tweet in tweets], "links": [tweet["url"] for tweet in tweets],
+                       "photos_sent": len(picked), "photos_total": total}
+
+    def save_link_generated(result: dict) -> None:
+        """Keep a post made from pasted tweets with the others made that way, in a folder of its own."""
+        made_at = time.time()
+        stamp = str(int(made_at * 1000))
+        fresh = links_folder / f".{stamp}.new"
+        shutil.rmtree(fresh, ignore_errors=True)
+        fresh.mkdir(parents=True)
+        names = []
+        for number, (kind, data) in enumerate(result["pictures"], 1):
+            name = f"{number}.{EXTENSIONS.get(kind, 'png')}"
+            (fresh / name).write_bytes(data)
+            names.append(name)
+        kept = {"model": result["model"], "text": result["text"], "images": names, "posts": result["posts"], "links": result["links"],
+                "photos_sent": result["photos_sent"], "photos_total": result["photos_total"], "created_at": made_at,
+                "batch": result["batch"], "number": result["number"], "of": result["of"]}
+        (fresh / "result.json").write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
+        with generated_lock:
+            fresh.rename(links_folder / stamp)
+
+    def run_link_generation(api_key: str, status_ids: list[str], model: str, count: int) -> None:
+        """Read the pasted tweets, then make count posts from them one after the other, as «توليد» does."""
+        label = GENERATE_MODELS[model]["label"].split(" · ")[0]
+        batch = str(int(time.time() * 1000))
+        made: list[str] = []
+        problem = ""
+        last: GenerateError | None = None
+        try:
+            tweets = []
+            for number, status_id in enumerate(status_ids, 1):
+                link_job.update(status="running", message="جارٍ قراءة التغريدة" + (f" {number} من {len(status_ids)}" if len(status_ids) > 1 else "") + "…")
+                tweet = read_tweet(status_id)
+                tweet["files"] = [photo for photo in (download_photo(address) for address in tweet["photos"]) if photo]
+                tweets.append(tweet)
+            parts, info = link_parts(model, tweets)
+            sent = (f"أُرسلت {len(tweets)} تغريدات" if len(tweets) > 1 else "أُرسلت التغريدة") + f" و{info['photos_sent']} صورة" + (
+                f" من {info['photos_total']}" if info["photos_sent"] < info["photos_total"] else "")
+            for number in range(1, count + 1):
+                step = f"المنشور {number} من {count}" if count > 1 else ""
+
+                def progress(message: str, step=step) -> None:
+                    link_job.update(status="running", message=f"{step}: {message}" if step else message)
+
+                link_job.update(status="running", message=f"جارٍ توليد {step or 'المنشور'} بـ {label}… {sent}. قد يستغرق دقيقة أو أكثر.")
+                try:
+                    text, pictures = generate_one(api_key, model, parts, made, progress)
+                except GenerateError as exc:
+                    problem, last = (f"{step}: {exc}" if step else str(exc)), exc
+                    if exc.fatal:
+                        break
+                    continue
+                save_link_generated({**info, "model": model, "text": text, "pictures": pictures,
+                                     "batch": batch, "number": len(made) + 1, "of": count})
+                made.append(text)
+            if len(made) == count:
+                link_job.update(status="done", message="اكتمل التوليد: " + {1: "منشور واحد.", 2: "منشوران."}.get(count, f"{count} منشورات."))
+            elif made:
+                link_job.update(status="done", message=f"اكتمل {len(made)} من {count}. لم يكتمل الباقي: {problem}")
+            elif last is not None and last.fatal:
+                link_job.update(status="failed", message=str(last))
+            else:
+                before = "لم يكتمل أي منشور. " if count > 1 else ""
+                link_job.update(status="failed", message=f"{before}{problem} جرّب تغريدة أو نموذجًا آخر.")
+        except GenerateError as exc:
+            link_job.update(status="failed", message=str(exc))
+        except Exception:
+            link_job.update(status="failed", message="تعذّر التوليد.")
+        finally:
+            generating.release()
+
+    def content_link_generate(access: str):
+        """«إرسال إلى Gemini»: the pasted tweets go to the chosen Gemini model; the page follows it."""
+        allowed(access)
+        data = request.get_json(silent=True) or {}
+        if not csrf_ok(data):
+            return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+        status_ids = tweet_ids_from(str(data.get("links") or ""))
+        if not status_ids:
+            return jsonify(success=False, message="الصق رابط تغريدة، مثل https://x.com/user/status/123…"), 400
+        if len(status_ids) > LINK_MAX_TWEETS:
+            return jsonify(success=False, message=f"الحد الأقصى {LINK_MAX_TWEETS} تغريدات في المرة الواحدة."), 400
+        model = str(data.get("model") or "")
+        if model not in GENERATE_MODELS:
+            return jsonify(success=False, message="اختر نموذج Gemini."), 400
+        try:
+            count = int(data.get("count") or GENERATE_COUNTS[0])
+        except (TypeError, ValueError):
+            count = 0
+        if count not in GENERATE_COUNTS:
+            return jsonify(success=False, message="اختر عدد المنشورات."), 400
+        gemini_key = getattr(tools, "gemini_key", None)
+        if gemini_key is None:
+            return jsonify(success=False, message="حدّث ملف السكربت لاستخدام التوليد."), 400
+        api_key = gemini_key()
+        if not api_key:
+            return jsonify(success=False, message="لا يوجد مفتاح Gemini محفوظ في اللوحة."), 400
+        if not generating.acquire(blocking=False):
+            return jsonify(success=False, message="يعمل الآن توليد آخر. انتظر حتى ينتهي."), 409
+        link_job.clear()
+        link_job.update(status="running", message="جارٍ قراءة التغريدة…")
+        threading.Thread(target=run_link_generation, args=(api_key, status_ids, model, count), name="content-link-generate", daemon=True).start()
+        return jsonify(success=True, message="بدأ التوليد.", job=dict(link_job))
+
+    def content_link_posts(access: str):
+        """The posts made from pasted tweets, and how the last «إرسال إلى Gemini» is going."""
+        allowed(access)
+        return jsonify(success=True, job=dict(link_job), generated=read_results(links_folder))
+
+    def content_link_media(access: str, made: str, name: str):
+        allowed(access)
+        if not re.fullmatch(r"\d{10,16}", made) or not re.fullmatch(r"[12]\.(png|jpg|webp)", name):
+            abort(404)
+        return send_from_directory(links_folder / made, name)
+
     def content_generated_media(access: str, username: str, made: str, name: str):
         allowed(access)
         if not username_from(username) or not re.fullmatch(r"\d{10,16}", made) or not re.fullmatch(r"[12]\.(png|jpg|webp)", name):
@@ -879,6 +1094,9 @@ def attach(app, access_path: str, tools) -> None:
     app.add_url_rule("/<access>/content/media/<username>/<name>", "content_media", content_media, methods=["GET"])
     app.add_url_rule("/<access>/content/generate", "content_generate", content_generate, methods=["POST"])
     app.add_url_rule("/<access>/content/generated/<username>/<made>/<name>", "content_generated_media", content_generated_media, methods=["GET"])
+    app.add_url_rule("/<access>/content/link-generate", "content_link_generate", content_link_generate, methods=["POST"])
+    app.add_url_rule("/<access>/content/link-posts", "content_link_posts", content_link_posts, methods=["GET"])
+    app.add_url_rule("/<access>/content/link-generated/<made>/<name>", "content_link_media", content_link_media, methods=["GET"])
 
 
 PAGE = r'''<!doctype html>
@@ -974,6 +1192,9 @@ PAGE = r'''<!doctype html>
     .older .generated { margin-top: 6px; background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); }
     .older .gen-text { font-size: 14px; }
     .older .gen-images { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+    .link-row { margin-top: 6px; }
+    .gen-source { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+    .gen-source a { color: var(--pine); font-weight: 600; }
   </style>
 </head>
 <body>
@@ -996,6 +1217,34 @@ PAGE = r'''<!doctype html>
       </div>
       <p class="hint">يُفتح الملف الشخصي بالحساب المحفوظ، ويُحفظ اليوزر مع اسم الحساب. اضغط على حساب لاستخراج منشوراته.</p>
       <ul id="saved"></ul>
+    </section>
+    <section class="sheet">
+      <h2>من رابط تغريدة</h2>
+      <div class="row">
+        <input id="link" type="text" maxlength="2000" autocomplete="off" spellcheck="false" placeholder="https://x.com/user/status/123…" aria-label="رابط التغريدة">
+      </div>
+      <div class="gen-row link-row">
+        <select id="link-model" aria-label="نموذج Gemini">
+          {%- for id, model in models.items() %}
+          <option value="{{ id }}">{{ model.label }}</option>
+          {%- endfor %}
+        </select>
+      </div>
+      <div class="gen-row">
+        <select id="link-count" class="gen-count" aria-label="عدد المنشورات">
+          {%- for count in counts %}
+          <option value="{{ count }}">{{ {1: "منشور واحد", 2: "منشوران"}.get(count, count ~ " منشورات") }}</option>
+          {%- endfor %}
+        </select>
+        <button id="link-go" class="go" type="button">إرسال إلى Gemini</button>
+      </div>
+      <p class="hint">تُقرأ التغريدة (نصها وصورها) وتُرسل إلى Gemini ليصنع منها منشورًا جديدًا بنص وصورة، كما في «توليد». يمكن لصق أكثر من رابط.</p>
+      <div id="link-notice" class="notice" role="status" hidden></div>
+      <div id="link-generated"></div>
+      <details id="link-older" class="older" hidden>
+        <summary></summary>
+        <div id="link-older-list"></div>
+      </details>
     </section>
     <dialog id="extract" aria-labelledby="extract-title">
       <div class="box">
@@ -1273,8 +1522,10 @@ PAGE = r'''<!doctype html>
       showTicks();
     }
 
-    // One generated post: its text («نسخ النص»), its pictures, and what made it.
-    function generatedCard(result, title) {
+    // One generated post: its text («نسخ النص»), its pictures, and what made it. base: where its pictures
+    // are (an account's posts by default; «من رابط تغريدة» gives its own).
+    function generatedCard(result, title, base) {
+      base = base || apiRoot + "/content/generated/" + encodeURIComponent(current) + "/";
       const card = document.createElement("section");
       card.className = "generated";
       const head = document.createElement("div");
@@ -1285,9 +1536,10 @@ PAGE = r'''<!doctype html>
         head.append(name);
       }
       const meta = document.createElement("span");
+      const made = (result.posts || []).length;
       meta.textContent = ((MODELS[result.model] || {}).label || result.model)
         + " · " + new Date(result.created_at * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"})
-        + " · من " + (result.posts || []).length + " منشورات";
+        + " · من " + (result.links ? (made === 1 ? "تغريدة واحدة" : made + " تغريدات") : made + " منشورات");
       head.append(meta);
       const text = document.createElement("p");
       text.className = "gen-text";
@@ -1297,7 +1549,7 @@ PAGE = r'''<!doctype html>
       images.className = "gen-images";
       (result.images || []).forEach((name) => {
         const link = document.createElement("a");
-        link.href = apiRoot + "/content/generated/" + encodeURIComponent(current) + "/" + encodeURIComponent(result.id) + "/" + encodeURIComponent(name);
+        link.href = base + encodeURIComponent(result.id) + "/" + encodeURIComponent(name);
         link.target = "_blank";
         const image = document.createElement("img");
         image.src = link.href;
@@ -1316,7 +1568,25 @@ PAGE = r'''<!doctype html>
           copy.textContent = "نسخ النص";
         }, 1500);
       });
-      card.append(head, text, images, copy);
+      card.append(head, text, images);
+      // Made from pasted tweets: links to them.
+      if (Array.isArray(result.links) && result.links.length) {
+        const source = document.createElement("p");
+        source.className = "gen-source";
+        source.append("المصدر: ");
+        result.links.forEach((address, index) => {
+          if (!/^https:\/\/(?:x|twitter)\.com\//.test(address)) return;
+          const open = document.createElement("a");
+          open.href = address;
+          open.target = "_blank";
+          open.rel = "noopener";
+          open.textContent = result.links.length > 1 ? "التغريدة " + (index + 1) : "فتح التغريدة";
+          if (source.childNodes.length > 1) source.append(" · ");
+          source.append(open);
+        });
+        card.append(source);
+      }
+      card.append(copy);
       return card;
     }
 
@@ -1430,6 +1700,109 @@ PAGE = r'''<!doctype html>
         localStorage.setItem("content-generate-count", genCount.value);
       } catch (_) {}
     });
+
+    // «من رابط تغريدة»: the pasted tweets go to Gemini; the posts made from links show under it, the
+    // last «إرسال إلى Gemini»'s on top and the earlier ones folded.
+    const linkField = document.getElementById("link");
+    const linkGo = document.getElementById("link-go");
+    const linkModel = document.getElementById("link-model");
+    const linkCount = document.getElementById("link-count");
+    const linkNotice = document.getElementById("link-notice");
+    const linkOlder = document.getElementById("link-older");
+    let linkRunning = false;
+    let linkPolling = 0;
+    let linkShows = "";
+
+    function showLinkJob(job) {
+      linkRunning = job.status === "running";
+      linkGo.disabled = linkRunning;
+      linkNotice.hidden = !job.status;
+      if (job.status) {
+        linkNotice.textContent = job.message;
+        linkNotice.className = "notice " + (job.status === "failed" ? "is-bad" : "is-ok");
+      }
+    }
+
+    function showLinkGenerated(list) {
+      const shows = list.map((row) => row.id).join(",");
+      if (shows === linkShows) return;
+      linkShows = shows;
+      const base = apiRoot + "/content/link-generated/";
+      const batchOf = (row) => row.batch || row.id;
+      const last = list.length ? batchOf(list[0]) : "";
+      const latest = list.filter((row) => batchOf(row) === last).sort((a, b) => (a.number || 0) - (b.number || 0));
+      document.getElementById("link-generated").replaceChildren(...latest.map((row) => generatedCard(row, row.of > 1 ? "المنشور " + row.number + " من " + row.of : "آخر منشور مولَّد", base)));
+      const older = list.filter((row) => batchOf(row) !== last);
+      linkOlder.hidden = !older.length;
+      linkOlder.querySelector("summary").textContent = "المنشورات المولَّدة السابقة من الروابط (" + older.length + ")";
+      document.getElementById("link-older-list").replaceChildren(...older.map((row) => generatedCard(row, "", base)));
+    }
+
+    async function loadLinkPosts() {
+      let data;
+      try {
+        data = await (await fetch(apiRoot + "/content/link-posts", {cache: "no-store"})).json();
+      } catch (_) {
+        data = {};
+      }
+      const wasRunning = linkRunning;
+      showLinkJob(data.job || {});
+      showLinkGenerated(Array.isArray(data.generated) ? data.generated : []);
+      if (wasRunning && !linkRunning && (data.job || {}).status === "done") {
+        document.getElementById("link-generated").scrollIntoView({block: "start", behavior: "smooth"});
+      }
+      clearTimeout(linkPolling);
+      if ((data.job || {}).status === "running") linkPolling = setTimeout(loadLinkPosts, 2000);
+    }
+
+    linkGo.addEventListener("click", async () => {
+      const links = linkField.value.trim();
+      if (!links) {
+        showLinkJob({status: "failed", message: "الصق رابط التغريدة."});
+        linkField.focus();
+        return;
+      }
+      showLinkJob({status: "running", message: "جارٍ البدء…"});
+      let data;
+      try {
+        const response = await fetch(apiRoot + "/content/link-generate", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          cache: "no-store",
+          body: JSON.stringify({csrf_token: csrf, links, model: linkModel.value, count: Number(linkCount.value)})
+        });
+        data = await response.json();
+      } catch (_) {
+        data = {message: "تعذّر الاتصال."};
+      }
+      if (!data.success) {
+        showLinkJob({status: "failed", message: data.message || "تعذّر بدء التوليد."});
+        return;
+      }
+      showLinkJob(data.job);
+      loadLinkPosts();
+    });
+    linkField.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !linkGo.disabled) linkGo.click();
+    });
+    // The same model and count as «توليد», remembered on this browser.
+    try {
+      const savedModel = localStorage.getItem("content-generate-model");
+      if (savedModel && MODELS[savedModel]) linkModel.value = savedModel;
+      const savedCount = localStorage.getItem("content-generate-count");
+      if (savedCount && [...linkCount.options].some((option) => option.value === savedCount)) linkCount.value = savedCount;
+    } catch (_) {}
+    linkModel.addEventListener("change", () => {
+      try {
+        localStorage.setItem("content-generate-model", linkModel.value);
+      } catch (_) {}
+    });
+    linkCount.addEventListener("change", () => {
+      try {
+        localStorage.setItem("content-generate-count", linkCount.value);
+      } catch (_) {}
+    });
+    loadLinkPosts();
 
     // Pages opened over plain http (a server IP) have no navigator.clipboard, so fall back to execCommand.
     async function copyText(text) {
