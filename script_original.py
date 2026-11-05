@@ -5591,7 +5591,7 @@ def secure_response(response):
     response.headers["Pragma"] = "no-cache"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' blob: https://pbs.twimg.com; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'"
     return response
 
 
@@ -5826,6 +5826,7 @@ def load_collected() -> None:
                 record["views"] = None if row.get("views") is None else max(0, int(row["views"]))
         except (TypeError, ValueError):
             record.pop("views_at", None)
+        record.update(tweet_content(row))
         loaded[str(status_id)] = record
     with collected_lock:
         collected_tweets.clear()
@@ -5916,15 +5917,66 @@ FX_PAUSE_SECONDS = 180               # the first wait; the next ones wait 6, 9, 
 FX_PAUSE_MAX_SECONDS = 900
 FX_MAX_PAUSES = 6                    # waits in a row with no answer between them: then it stops
 VIEWS_DAYS = (1, 6)                  # the days that can be checked: yesterday to 6 days ago (not today)
+# With its views, a tweet's content is kept: its text, its pictures (a photo, or the still of a video or
+# a GIF; from X's picture server only, at most 4) and the tweet it quotes, if any.
+TWEET_PICTURE = re.compile(r"https://pbs\.twimg\.com/[A-Za-z0-9_./-]{1,200}(?:\?[A-Za-z0-9_=&.-]{1,80})?")
+TWEET_HANDLE = re.compile(r"[A-Za-z0-9_]{1,30}")
+TWEET_BODY_MAX = 2000
+QUOTE_BODY_MAX = 1000
 views_lock = threading.Lock()
 views_queue: deque = deque()
 views_state: dict = {"running": False, "paused_until": 0.0, "error": "", "removed": [], "slow": False}
 
 
-def fx_tweet_views(status_id: str) -> tuple[str, int | None, str]:
-    """Ask FxTwitter about one tweet. Returns (outcome, views, detail): ("ok", views or None, the
-    tweet's link) · ("gone", None, "") deleted, private or not found · ("blocked", None, seconds to
-    wait or "") too many requests · ("error", None, why) no usable answer."""
+def tweet_pictures(value) -> list[list[str]]:
+    """Pictures as kept, [kind, address] with kind "photo" or "video" (its still): only X's picture
+    server, at most 4."""
+    found = []
+    for pair in value if isinstance(value, list) else []:
+        if (isinstance(pair, list) and len(pair) == 2 and pair[0] in ("photo", "video")
+                and isinstance(pair[1], str) and TWEET_PICTURE.fullmatch(pair[1])):
+            found.append([pair[0], pair[1]])
+    return found[:4]
+
+
+def tweet_content(row: dict) -> dict:
+    """A saved tweet's content ("body", "pictures", and "quote": "by", "body", "pictures"), checked
+    again; {} when it has none (its views were not fetched since this was added)."""
+    if not isinstance(row.get("body"), str):
+        return {}
+    content = {"body": row["body"][:TWEET_BODY_MAX], "pictures": tweet_pictures(row.get("pictures"))}
+    quoted = row.get("quote")
+    if isinstance(quoted, dict):
+        by = str(quoted.get("by") or "")
+        content["quote"] = {"by": by if TWEET_HANDLE.fullmatch(by) else "", "body": str(quoted.get("body") or "")[:QUOTE_BODY_MAX],
+                            "pictures": tweet_pictures(quoted.get("pictures"))}
+    return content
+
+
+def fx_content(tweet: dict) -> dict:
+    """The content kept from FxTwitter's answer about a tweet (see tweet_content)."""
+    def pictures(of: dict) -> list[list[str]]:
+        media = of.get("media")
+        found = []
+        for item in (media.get("all") or []) if isinstance(media, dict) else []:
+            if isinstance(item, dict) and item.get("type") in ("photo", "video", "gif"):
+                found.append(["photo", item.get("url")] if item["type"] == "photo" else ["video", item.get("thumbnail_url")])
+        return tweet_pictures(found)
+    content = {"body": str(tweet.get("text") or "")[:TWEET_BODY_MAX], "pictures": pictures(tweet)}
+    quoted = tweet.get("quote")
+    if isinstance(quoted, dict):
+        author = quoted.get("author") if isinstance(quoted.get("author"), dict) else {}
+        by = str(author.get("screen_name") or "")
+        content["quote"] = {"by": by if TWEET_HANDLE.fullmatch(by) else "", "body": str(quoted.get("text") or "")[:QUOTE_BODY_MAX],
+                            "pictures": pictures(quoted)}
+    return content
+
+
+def fx_tweet_views(status_id: str) -> tuple[str, int | None, str, dict | None]:
+    """Ask FxTwitter about one tweet. Returns (outcome, views, detail, content): ("ok", views or None,
+    the tweet's link, its content) · ("gone", None, "", None) deleted, private or not found ·
+    ("blocked", None, seconds to wait or "", None) too many requests · ("error", None, why, None) no
+    usable answer."""
     asking = urllib.request.Request(FX_STATUS_URL.format(status_id), headers={
         "User-Agent": "x-group-tool/1.0", "Accept": "application/json"})
     try:
@@ -5936,23 +5988,23 @@ def fx_tweet_views(status_id: str) -> tuple[str, int | None, str]:
         except Exception:
             body = None
         if exc.code == 429:
-            return "blocked", None, str(exc.headers.get("Retry-After") or "")
+            return "blocked", None, str(exc.headers.get("Retry-After") or ""), None
         if isinstance(body, dict) and body.get("code") in (401, 403, 404, 410):
-            return "gone", None, ""          # FxTwitter's own answer about this tweet
+            return "gone", None, "", None    # FxTwitter's own answer about this tweet
         if exc.code in (403, 503):
-            return "blocked", None, str(exc.headers.get("Retry-After") or "")
+            return "blocked", None, str(exc.headers.get("Retry-After") or ""), None
         if exc.code in (404, 410):
-            return "gone", None, ""
-        return "error", None, f"HTTP {exc.code}"
+            return "gone", None, "", None
+        return "error", None, f"HTTP {exc.code}", None
     except Exception as exc:                 # no answer, a cut connection, or not JSON
-        return "error", None, type(exc).__name__
+        return "error", None, type(exc).__name__, None
     tweet = data.get("tweet") if isinstance(data, dict) else None
     if not isinstance(tweet, dict):
-        return "gone", None, ""
+        return "gone", None, "", None
     views = tweet.get("views")
     if isinstance(views, bool) or not isinstance(views, (int, float)) or views < 0:
         views = None
-    return "ok", None if views is None else int(views), str(tweet.get("url") or "")
+    return "ok", None if views is None else int(views), str(tweet.get("url") or ""), fx_content(tweet)
 
 
 def views_to_end_of_line(status_ids: list[str]) -> None:
@@ -5979,13 +6031,14 @@ def views_worker() -> None:
                                error="توقف جلب المشاهدات بسبب خطأ. اضغط «عرض الأكثر مشاهدة» ليكمل.")
 
 
-def keep_views(answers: list[tuple[str, str, int | None, str]]) -> None:
-    """Keep what FxTwitter said of these tweets ((id, outcome, views, link)): the count, or
-    «لا يوجد رقم» (deleted, private, no count, or no answer three times), then take them out of the
-    line. A tweet whose author turns out to be an ignored account is removed, and the page is told."""
-    ignored = {status_id for status_id, outcome, _, link in answers if outcome == "ok" and link and tweet_is_ignored(link)}
+def keep_views(answers: list[tuple[str, str, int | None, str, dict | None]]) -> None:
+    """Keep what FxTwitter said of these tweets ((id, outcome, views, link, content)): the count, or
+    «لا يوجد رقم» (deleted, private, no count, or no answer three times), and the tweet's content,
+    then take them out of the line. A tweet whose author turns out to be an ignored account is
+    removed, and the page is told."""
+    ignored = {status_id for status_id, outcome, _, link, _ in answers if outcome == "ok" and link and tweet_is_ignored(link)}
     with collected_lock:
-        for status_id, outcome, views, link in answers:
+        for status_id, outcome, views, link, content in answers:
             row = collected_tweets.get(status_id)
             if row is None:
                 continue
@@ -5996,6 +6049,13 @@ def keep_views(answers: list[tuple[str, str, int | None, str]]) -> None:
             row["views_at"] = int(time.time())
             if outcome == "ok" and link and tweet_author_handle(link) and not tweet_author_handle(row["url"]):
                 row["url"] = link[:300]
+            if outcome == "ok" and content:
+                for key in ("body", "pictures", "quote"):
+                    row.pop(key, None)
+                row.update(content)
+            elif outcome == "gone":
+                for key in ("body", "pictures", "quote"):
+                    row.pop(key, None)       # deleted or private: nothing of it to show
         persist_collected_unlocked()
     with views_lock:
         for status_id, *_ in answers:
@@ -6022,7 +6082,7 @@ def fetch_queued_views() -> None:
                     return
                 asking = list(itertools.islice(views_queue, 1 if slow else FX_AT_ONCE))
             done, again, refused = [], [], []
-            for status_id, (outcome, views, detail) in zip(asking, pool.map(fx_tweet_views, asking)):
+            for status_id, (outcome, views, detail, content) in zip(asking, pool.map(fx_tweet_views, asking)):
                 if outcome == "blocked":
                     refused.append(detail)           # stays where it is: asked again after the wait
                     continue
@@ -6033,8 +6093,8 @@ def fetch_queued_views() -> None:
                         again.append(status_id)      # asked again after the others
                         continue
                     # It keeps failing while others are answered: no count for it.
-                done.append((status_id, outcome, views, detail if outcome == "ok" else ""))
-            answered = any(outcome in ("ok", "gone") for _, outcome, _, _ in done)
+                done.append((status_id, outcome, views, detail if outcome == "ok" else "", content if outcome == "ok" else None))
+            answered = any(outcome in ("ok", "gone") for _, outcome, *_ in done)
             if answered:
                 pauses = 0
                 failing.clear()
@@ -6092,7 +6152,7 @@ def views_status_payload(since: float) -> dict:
                  "paused": max(0, int(views_state["paused_until"] - now)), "removed": list(views_state["removed"]),
                  "slow": views_state["slow"]}
     with collected_lock:
-        state["views"] = {status_id: [row.get("views"), row["views_at"]] for status_id, row in collected_tweets.items()
+        state["views"] = {status_id: [row.get("views"), row["views_at"], tweet_content(row) or None] for status_id, row in collected_tweets.items()
                           if row.get("views_at") and row["views_at"] >= since - 2}
     state["now"] = now
     return state
@@ -7236,8 +7296,32 @@ TWEETS_PART_STYLE = r'''<style>
     #tweets summary .tail::after { content: "‹"; color: var(--muted); font-size: 18px; line-height: 1; transition: transform 0.15s; }
     #tweets details[open] summary .tail::after { transform: rotate(-90deg); }
     #tweets ol { list-style: none; margin: 0; padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px; }
-    #tweets li { padding: 8px 10px; border-radius: 10px; background: var(--tweets-tweet, var(--paper)); box-shadow: inset 0 0 0 1px var(--line); }
-    #tweets .text { margin: 0; font-size: 14px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    #tweets li { position: relative; padding: 8px 10px; border-radius: 10px; background: var(--tweets-tweet, var(--paper)); box-shadow: inset 0 0 0 1px var(--line); }
+    #tweets .text { margin: 0; font-size: 14px; white-space: pre-line; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    #tweets li.has-content .text { padding-inline-end: 30px; }
+    #tweets li.is-open .text { display: block; overflow: visible; }
+    #tweets .tw-open { position: absolute; top: 6px; inset-inline-end: 6px; display: grid; place-items: center; width: 26px; height: 26px; min-height: 0;
+      padding: 0; border: 0; border-radius: 50%; background: var(--tweets-day, var(--sheet)); color: var(--muted); box-shadow: inset 0 0 0 1px var(--line);
+      font: inherit; font-size: 16px; font-weight: 700; line-height: 1; cursor: pointer; }
+    #tweets .tw-open::before { content: "‹"; transition: transform 0.15s; }
+    #tweets li.is-open .tw-open::before { transform: rotate(-90deg); }
+    #tweets .more { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+    #tweets .pics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+    #tweets .pic { position: relative; display: block; aspect-ratio: 1; overflow: hidden; border-radius: 8px; background: var(--line); }
+    #tweets .pic img { display: block; width: 100%; height: 100%; object-fit: cover; }
+    #tweets .pics.one { grid-template-columns: minmax(0, 1fr); }
+    #tweets .pics.one .pic { aspect-ratio: auto; min-height: 60px; }
+    #tweets .pics.one .pic img { height: auto; max-height: 300px; object-fit: contain; }
+    #tweets .quote .pics.one .pic img { max-height: 200px; }
+    #tweets .pic.is-video::after { content: "▶"; position: absolute; inset: 0; display: grid; place-items: center; color: #fff; font-size: 24px;
+      text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6); }
+    #tweets .pic.is-broken img { visibility: hidden; }
+    #tweets .pic.is-broken::before { content: "تعذّر عرض الصورة"; position: absolute; inset: 0; display: grid; place-items: center; padding: 6px;
+      color: var(--muted); font-size: 12px; text-align: center; }
+    #tweets .quote { padding: 8px 10px; border-radius: 10px; background: var(--tweets-day, var(--sheet)); box-shadow: inset 0 0 0 1px var(--line); }
+    #tweets .quote .by { color: var(--muted); font-size: 12px; font-weight: 600; }
+    #tweets .quote p { margin: 2px 0 0; font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }
+    #tweets .quote .pics { margin-top: 6px; }
     #tweets .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 4px; color: var(--muted); font-size: 12px; }
     #tweets .meta .open { margin-inline-start: auto; color: var(--pine); font-weight: 700; text-decoration: none; }
     #tweets .tweets-empty { margin: 18px 0 6px; text-align: center; color: var(--muted); }
@@ -7305,6 +7389,90 @@ TWEETS_PART_SCRIPT = r'''<script>
     document.getElementById("tweets-empty").hidden = list.length > 0;
     const box = document.getElementById("tweets-days");
 
+    // A tweet's content (its text, pictures and the tweet it quotes) comes with its views. A small arrow
+    // over the tweet opens it: the text in full, then the pictures. Closed, the text shows 3 lines.
+    const smaller = (address) => /[?&]name=/.test(address) ? address.replace(/([?&]name=)[^&]*/, "$1small")
+      : address + (address.includes("?") ? "&" : "?") + "name=small";
+    function pictures(list, tweetLink) {
+      const box = document.createElement("div");
+      box.className = list.length === 1 ? "pics one" : "pics";
+      for (const [kind, address] of list) {
+        const link = document.createElement("a");
+        link.className = kind === "video" ? "pic is-video" : "pic";
+        link.href = kind === "photo" ? address : tweetLink || address;     // a photo opens in full; a video plays on X
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        const image = document.createElement("img");
+        image.src = smaller(address);
+        image.alt = kind === "video" ? "فيديو" : "صورة";
+        image.loading = "lazy";
+        image.referrerPolicy = "no-referrer";
+        image.addEventListener("error", () => link.classList.add("is-broken"));
+        link.append(image);
+        box.append(link);
+      }
+      return box;
+    }
+    function contentBox(tweet) {
+      const box = document.createElement("div");
+      box.className = "more";
+      const link = safeLink(tweet.url);
+      if ((tweet.pictures || []).length) box.append(pictures(tweet.pictures, link));
+      const quoted = tweet.quote;
+      if (quoted && (quoted.body || (quoted.pictures || []).length)) {
+        const quote = document.createElement("div");
+        quote.className = "quote";
+        if (quoted.by) {
+          const by = document.createElement("bdi");
+          by.className = "by";
+          by.dir = "ltr";
+          by.textContent = "@" + quoted.by;
+          quote.append(by);
+        }
+        if (quoted.body) {
+          const text = document.createElement("p");
+          text.dir = "auto";
+          text.textContent = quoted.body;
+          quote.append(text);
+        }
+        if ((quoted.pictures || []).length) quote.append(pictures(quoted.pictures, link));
+        box.append(quote);
+      }
+      return box;
+    }
+    function setOpen(entry, open) {
+      entry.open = open;
+      entry.li.classList.toggle("is-open", open);
+      entry.toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open && !entry.more) {
+        entry.more = contentBox(entry.tweet);    // made when first opened: a closed tweet loads no pictures
+        entry.text.after(entry.more);
+      }
+      if (entry.more) entry.more.hidden = !open;
+    }
+    function showContent(entry) {
+      const tweet = entry.tweet;
+      entry.text.textContent = tweet.body || tweet.text || "تغريدة";
+      const quoted = tweet.quote || {};
+      // Not fetched yet (or nothing in it): no arrow.
+      if (typeof tweet.body !== "string" || !(tweet.body || (tweet.pictures || []).length || quoted.body || (quoted.pictures || []).length)) return;
+      if (!entry.toggle) {
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "tw-open";
+        toggle.setAttribute("aria-label", "محتوى التغريدة");
+        toggle.addEventListener("click", () => setOpen(entry, !entry.open));
+        entry.li.classList.add("has-content");
+        entry.li.prepend(toggle);
+        entry.toggle = toggle;
+      }
+      if (entry.more) {
+        entry.more.remove();                       // new content: made again when shown
+        entry.more = null;
+      }
+      setOpen(entry, entry.open);
+    }
+
     // The day's tweets: most viewed first once it has counts (tweets without one after), else newest first.
     function order(day) {
       const counted = day.items.some((item) => item.tweet.views_at);
@@ -7317,6 +7485,14 @@ TWEETS_PART_SCRIPT = r'''<script>
         return b.first - a.first;
       });
       day.ol.replaceChildren(...sorted.map((item) => byId.get(item.tweet.id).li));
+      // The first tweet with content shows it, the others are closed: so it is clear each one can be opened.
+      let first = true;
+      for (const item of sorted) {
+        const entry = byId.get(item.tweet.id);
+        if (!entry.toggle) continue;
+        setOpen(entry, first);
+        first = false;
+      }
     }
 
     function showDay(day, state) {
@@ -7386,7 +7562,6 @@ TWEETS_PART_SCRIPT = r'''<script>
         const text = document.createElement("p");
         text.className = "text";
         text.dir = "auto";
-        text.textContent = item.tweet.text || "تغريدة";
         const meta = document.createElement("div");
         meta.className = "meta";
         const views = document.createElement("span");
@@ -7410,7 +7585,9 @@ TWEETS_PART_SCRIPT = r'''<script>
           meta.append(open);
         }
         li.append(text, meta);
-        byId.set(item.tweet.id, {tweet: item.tweet, day, li, views});
+        const entry = {tweet: item.tweet, day, li, views, text, toggle: null, more: null, open: false};
+        byId.set(item.tweet.id, entry);
+        showContent(entry);
       }
       order(day);
       showDay(day, null);
@@ -7458,6 +7635,11 @@ TWEETS_PART_SCRIPT = r'''<script>
         entry.tweet.views = pair[0];
         entry.tweet.views_at = pair[1];
         showViews(entry.views, entry.tweet);
+        if (pair[2]) {
+          for (const key of ["body", "pictures", "quote"]) delete entry.tweet[key];
+          Object.assign(entry.tweet, pair[2]);
+          showContent(entry);
+        }
       }
       for (const id of data.removed || []) {
         const entry = byId.get(id);
