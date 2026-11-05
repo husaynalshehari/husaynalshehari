@@ -13,7 +13,9 @@ import base64
 import gzip
 import hashlib
 import hmac
+import concurrent.futures
 import importlib.util
+import itertools
 import json
 import logging
 import math
@@ -5901,21 +5903,22 @@ def collected_payload() -> list[dict]:
 
 
 # «عرض المشاهدات» in «عرض التغريدات»: the current view count of a day's tweets, from FxTwitter's free
-# API (api.fxtwitter.com/status/<id>). It is asked slowly, one tweet every few seconds, so this server
-# is not blocked. If it is (too many requests), or several tweets in a row get no answer, the fetching
-# waits a few minutes (longer each time), then goes on where it stopped, more slowly than before.
+# API (api.fxtwitter.com/status/<id>). It is asked FX_AT_ONCE tweets at a time, with no wait between
+# them (a test asked 140 at once, then 140 one after another, and none was refused). If the service
+# refuses (too many requests), or several tweets get no answer while none is answered, the fetching
+# waits a few minutes (longer each time), then goes on where it stopped, one tweet at a time, slowly.
 # The counts are kept with the saved tweets. Only the days from yesterday to 6 days ago can be checked
 # (today's views still grow), each once a day: after its check, its button waits for tomorrow.
 FX_STATUS_URL = "https://api.fxtwitter.com/status/{}"
-FX_GAP_SECONDS = (2.0, 3.5)          # between two tweets
-FX_SLOW_GAP_SECONDS = (5.0, 8.0)     # the same, once the service has asked to slow down
+FX_AT_ONCE = 10                      # tweets asked at the same time
+FX_SLOW_GAP_SECONDS = (5.0, 8.0)     # once the service has refused: one tweet at a time, this far apart
 FX_PAUSE_SECONDS = 180               # the first wait; the next ones wait 6, 9, 12 then 15 minutes
 FX_PAUSE_MAX_SECONDS = 900
 FX_MAX_PAUSES = 6                    # waits in a row with no answer between them: then it stops
 VIEWS_DAYS = (1, 6)                  # the days that can be checked: yesterday to 6 days ago (not today)
 views_lock = threading.Lock()
 views_queue: deque = deque()
-views_state: dict = {"running": False, "paused_until": 0.0, "error": "", "removed": []}
+views_state: dict = {"running": False, "paused_until": 0.0, "error": "", "removed": [], "slow": False}
 
 
 def fx_tweet_views(status_id: str) -> tuple[str, int | None, str]:
@@ -5952,10 +5955,15 @@ def fx_tweet_views(status_id: str) -> tuple[str, int | None, str]:
     return "ok", None if views is None else int(views), str(tweet.get("url") or "")
 
 
-def views_to_end_of_line(status_id: str) -> None:
+def views_to_end_of_line(status_ids: list[str]) -> None:
+    """These tweets are asked again after the others."""
     with views_lock:
-        if views_queue and views_queue[0] == status_id:
-            views_queue.rotate(-1)
+        for status_id in status_ids:
+            try:
+                views_queue.remove(status_id)
+            except ValueError:
+                continue
+            views_queue.append(status_id)
 
 
 def views_worker() -> None:
@@ -5967,81 +5975,100 @@ def views_worker() -> None:
         app.logger.warning("views fetching failed")
         with views_lock:
             views_queue.clear()
-            views_state.update(running=False, paused_until=0.0,
+            views_state.update(running=False, paused_until=0.0, slow=False,
                                error="توقف جلب المشاهدات بسبب خطأ. اضغط «عرض المشاهدات» ليكمل.")
 
 
+def keep_views(answers: list[tuple[str, str, int | None, str]]) -> None:
+    """Keep what FxTwitter said of these tweets ((id, outcome, views, link)): the count, or
+    «لا يوجد رقم» (deleted, private, no count, or no answer three times), then take them out of the
+    line. A tweet whose author turns out to be an ignored account is removed, and the page is told."""
+    ignored = {status_id for status_id, outcome, _, link in answers if outcome == "ok" and link and tweet_is_ignored(link)}
+    with collected_lock:
+        for status_id, outcome, views, link in answers:
+            row = collected_tweets.get(status_id)
+            if row is None:
+                continue
+            if status_id in ignored:
+                del collected_tweets[status_id]
+                continue
+            row["views"] = views if outcome == "ok" else None
+            row["views_at"] = int(time.time())
+            if outcome == "ok" and link and tweet_author_handle(link) and not tweet_author_handle(row["url"]):
+                row["url"] = link[:300]
+        persist_collected_unlocked()
+    with views_lock:
+        for status_id, *_ in answers:
+            try:
+                views_queue.remove(status_id)
+            except ValueError:
+                pass
+        if ignored:
+            views_state["removed"] = (views_state["removed"] + [status_id for status_id, *_ in answers if status_id in ignored])[-500:]
+
+
 def fetch_queued_views() -> None:
-    """Fetch the queued tweets' view counts one by one, slowly; wait out a block and go on."""
+    """Fetch the queued tweets' view counts, FX_AT_ONCE at a time with no wait between them. A refusal
+    (or no answer at all) makes it wait out the block, then go on one tweet at a time, slowly."""
     pauses = 0                       # waits in a row, with no answer between them
     failed: dict[str, int] = {}      # failed asks of each tweet
     failing: set[str] = set()        # the tweets that failed since the last answer
-    gap = FX_GAP_SECONDS
-    while True:
-        with views_lock:
-            if not views_queue:
-                views_state.update(running=False, paused_until=0.0)
-                return
-            status_id = views_queue[0]
-        outcome, views, detail = fx_tweet_views(status_id)
-        if outcome == "error":
-            failed[status_id] = failed.get(status_id, 0) + 1
-            failing.add(status_id)
-            if failed[status_id] >= 3:
-                pass                             # it fails while others are answered: no count for it
-            elif len(failing) >= 3:
-                # Three tweets in a row: the service or the connection is down, not the tweets.
-                views_to_end_of_line(status_id)
-                outcome, detail = "blocked", ""
-            elif failed[status_id] == 1:
-                time.sleep(10)                   # a moment's trouble: the same tweet again
-                continue
-            else:
-                views_to_end_of_line(status_id)  # once more, after the others
-                time.sleep(random.uniform(*gap))
-                continue
-        if outcome == "blocked":
-            pauses += 1
-            if pauses > FX_MAX_PAUSES:
-                with views_lock:
-                    views_queue.clear()
-                    views_state.update(running=False, paused_until=0.0,
-                                       error="توقف جلب المشاهدات لأن الخدمة لم تعد تجيب. اضغط «عرض المشاهدات» لاحقًا ليكمل.")
-                return
-            try:
-                asked = int(float(detail))
-            except ValueError:
+    slow = False
+    with concurrent.futures.ThreadPoolExecutor(max_workers=FX_AT_ONCE, thread_name_prefix="tweet-views") as pool:
+        while True:
+            with views_lock:
+                if not views_queue:
+                    views_state.update(running=False, paused_until=0.0, slow=False)
+                    return
+                asking = list(itertools.islice(views_queue, 1 if slow else FX_AT_ONCE))
+            done, again, refused = [], [], []
+            for status_id, (outcome, views, detail) in zip(asking, pool.map(fx_tweet_views, asking)):
+                if outcome == "blocked":
+                    refused.append(detail)           # stays where it is: asked again after the wait
+                    continue
+                if outcome == "error":
+                    failed[status_id] = failed.get(status_id, 0) + 1
+                    failing.add(status_id)
+                    if failed[status_id] < 3:
+                        again.append(status_id)      # asked again after the others
+                        continue
+                    # It keeps failing while others are answered: no count for it.
+                done.append((status_id, outcome, views, detail if outcome == "ok" else ""))
+            answered = any(outcome in ("ok", "gone") for _, outcome, _, _ in done)
+            if answered:
+                pauses = 0
+                failing.clear()
+            if done:
+                keep_views(done)
+            views_to_end_of_line(again)
+            if not refused and not answered and len(failing) >= 3:
+                refused.append("")                   # three tweets and no answer: the service or the connection is down
+            if refused:
+                pauses += 1
+                if pauses > FX_MAX_PAUSES:
+                    with views_lock:
+                        views_queue.clear()
+                        views_state.update(running=False, paused_until=0.0, slow=False,
+                                           error="توقف جلب المشاهدات لأن الخدمة لم تعد تجيب. اضغط «عرض المشاهدات» لاحقًا ليكمل.")
+                    return
                 asked = 0
-            wait = min(max(asked, FX_PAUSE_SECONDS * pauses), FX_PAUSE_MAX_SECONDS)
-            gap = FX_SLOW_GAP_SECONDS
-            with views_lock:
-                views_state["paused_until"] = time.time() + wait
-            time.sleep(wait)
-            with views_lock:
-                views_state["paused_until"] = 0.0
-            continue                             # the same tweet (or, after failures, the next) again
-        if outcome != "error":
-            pauses = 0
-            failing.clear()
-        link = detail if outcome == "ok" else ""
-        ignored = bool(link) and tweet_is_ignored(link)
-        with collected_lock:
-            row = collected_tweets.get(status_id)
-            if row is not None:
-                if ignored:
-                    del collected_tweets[status_id]
-                else:
-                    row["views"] = views if outcome == "ok" else None
-                    row["views_at"] = int(time.time())
-                    if link and tweet_author_handle(link) and not tweet_author_handle(row["url"]):
-                        row["url"] = link[:300]
-                persist_collected_unlocked()
-        with views_lock:
-            if views_queue and views_queue[0] == status_id:
-                views_queue.popleft()
-            if ignored:
-                views_state["removed"] = (views_state["removed"] + [status_id])[-500:]
-        time.sleep(random.uniform(*gap))
+                for detail in refused:
+                    try:
+                        asked = max(asked, int(float(detail)))
+                    except (ValueError, OverflowError):
+                        pass                         # no number of seconds (empty, a date, "inf")
+                wait = min(max(asked, FX_PAUSE_SECONDS * pauses), FX_PAUSE_MAX_SECONDS)
+                slow = True
+                with views_lock:
+                    views_state.update(paused_until=time.time() + wait, slow=True)
+                time.sleep(wait)
+                with views_lock:
+                    views_state["paused_until"] = 0.0
+                continue
+            if again and not answered:
+                time.sleep(10)                       # a moment's trouble: try them again shortly
+            elif slow:
+                time.sleep(random.uniform(*FX_SLOW_GAP_SECONDS))
 
 
 def queue_views(ids: list[str]) -> int:
@@ -6052,7 +6079,7 @@ def queue_views(ids: list[str]) -> int:
         views_queue.extend(added)
         views_state["error"] = ""
         if views_queue and not views_state["running"]:
-            views_state["running"] = True
+            views_state.update(running=True, slow=False)
             threading.Thread(target=views_worker, name="tweet-views", daemon=True).start()
         return len(added)
 
@@ -6062,7 +6089,8 @@ def views_status_payload(since: float) -> dict:
     now = time.time()
     with views_lock:
         state = {"running": views_state["running"], "waiting": list(views_queue), "error": views_state["error"],
-                 "paused": max(0, int(views_state["paused_until"] - now)), "removed": list(views_state["removed"])}
+                 "paused": max(0, int(views_state["paused_until"] - now)), "removed": list(views_state["removed"]),
+                 "slow": views_state["slow"]}
     with collected_lock:
         state["views"] = {status_id: [row.get("views"), row["views_at"]] for status_id, row in collected_tweets.items()
                           if row.get("views_at") and row["views_at"] >= since - 2}
@@ -7295,7 +7323,7 @@ TWEETS_PART_SCRIPT = r'''<script>
       status.className = "vstatus";
       if (waiting) {
         if (day.button) day.button.disabled = true;
-        let text = "يجلب المشاهدات ببطء لتجنّب الحظر… بقي " + waiting + " من " + day.items.length;
+        let text = (state.slow ? "يجلب المشاهدات ببطء لأن الخدمة طلبت التمهّل… بقي " : "يجلب المشاهدات… بقي ") + waiting + " من " + day.items.length;
         if (state.paused) text = "متوقف مؤقتًا لتجنّب الحظر · يتابع بعد " + Math.floor(state.paused / 60) + ":" + pad(state.paused % 60) + " · بقي " + waiting + " من " + day.items.length;
         status.textContent = text;
         status.hidden = false;
@@ -7434,7 +7462,7 @@ TWEETS_PART_SCRIPT = r'''<script>
         total -= 1;
         showTotal();
       }
-      const state = {waiting: new Set(data.waiting || []), paused: data.paused || 0, error: data.error || ""};
+      const state = {waiting: new Set(data.waiting || []), paused: data.paused || 0, error: data.error || "", slow: !!data.slow};
       for (const day of list) showDay(day, state);
       return data.running || state.waiting.size > 0;
     }
