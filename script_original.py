@@ -6059,7 +6059,7 @@ def day_spans(data: dict) -> list[tuple[int, int]]:
 # the post with its two images, ready to copy and download, and what it all cost.
 GROK_URL = "https://api.x.ai/v1/responses"
 GROK_IMAGES_URL = "https://api.x.ai/v1/images/generations"
-GROK_DEFAULT_MODEL = "grok-build-0.1"       # the owner found Grok's build model the most creative
+GROK_DEFAULT_MODEL = "grok-4.7"
 GROK_DEFAULT_IMAGE_MODEL = "grok-imagine-image-2.0"
 GROK_PATH = DATA_DIR / "grok.json"
 GROK_LAST_PATH = DATA_DIR / "grok_last.json"
@@ -6079,8 +6079,8 @@ grok_state: dict = {"running": False, "step": "", "error": "", "result": None, "
 def grok_settings() -> dict:
     data = read_private_json(GROK_PATH) or {}
     model = str(data.get("model") or "").strip()
-    if data.get("version") != 2 and model == "grok-4.7":
-        model = ""                               # saved when grok-4.7 was the default: the build model now
+    if not isinstance(data.get("version"), int) or data["version"] < 3:
+        model = ""                               # saved while the build model was tried: back to grok-4.7
     return {"api_key": str(data.get("api_key") or "").strip(),
             "model": model or GROK_DEFAULT_MODEL,
             "image_model": str(data.get("image_model") or "").strip() or GROK_DEFAULT_IMAGE_MODEL}
@@ -8196,7 +8196,7 @@ def tweets_grok_key(access_path: str):
     key = key or grok_settings()["api_key"]
     if not key:
         return jsonify(success=False, message="أدخل مفتاح Grok."), 400
-    write_private_json(GROK_PATH, {"version": 2, "api_key": key, "model": model, "image_model": image_model})
+    write_private_json(GROK_PATH, {"version": 3, "api_key": key, "model": model, "image_model": image_model})
     return jsonify(success=True, key_hint=grok_key_hint(key), model=model, image_model=image_model, message="حُفظ مفتاح Grok.")
 
 
