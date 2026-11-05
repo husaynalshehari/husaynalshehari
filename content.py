@@ -5,6 +5,10 @@ The page makes new posts from tweets: paste a tweet's link (or a few). Each twee
 read through FxTwitter's free API (no browser and no account needed), go to a Gemini picture model,
 which makes one new post from their idea: a short text and two pictures in two sizes, a tall one and a
 wide one. Every generated post is kept, each in its own folder data/content_generated/from-links/<time>/.
+
+«المحتوى السابق» shows, read only, what the page's old accounts part left: for each account it kept,
+the posts generated from its tweets (data/content_generated/<user>/) and its extracted tweets with their
+photos (data/content/<user>/). Nothing of it is deleted.
 """
 from __future__ import annotations
 
@@ -495,6 +499,100 @@ def attach(app, access_path: str, tools) -> None:
         allowed(access)
         return jsonify(success=True, job=dict(link_job), generated=read_results(links_folder))
 
+    # «المحتوى السابق»: what the old accounts part left, read only.
+    data_dir = Path(tools.data_dir)
+    old_generated_root = data_dir / "content_generated"
+    old_media_root = data_dir / "content"
+
+    def old_key(value: str) -> str:
+        """An account's folder name (its username, lowercased); "" when it is not one."""
+        return value.lower() if re.fullmatch(r"[A-Za-z0-9_]{1,15}", value or "") else ""
+
+    def old_names() -> dict[str, tuple[str, str]]:
+        """The accounts the old part kept: folder name → (username, name)."""
+        try:
+            loaded = json.loads((data_dir / "content_accounts.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        rows = loaded.get("accounts") if isinstance(loaded, dict) else None
+        return {old_key(str(row["username"])): (str(row["username"]), str(row.get("name") or row["username"])[:80])
+                for row in rows or [] if isinstance(row, dict) and old_key(str(row.get("username") or ""))}
+
+    def old_kept(key: str) -> dict:
+        try:
+            loaded = json.loads((old_media_root / key / "posts.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def old_generated(key: str) -> list[dict]:
+        """An account's generated posts, newest first. The one post an older version kept straight in the
+        account's folder gets a folder of its own first, as the others."""
+        base = old_generated_root / key
+        with generated_lock:
+            if (base / "result.json").is_file():
+                try:
+                    loaded = json.loads((base / "result.json").read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    loaded = {}
+                loaded = loaded if isinstance(loaded, dict) else {}
+                try:
+                    made_at = float(loaded.get("created_at") or 0) or time.time()
+                except (TypeError, ValueError):
+                    made_at = time.time()
+                target = base / str(int(made_at * 1000))
+                target.mkdir(parents=True, exist_ok=True)
+                for name in [*(loaded.get("images") or []), "result.json"]:
+                    if re.fullmatch(r"[12]\.(png|jpg|webp)|result\.json", str(name)) and (base / str(name)).is_file():
+                        (base / str(name)).replace(target / str(name))
+        return read_results(base)
+
+    def content_archive(access: str):
+        """The accounts that left content: each with its name and how many generated posts and tweets."""
+        allowed(access)
+        names = old_names()
+        keys: set[str] = set()
+        for root in (old_generated_root, old_media_root):
+            try:
+                keys |= {old_key(entry.name) for entry in root.iterdir() if entry.is_dir() and old_key(entry.name)}
+            except OSError:
+                pass
+        rows = []
+        for key in sorted(keys):
+            base = old_generated_root / key
+            try:
+                generated = sum(1 for entry in base.iterdir() if entry.is_dir() and re.fullmatch(r"\d{10,16}", entry.name)
+                                and (entry / "result.json").is_file()) + int((base / "result.json").is_file())
+            except OSError:
+                generated = 0
+            kept = len(old_kept(key).get("posts") or [])
+            if generated or kept:
+                username, name = names.get(key, (key, key))
+                rows.append({"key": key, "username": username, "name": name, "generated": generated, "kept": kept})
+        return jsonify(success=True, accounts=rows)
+
+    def content_archive_account(access: str, key: str):
+        """One account's generated posts and extracted tweets."""
+        allowed(access)
+        key = old_key(key)
+        if not key:
+            abort(404)
+        return jsonify(success=True, generated=old_generated(key), kept=old_kept(key))
+
+    def content_archive_generated(access: str, key: str, made: str, name: str):
+        allowed(access)
+        key = old_key(key)
+        if not key or not re.fullmatch(r"\d{10,16}", made) or not re.fullmatch(r"[12]\.(png|jpg|webp)", name):
+            abort(404)
+        return send_from_directory(old_generated_root / key / made, name)
+
+    def content_archive_media(access: str, key: str, name: str):
+        allowed(access)
+        key = old_key(key)
+        if not key or not re.fullmatch(r"\d+_\d+\.(jpg|png|webp|gif)", name):
+            abort(404)
+        return send_from_directory(old_media_root / key, name)
+
     def content_link_media(access: str, made: str, name: str):
         allowed(access)
         if not re.fullmatch(r"\d{10,16}", made) or not re.fullmatch(r"[12]\.(png|jpg|webp)", name):
@@ -505,6 +603,10 @@ def attach(app, access_path: str, tools) -> None:
     app.add_url_rule("/<access>/content/link-generate", "content_link_generate", content_link_generate, methods=["POST"])
     app.add_url_rule("/<access>/content/link-posts", "content_link_posts", content_link_posts, methods=["GET"])
     app.add_url_rule("/<access>/content/link-generated/<made>/<name>", "content_link_media", content_link_media, methods=["GET"])
+    app.add_url_rule("/<access>/content/archive", "content_archive", content_archive, methods=["GET"])
+    app.add_url_rule("/<access>/content/archive/<key>", "content_archive_account", content_archive_account, methods=["GET"])
+    app.add_url_rule("/<access>/content/archive/<key>/generated/<made>/<name>", "content_archive_generated", content_archive_generated, methods=["GET"])
+    app.add_url_rule("/<access>/content/archive/<key>/media/<name>", "content_archive_media", content_archive_media, methods=["GET"])
 
 
 PAGE = r'''<!doctype html>
@@ -558,6 +660,21 @@ PAGE = r'''<!doctype html>
     .older .generated { margin-top: 6px; background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); }
     .older .gen-text { font-size: 14px; }
     .older .gen-images { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+    .acct { margin-top: 8px; border-radius: 12px; background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); }
+    .acct > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 9px 12px; cursor: pointer; list-style: none; font-size: 14px; }
+    .acct > summary::-webkit-details-marker { display: none; }
+    .acct > summary .handle { color: var(--muted); font-size: 12px; }
+    .acct > summary .counts { margin-inline-start: auto; color: var(--ok-ink); font-size: 12px; font-weight: 600; }
+    .acct-body { padding: 0 10px 10px; }
+    .acct h3 { margin: 10px 0 0; font-size: 13px; }
+    .acct .generated { background: var(--sheet); }
+    .kept-info { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .kept-post { margin-top: 6px; padding: 8px 10px; border-radius: 10px; background: var(--sheet); box-shadow: inset 0 0 0 1px var(--line); }
+    .kept-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; color: var(--muted); font-size: 12px; }
+    .kept-meta a { color: var(--pine); font-weight: 600; }
+    .kept-text { margin: 4px 0 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .kept-photos { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .kept-photos img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; display: block; }
   </style>
 </head>
 <body>
@@ -594,16 +711,23 @@ PAGE = r'''<!doctype html>
         <div id="link-older-list"></div>
       </details>
     </section>
+    <section id="archive" class="sheet" hidden>
+      <h2>المحتوى السابق</h2>
+      <p class="hint">ما بقي من قسم الحسابات: المنشورات المولَّدة من كل حساب، وتغريداته المستخرجة. للعرض فقط، ولا يُحذف شيء منه.</p>
+      <div id="archive-list"></div>
+    </section>
   </main>
   <script>
   (() => {
     const apiRoot = {{ api_root|tojson }};
     const csrf = {{ csrf_token|tojson }};
     const MODELS = {{ models|tojson }};
+    // A count in Arabic: one, two, 3 to 10, and 11 or more take different words.
+    const plural = (n, one, two, few, many) => n === 1 ? one : n === 2 ? two : n + " " + (n % 100 >= 3 && n % 100 <= 10 ? few : many);
 
     // One generated post: its text («نسخ النص»), its pictures with their sizes, and the tweets it came from.
-    function generatedCard(result, title) {
-      const base = apiRoot + "/content/link-generated/";
+    function generatedCard(result, title, base) {
+      base = base || apiRoot + "/content/link-generated/";
       const card = document.createElement("section");
       card.className = "generated";
       const head = document.createElement("div");
@@ -617,7 +741,7 @@ PAGE = r'''<!doctype html>
       const made = (result.posts || []).length;
       meta.textContent = ((MODELS[result.model] || {}).label || result.model)
         + " · " + new Date(result.created_at * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"})
-        + " · من " + (made === 1 ? "تغريدة واحدة" : made + " تغريدات");
+        + " · من " + (result.links ? plural(made, "تغريدة واحدة", "تغريدتين", "تغريدات", "تغريدة") : plural(made, "منشور واحد", "منشورين", "منشورات", "منشورًا"));
       head.append(meta);
       const text = document.createElement("p");
       text.className = "gen-text";
@@ -779,6 +903,119 @@ PAGE = r'''<!doctype html>
       } catch (_) {}
     });
     loadLinkPosts();
+
+    // «المحتوى السابق»: the accounts the old part kept, each opened to show its generated posts and its
+    // extracted tweets (asked for when it is opened).
+    const MODES = {all: "الجميع", likes: "الأكثر إعجابًا", views: "الأكثر مشاهدة", images: "التي فيها صور"};
+    const dateOf = (seconds) => new Date(seconds * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"});
+    function keptPost(post, key) {
+      const item = document.createElement("div");
+      item.className = "kept-post";
+      const meta = document.createElement("div");
+      meta.className = "kept-meta";
+      const info = document.createElement("span");
+      info.textContent = new Date(post.date).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"})
+        + " · إعجاب " + Number(post.likes || 0).toLocaleString("en-US") + " · مشاهدة " + Number(post.views || 0).toLocaleString("en-US");
+      meta.append(info);
+      if (/^https:\/\/(?:x|twitter)\.com\//.test(post.url || "")) {
+        const open = document.createElement("a");
+        open.href = post.url;
+        open.target = "_blank";
+        open.rel = "noopener";
+        open.textContent = "فتح التغريدة";
+        meta.append(open);
+      }
+      item.append(meta);
+      if (post.text) {
+        const text = document.createElement("p");
+        text.className = "kept-text";
+        text.dir = "auto";
+        text.textContent = post.text;
+        item.append(text);
+      }
+      if ((post.images || []).length) {
+        const photos = document.createElement("div");
+        photos.className = "kept-photos";
+        post.images.forEach((name) => {
+          const link = document.createElement("a");
+          link.href = apiRoot + "/content/archive/" + encodeURIComponent(key) + "/media/" + encodeURIComponent(name);
+          link.target = "_blank";
+          const image = document.createElement("img");
+          image.src = link.href;
+          image.alt = "صورة التغريدة";
+          image.loading = "lazy";
+          link.append(image);
+          photos.append(link);
+        });
+        item.append(photos);
+      }
+      return item;
+    }
+    function archiveAccount(row) {
+      const box = document.createElement("details");
+      box.className = "acct";
+      const summary = document.createElement("summary");
+      const name = document.createElement("b");
+      name.textContent = row.name;
+      const handle = document.createElement("bdi");
+      handle.className = "handle";
+      handle.dir = "ltr";
+      handle.textContent = "@" + row.username;
+      const counts = document.createElement("span");
+      counts.className = "counts";
+      counts.textContent = [row.generated ? plural(row.generated, "منشور مولَّد واحد", "منشوران مولَّدان", "منشورات مولَّدة", "منشورًا مولَّدًا") : "",
+        row.kept ? plural(row.kept, "تغريدة مستخرجة واحدة", "تغريدتان مستخرجتان", "تغريدات مستخرجة", "تغريدة مستخرجة") : ""].filter(Boolean).join(" · ");
+      summary.append(name, handle, counts);
+      const body = document.createElement("div");
+      body.className = "acct-body";
+      body.textContent = "جارٍ التحميل…";
+      box.append(summary, body);
+      let loaded = false;
+      box.addEventListener("toggle", async () => {
+        if (!box.open || loaded) return;
+        loaded = true;
+        let data;
+        try {
+          data = await (await fetch(apiRoot + "/content/archive/" + encodeURIComponent(row.key), {cache: "no-store"})).json();
+        } catch (_) {
+          data = {};
+        }
+        if (!data.success) {
+          body.textContent = "تعذّر التحميل.";
+          loaded = false;
+          return;
+        }
+        body.replaceChildren();
+        const generated = data.generated || [];
+        if (generated.length) {
+          const title = document.createElement("h3");
+          title.textContent = "المنشورات المولَّدة (" + generated.length + ")";
+          body.append(title, ...generated.map((result) => generatedCard(result, "",
+            apiRoot + "/content/archive/" + encodeURIComponent(row.key) + "/generated/")));
+        }
+        const kept = data.kept || {};
+        const posts = kept.posts || [];
+        if (posts.length) {
+          const title = document.createElement("h3");
+          title.textContent = "التغريدات المستخرجة (" + posts.length + ")";
+          const info = document.createElement("p");
+          info.className = "kept-info";
+          info.textContent = (MODES[kept.mode] || "") + (kept.photos_only ? " · فيها صور فقط" : "")
+            + (kept.days ? " · آخر " + kept.days + " أيام" : "") + (kept.extracted_at ? " · استُخرجت " + dateOf(kept.extracted_at) : "");
+          body.append(title, info, ...posts.map((post) => keptPost(post, row.key)));
+        }
+        if (!body.childNodes.length) body.textContent = "لا يوجد محتوى.";
+      });
+      return box;
+    }
+    fetch(apiRoot + "/content/archive", {cache: "no-store"})
+      .then((response) => response.json())
+      .then((data) => {
+        const rows = (data && data.accounts) || [];
+        document.getElementById("archive").hidden = !rows.length;
+        document.getElementById("archive-list").replaceChildren(...rows.map(archiveAccount));
+      })
+      .catch(() => {});
 
     // Pages opened over plain http (a server IP) have no navigator.clipboard, so fall back to execCommand.
     async function copyText(text) {
