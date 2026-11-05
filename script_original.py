@@ -3306,7 +3306,18 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
             failures.opened()
         else:
             back = failures.failed(index)
-            new_page = pause_after_failures(should_stop, on_progress, total, allow_media) if back is not None else None
+            new_page = None
+            if back is not None:
+                seconds = failures.next_pause()
+                if seconds is None:
+                    # A third time: the task stops here, with what it did (these two would not open).
+                    result["actions"] = {key: "تعذر فتح التغريدة" for key in actions}
+                    results.append(result)
+                    if on_snapshot:
+                        on_snapshot(list(results))
+                    raise TweetsKeptFailing(results, index + 1)
+                new_page = pause_after_failures(should_stop, on_progress, total, allow_media, seconds,
+                                                "pause" if failures.pauses == 1 else "pause_again")
             if new_page is not None:
                 # Back to the first of the two that would not open; what was recorded from it on goes.
                 page = new_page
@@ -5071,9 +5082,10 @@ def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None
             pass
 
 
-# Two tweets in a row that would not open: the browser is closed this long, then the task goes back
-# to the first of them.
-TWEET_FAIL_PAUSE_SECONDS = 210
+# Two tweets in a row that would not open: the browser is closed for a while, then the task goes back
+# to the first of them. The first time for 3.5 minutes, the second time for 1 minute; the third time
+# the task stops (X is likely not letting this account open tweets now).
+TWEET_FAIL_PAUSES = (210, 60)
 
 
 def open_task_tweet(page, url: str, skip_if_on):
@@ -5084,49 +5096,64 @@ def open_task_tweet(page, url: str, skip_if_on):
     return opened, reason
 
 
+class TweetsKeptFailing(Exception):
+    """Two tweets in a row would not open a third time in one task, so it stops. results: what it did
+    before (with the two that would not open); at: the number of the tweet it stopped at (from 1)."""
+
+    def __init__(self, results: list[dict], at: int):
+        super().__init__("تعذّر فتح التغريدات ثلاث مرات")
+        self.results = results
+        self.at = at
+
+
 class FailedTweets:
-    """The tweets of a task that would not open (a deleted one does not count). When two in a row
-    would not, the browser is closed for TWEET_FAIL_PAUSE_SECONDS and the task goes back to the first
-    of them. Each tweet gets that second chance once: two that fail again after it stay failed and
-    the task goes on."""
+    """The tweets of a task that would not open (a deleted one does not count). Two in a row that would
+    not open close the browser for a pause, then the task goes back to the first of them: the first
+    pause is TWEET_FAIL_PAUSES[0] seconds, the second TWEET_FAIL_PAUSES[1]; the third time, the task
+    stops."""
 
     def __init__(self):
         self.last: int | None = None   # the tweet tried before, when it would not open
-        self.again: set[int] = set()   # the tweets that had their second chance
+        self.pauses = 0                # the pauses this task has had
 
     def opened(self) -> None:
         self.last = None
 
     def failed(self, index: int) -> int | None:
-        """This tweet would not open. Returns the tweet to go back to after the pause, or None to go on."""
+        """This tweet would not open. Returns the first of the two in a row that would not (to go back to
+        after a pause), or None to go on."""
         before, self.last = self.last, index
         if before is None:
             return None
-        back = [number for number in (before, index) if number not in self.again]
-        if not back:
-            return None
-        self.again.update(back)
         self.last = None
-        return back[0]
+        return before
+
+    def next_pause(self) -> int | None:
+        """How many seconds the next pause lasts; None when the task has had them all and stops."""
+        if self.pauses >= len(TWEET_FAIL_PAUSES):
+            return None
+        self.pauses += 1
+        return TWEET_FAIL_PAUSES[self.pauses - 1]
 
 
-def pause_after_failures(should_stop=None, on_progress=None, total: int = 0, after_reopen=None):
-    """Close the browser for TWEET_FAIL_PAUSE_SECONDS, then reopen it. Returns the new page, or None
-    when the task was stopped during the wait (the browser then stays closed) or the browser cannot
-    be reopened here."""
+def pause_after_failures(should_stop=None, on_progress=None, total: int = 0, after_reopen=None,
+                         seconds: int = TWEET_FAIL_PAUSES[0], phase: str = "pause"):
+    """Close the browser for seconds, then reopen it. Returns the new page, or None when the task was
+    stopped during the wait (the browser then stays closed) or the browser cannot be reopened here.
+    phase: "pause" for the first pause, "pause_again" for the next one (said on the page)."""
 
     def wait_closed() -> bool:
-        end = time.monotonic() + TWEET_FAIL_PAUSE_SECONDS
+        end = time.monotonic() + seconds
         shown = None
         while (left := math.ceil(end - time.monotonic())) > 0:
             if should_stop and should_stop():
                 return False
             if on_progress and (shown is None or shown - left >= 5):
-                on_progress(left, total, "pause")
+                on_progress(left, total, phase)
                 shown = left
             time.sleep(min(1.0, max(0.0, end - time.monotonic())))
         if on_progress:
-            on_progress(0, total, "pause")
+            on_progress(0, total, phase)
         return True
 
     new_page = restart_browser(wait_closed)
@@ -5173,7 +5200,18 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
             failures.opened()
         else:
             back = failures.failed(index)
-            new_page = pause_after_failures(should_stop, on_progress, total) if back is not None else None
+            new_page = None
+            if back is not None:
+                seconds = failures.next_pause()
+                if seconds is None:
+                    # A third time: the task stops here, with what it did (these two would not open).
+                    result["actions"] = {key: "تعذر فتح التغريدة" for key in actions}
+                    results.append(result)
+                    if on_snapshot:
+                        on_snapshot(list(results))
+                    raise TweetsKeptFailing(results, index + 1)
+                new_page = pause_after_failures(should_stop, on_progress, total, None, seconds,
+                                                "pause" if failures.pauses == 1 else "pause_again")
             if new_page is not None:
                 # Back to the first of the two that would not open; what was recorded from it on goes.
                 page = new_page
@@ -5322,10 +5360,14 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             publish_job(job_id, phase="collect", collected=0, requested=0, message=f"يبحث عن التغريدة المحددة. الخطوة {done}، وما زال يحمّل الأقدم.")
         elif phase == "act":
             publish_job(job_id, phase="act", done=done, collected=done, requested=requested, message=f"تنفيذ {done} من {requested}.")
-        elif phase == "pause":
-            # Two tweets in a row would not open: the browser is closed, done = seconds left.
+        elif phase in ("pause", "pause_again"):
+            # Two tweets in a row would not open: the browser is closed, done = seconds left. The second
+            # time ("pause_again") is the last: a third time stops the task.
+            again = phase == "pause_again"
             if done > 0:
-                publish_job(job_id, phase="act", message=f"تعذّر فتح تغريدتين متتاليتين، فأُغلق المتصفح. المتابعة منهما بعد {done // 60}:{done % 60:02d}.")
+                publish_job(job_id, phase="act", message=(
+                    f"تعذّر فتح تغريدتين متتاليتين{' مرة أخرى' if again else ''}، فأُغلق المتصفح. المتابعة منهما بعد {done // 60}:{done % 60:02d}."
+                    + (" إن تعذّر مرة ثالثة تتوقف المهمة." if again else "")))
             else:
                 publish_job(job_id, phase="act", message="انتهى الانتظار. إعادة فتح المتصفح والمتابعة من التغريدتين…")
         else:
@@ -5419,6 +5461,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 return
             else:
                 publish_job(job_id, phase="act", requested=len(items), collected=len(items), done=len(prefix), message=f"استئناف التنفيذ من {len(prefix)} من {len(items)}.")
+            stopped_at = 0   # the tweet the task stopped at when two kept failing to open
             if len(prefix) >= len(items):
                 results = prefix
             else:
@@ -5432,20 +5475,31 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     )
 
                 def on_act(done: int, requested: int, phase: str) -> None:
-                    if phase == "pause":
+                    if phase in ("pause", "pause_again"):
                         on_progress(done, requested, phase)
                     else:
                         on_progress(len(prefix) + done, len(items), "act")
 
-                if "comment" in actions:
-                    fresh = execute_comment_actions(
-                        page, pending, actions, gemini_api_key, gemini_model, on_act,
-                        lambda: job_cancelled(job_id), snapshot, profile_key(auth_token), reply_voice,
-                    )
-                else:
-                    fresh = visit_and_apply(page, pending, actions, on_act, snapshot, lambda: job_cancelled(job_id), profile_key(auth_token))
+                try:
+                    if "comment" in actions:
+                        fresh = execute_comment_actions(
+                            page, pending, actions, gemini_api_key, gemini_model, on_act,
+                            lambda: job_cancelled(job_id), snapshot, profile_key(auth_token), reply_voice,
+                        )
+                    else:
+                        fresh = visit_and_apply(page, pending, actions, on_act, snapshot, lambda: job_cancelled(job_id), profile_key(auth_token))
+                except TweetsKeptFailing as stop:
+                    fresh, stopped_at = stop.results, len(prefix) + stop.at
                 results = prefix + fresh
                 refine_collected_links(fresh)
+            if stopped_at:
+                publish_job(
+                    job_id, status="done", success=False, phase="act", done=len(results), requested=len(items),
+                    collected=len(items), results=results, items=items, actions=actions, username=group_name,
+                    message=(f"توقفت المهمة عند التغريدة {stopped_at} من {len(items)}: تعذّر فتح تغريدتين متتاليتين ثلاث مرات "
+                             f"(بعد انتظار ثلاث دقائق ونصف ثم دقيقة)، والأرجح أن X يمنع هذا الحساب من فتح التغريدات الآن."),
+                )
+                return
             if job_cancelled(job_id):
                 publish_job(
                     job_id, status="done", success=False, phase="act", done=len(results), requested=len(items),
