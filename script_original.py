@@ -5904,15 +5904,15 @@ def collected_payload() -> list[dict]:
 # API (api.fxtwitter.com/status/<id>). It is asked slowly, one tweet every few seconds, so this server
 # is not blocked. If it is (too many requests), or several tweets in a row get no answer, the fetching
 # waits a few minutes (longer each time), then goes on where it stopped, more slowly than before.
-# The counts are kept with the saved tweets. Only the days from 2 to 6 days ago can be checked (today's
-# and yesterday's views still grow), each once a day: after its check, its button waits for tomorrow.
+# The counts are kept with the saved tweets. Only the days from yesterday to 6 days ago can be checked
+# (today's views still grow), each once a day: after its check, its button waits for tomorrow.
 FX_STATUS_URL = "https://api.fxtwitter.com/status/{}"
 FX_GAP_SECONDS = (2.0, 3.5)          # between two tweets
 FX_SLOW_GAP_SECONDS = (5.0, 8.0)     # the same, once the service has asked to slow down
 FX_PAUSE_SECONDS = 180               # the first wait; the next ones wait 6, 9, 12 then 15 minutes
 FX_PAUSE_MAX_SECONDS = 900
 FX_MAX_PAUSES = 6                    # waits in a row with no answer between them: then it stops
-VIEWS_DAYS = (2, 6)                  # the days that can be checked: 2 to 6 days ago (not today or yesterday)
+VIEWS_DAYS = (1, 6)                  # the days that can be checked: yesterday to 6 days ago (not today)
 views_lock = threading.Lock()
 views_queue: deque = deque()
 views_state: dict = {"running": False, "paused_until": 0.0, "error": "", "removed": []}
@@ -7192,7 +7192,7 @@ atexit.register(shutdown_jobs)
 
 
 # «التغريدات المجموعة»: the tweets collected in the last 7 days, day by day, with «عرض المشاهدات» on the
-# days from 2 to 6 days ago. One part in two places: content.py's page («إنشاء محتوى») shows it under its
+# days from yesterday to 6 days ago. One part in two places: content.py's page («إنشاء محتوى») shows it under its
 # link box (see tweets_part), and without content.py it is a page of its own (TWEETS_PAGE). Its look is
 # kept inside #tweets, so it changes nothing else on the page it is in; that page may set --tweets-day
 # and --tweets-tweet, the backgrounds of a day and of a tweet.
@@ -7237,12 +7237,13 @@ TWEETS_PART_SCRIPT = r'''<script>
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
     const label = (key, when) => key === dayKey(now) ? "اليوم" : key === dayKey(yesterday) ? "أمس" : dayName.format(when);
-    // «عرض المشاهدات» is for the days from 2 to 6 days ago: today's and yesterday's views still grow.
+    // «عرض المشاهدات» is for the days the script allows (yesterday to 6 days ago): today's views still grow.
+    const VIEWS_DAYS = {{ views_days|tojson }};
     const daysAgo = (key) => {
       const [year, month, date] = key.split("-").map(Number);
       return Math.round((todayStart - new Date(year, month - 1, date)) / 86400000);
     };
-    const canCheck = (key) => daysAgo(key) >= 2 && daysAgo(key) <= 6;
+    const canCheck = (key) => daysAgo(key) >= VIEWS_DAYS[0] && daysAgo(key) <= VIEWS_DAYS[1];
     const isToday = (seconds) => dayKey(new Date(seconds * 1000)) === dayKey(new Date());
     const safeLink = (url) => /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[^\s"'<>]+$/.test(url || "") ? url : "";
     const viewsText = (tweet) => !tweet.views_at ? "" : tweet.views == null ? "لا يوجد رقم" : number.format(tweet.views) + " مشاهدة";
@@ -7321,10 +7322,10 @@ TWEETS_PART_SCRIPT = r'''<script>
       status.hidden = !status.textContent;
     }
 
-    list.forEach((day, index) => {
+    // Every day starts folded (today's too); a day opens when tapped, or when its views are asked for.
+    list.forEach((day) => {
       day.items.sort((a, b) => b.first - a.first);
       const details = document.createElement("details");
-      details.open = index === 0;
       const summary = document.createElement("summary");
       const title = document.createElement("span");
       title.textContent = label(day.key, new Date(day.items[0].first * 1000));
@@ -7504,7 +7505,8 @@ def tweets_part_values() -> dict:
     if not csrf_token:
         csrf_token = secrets.token_urlsafe(32)
         session["csrf_token"] = csrf_token
-    return {"tweets": collected_payload(), "api_root": "/" + ACCESS_PATH, "csrf_token": csrf_token, "server_now": time.time()}
+    return {"tweets": collected_payload(), "api_root": "/" + ACCESS_PATH, "csrf_token": csrf_token, "server_now": time.time(),
+            "views_days": list(VIEWS_DAYS)}
 
 
 def tweets_part() -> dict[str, str]:
@@ -7527,8 +7529,8 @@ def tweets_page(access_path: str):
 
 @app.post("/<access_path>/tweets/views")
 def tweets_views_start(access_path: str):
-    """«عرض المشاهدات»: queue a day's tweets for their current view count. Only the days from 2 to 6
-    days ago (in the viewer's time zone), each once a day: a tweet already checked today is not asked
+    """«عرض المشاهدات»: queue a day's tweets for their current view count. Only the days from yesterday
+    to 6 days ago (in the viewer's time zone), each once a day: a tweet already checked today is not asked
     again, so a day whose tweets were all checked today waits for tomorrow."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
@@ -7545,7 +7547,7 @@ def tweets_views_start(access_path: str):
     now = time.time()
     today = local_day_number(now, offset)
     if any(not VIEWS_DAYS[0] <= today - local_day_number((start + end) / 2, offset) <= VIEWS_DAYS[1] for start, end in spans):
-        return jsonify(success=False, message="فحص المشاهدات متاح للأيام من قبل يومين إلى قبل ٦ أيام فقط."), 400
+        return jsonify(success=False, message="فحص المشاهدات متاح من أمس إلى قبل ٦ أيام فقط، وليس لتغريدات اليوم."), 400
     with collected_lock:
         rows = [(row.get("views_at") or 0, -row["at"], status_id, row["url"]) for status_id, row in collected_tweets.items()
                 if any(start <= row["at"] < end for start, end in spans)]
