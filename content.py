@@ -7,7 +7,7 @@ which makes one new post from their idea: a short text and two pictures in two s
 wide one. Every generated post is kept, each in its own folder data/content_generated/from-links/<time>/.
 
 Under the link box, «التغريدات المجموعة»: the tweets the script collected from the groups in the last
-7 days, day by day, with «عرض المشاهدات» (the script draws that part and answers its requests; an
+7 days, day by day, with «عرض الأكثر مشاهدة» (the script draws that part and answers its requests; an
 older script, without it, keeps them on a page of their own).
 
 «المحتوى السابق» shows, read only, what the page's old accounts part left: for each account it kept,

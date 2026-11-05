@@ -5819,7 +5819,7 @@ def load_collected() -> None:
             "group": str(group or "")[:80],
             "at": at,
         }
-        # «عرض المشاهدات»: the view count from the last check, and when (views None: no count then).
+        # «عرض الأكثر مشاهدة»: the view count from the last check, and when (views None: no count then).
         try:
             if row.get("views_at") is not None:
                 record["views_at"] = int(row["views_at"])
@@ -5902,7 +5902,7 @@ def collected_payload() -> list[dict]:
     return rows
 
 
-# «عرض المشاهدات» in «عرض التغريدات»: the current view count of a day's tweets, from FxTwitter's free
+# «عرض الأكثر مشاهدة» in «عرض التغريدات»: the current view count of a day's tweets, from FxTwitter's free
 # API (api.fxtwitter.com/status/<id>). It is asked FX_AT_ONCE tweets at a time, with no wait between
 # them (a test asked 140 at once, then 140 one after another, and none was refused). If the service
 # refuses (too many requests), or several tweets get no answer while none is answered, the fetching
@@ -5976,7 +5976,7 @@ def views_worker() -> None:
         with views_lock:
             views_queue.clear()
             views_state.update(running=False, paused_until=0.0, slow=False,
-                               error="توقف جلب المشاهدات بسبب خطأ. اضغط «عرض المشاهدات» ليكمل.")
+                               error="توقف جلب المشاهدات بسبب خطأ. اضغط «عرض الأكثر مشاهدة» ليكمل.")
 
 
 def keep_views(answers: list[tuple[str, str, int | None, str]]) -> None:
@@ -6049,7 +6049,7 @@ def fetch_queued_views() -> None:
                     with views_lock:
                         views_queue.clear()
                         views_state.update(running=False, paused_until=0.0, slow=False,
-                                           error="توقف جلب المشاهدات لأن الخدمة لم تعد تجيب. اضغط «عرض المشاهدات» لاحقًا ليكمل.")
+                                           error="توقف جلب المشاهدات لأن الخدمة لم تعد تجيب. اضغط «عرض الأكثر مشاهدة» لاحقًا ليكمل.")
                     return
                 asked = 0
                 for detail in refused:
@@ -7219,7 +7219,7 @@ load_collected()
 atexit.register(shutdown_jobs)
 
 
-# «التغريدات المجموعة»: the tweets collected in the last 7 days, day by day, with «عرض المشاهدات» on the
+# «التغريدات المجموعة»: the tweets collected in the last 7 days, day by day, with «عرض الأكثر مشاهدة» on the
 # days from yesterday to 6 days ago. One part in two places: content.py's page («إنشاء محتوى») shows it under its
 # link box (see tweets_part), and without content.py it is a page of its own (TWEETS_PAGE). Its look is
 # kept inside #tweets, so it changes nothing else on the page it is in; that page may set --tweets-day
@@ -7228,18 +7228,20 @@ TWEETS_PART_STYLE = r'''<style>
     #tweets { line-height: 1.55; }
     #tweets .tweets-summary { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
     #tweets details { margin-top: 10px; border-radius: 14px; background: var(--tweets-day, var(--sheet)); box-shadow: inset 0 0 0 1px var(--line); }
-    #tweets summary { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: pointer; list-style: none; font-weight: 700; }
+    #tweets summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px; cursor: pointer; list-style: none; font-weight: 700; }
     #tweets summary::-webkit-details-marker { display: none; }
-    #tweets summary .count { margin-inline-start: auto; color: var(--muted); font-size: 13px; font-weight: 600; }
-    #tweets summary::after { content: "‹"; color: var(--muted); font-size: 18px; line-height: 1; transition: transform 0.15s; }
-    #tweets details[open] summary::after { transform: rotate(-90deg); }
+    #tweets summary .day { font-size: 15px; white-space: nowrap; }
+    #tweets summary .tail { margin-inline-start: auto; display: flex; align-items: center; gap: 6px; }
+    #tweets summary .count { color: var(--muted); font-size: 13px; font-weight: 600; white-space: nowrap; }
+    #tweets summary .tail::after { content: "‹"; color: var(--muted); font-size: 18px; line-height: 1; transition: transform 0.15s; }
+    #tweets details[open] summary .tail::after { transform: rotate(-90deg); }
     #tweets ol { list-style: none; margin: 0; padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px; }
     #tweets li { padding: 8px 10px; border-radius: 10px; background: var(--tweets-tweet, var(--paper)); box-shadow: inset 0 0 0 1px var(--line); }
     #tweets .text { margin: 0; font-size: 14px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
     #tweets .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 4px; color: var(--muted); font-size: 12px; }
     #tweets .meta .open { margin-inline-start: auto; color: var(--pine); font-weight: 700; text-decoration: none; }
     #tweets .tweets-empty { margin: 18px 0 6px; text-align: center; color: var(--muted); }
-    #tweets .vbtn { flex: 0 0 auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--pine); color: #f4fbf7; box-shadow: none;
+    #tweets .vbtn { flex: 0 0 auto; min-height: 30px; padding: 0 8px; border: 0; border-radius: 8px; background: var(--pine); color: #f4fbf7; box-shadow: none;
       font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
     #tweets .vbtn:disabled { opacity: 0.45; cursor: default; }
     #tweets .vstatus { margin: 0 12px 8px; color: var(--muted); font-size: 12px; }
@@ -7265,7 +7267,7 @@ TWEETS_PART_SCRIPT = r'''<script>
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
     const label = (key, when) => key === dayKey(now) ? "اليوم" : key === dayKey(yesterday) ? "أمس" : dayName.format(when);
-    // «عرض المشاهدات» is for the days the script allows (yesterday to 6 days ago): today's views still grow.
+    // «عرض الأكثر مشاهدة» is for the days the script allows (yesterday to 6 days ago): today's views still grow.
     const VIEWS_DAYS = {{ views_days|tojson }};
     const daysAgo = (key) => {
       const [year, month, date] = key.split("-").map(Number);
@@ -7343,7 +7345,7 @@ TWEETS_PART_SCRIPT = r'''<script>
         status.textContent = state.error;
         status.className = "vstatus is-bad";
       } else if (today && day.button) {
-        status.textContent = "فُحصت " + today + " من " + day.items.length + " اليوم · اضغط «عرض المشاهدات» ليكمل";
+        status.textContent = "فُحصت " + today + " من " + day.items.length + " اليوم · اضغط «عرض الأكثر مشاهدة» ليكمل";
       } else {
         status.textContent = last ? "مرتّبة من الأكثر مشاهدة · آخر فحص " + checkedAt(last) : "";
       }
@@ -7356,18 +7358,23 @@ TWEETS_PART_SCRIPT = r'''<script>
       const details = document.createElement("details");
       const summary = document.createElement("summary");
       const title = document.createElement("span");
+      title.className = "day";
       title.textContent = label(day.key, new Date(day.items[0].first * 1000));
+      // The count, the button and the fold arrow together: on a narrow screen they go under the day's name as one.
+      const tail = document.createElement("span");
+      tail.className = "tail";
       const count = document.createElement("span");
       count.className = "count";
       count.textContent = day.items.length + " تغريدة";
-      summary.append(title, count);
+      tail.append(count);
+      summary.append(title, tail);
       let button = null;
       if (canCheck(day.key)) {
         button = document.createElement("button");
         button.type = "button";
         button.className = "vbtn";
-        button.textContent = "عرض المشاهدات";
-        summary.append(button);
+        button.textContent = "عرض الأكثر مشاهدة";
+        tail.append(button);
       }
       const status = document.createElement("p");
       status.className = "vstatus";
@@ -7557,7 +7564,7 @@ def tweets_page(access_path: str):
 
 @app.post("/<access_path>/tweets/views")
 def tweets_views_start(access_path: str):
-    """«عرض المشاهدات»: queue a day's tweets for their current view count. Only the days from yesterday
+    """«عرض الأكثر مشاهدة»: queue a day's tweets for their current view count. Only the days from yesterday
     to 6 days ago (in the viewer's time zone), each once a day: a tweet already checked today is not asked
     again, so a day whose tweets were all checked today waits for tomorrow."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
@@ -7594,7 +7601,7 @@ def tweets_views_start(access_path: str):
 
 @app.get("/<access_path>/tweets/views")
 def tweets_views_status(access_path: str):
-    """How «عرض المشاهدات» is going, and the counts fetched since the page last asked."""
+    """How «عرض الأكثر مشاهدة» is going, and the counts fetched since the page last asked."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
     try:
