@@ -82,6 +82,17 @@ LINK_MAX_TWEETS = 10
 # Their generated posts' folder under data/content_generated: not an X username (it has a hyphen), so
 # never an account's.
 LINKS_FOLDER = "from-links"
+# Each post made from pasted tweets gets two images in two sizes: a tall one, then a wide one (asked for
+# one after the other, each in its own size).
+LINK_SIZES = ("3:4", "16:9")
+LINK_PROMPT = (GENERATE_PROMPT.replace("posts from one account, each", "posts, each")
+               .replace("- One or two images for it:", "- One image for it:").replace("and the image(s).", "and the image."))
+# Then the second image, for the same post: what goes with it after the first image.
+LINK_SECOND_IMAGE = (
+    "Now make ONE more image for this same post, as its second photo: another scene or another angle of the same "
+    "idea that goes with the first image, following the same image rules as above. Answer with the image only.\n"
+    "The post: <post>{post}</post>"
+)
 IMAGE_TYPES = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif"}
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 # A 1×1 picture the profile gets in place of each post photo (see extract_posts).
@@ -257,12 +268,16 @@ def gemini_problem(status: int, detail: str, busy: bool) -> str:
     return "رفض Gemini الطلب" + (f": {detail}" if detail else ".")
 
 
-def ask_gemini(api_key: str, model: str, parts: list[dict], report) -> dict:
-    """One request answered with text and pictures. A busy Gemini is asked again a few times."""
-    body = json.dumps({
-        "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-    }).encode("utf-8")
+def ask_gemini(api_key: str, model: str, parts: list[dict], report, aspect: str = "") -> dict:
+    """One request answered with text and pictures. A busy Gemini is asked again a few times. aspect: the
+    pictures' shape ("3:4", "16:9"); a model that does not take it is asked again without it."""
+    def request_body(shaped: bool) -> bytes:
+        config: dict = {"responseModalities": ["TEXT", "IMAGE"]}
+        if shaped:
+            config["imageConfig"] = {"aspectRatio": aspect}
+        return json.dumps({"contents": [{"role": "user", "parts": parts}], "generationConfig": config}).encode("utf-8")
+    shaped = bool(aspect)
+    body = request_body(shaped)
     waits = (5, 12, 20, 30)
     for attempt in range(len(waits) + 1):
         ask = urllib.request.Request(
@@ -284,6 +299,10 @@ def ask_gemini(api_key: str, model: str, parts: list[dict], report) -> dict:
             detail = re.sub(r"\s+", " ", detail).strip()[:300]
             if api_key:
                 detail = detail.replace(api_key, "…")
+            if shaped and status == 400 and re.search(r"image_?config|aspect", detail, re.I):
+                shaped = False                   # this model takes no image size: asked again without it
+                body = request_body(False)
+                continue
             busy = status in (429, 500, 502, 503, 504) or bool(
                 re.search(r"high demand|try again later|unavailable|overloaded|resource exhausted|rate limit", detail, re.I))
             # "limit: 0": this key has no quota at all for the model, so asking again is no use.
@@ -930,15 +949,16 @@ def attach(app, access_path: str, tools) -> None:
                     order.append((index, depth))
         picked: set[tuple[int, int]] = set()
         size = 0
+        # Room is kept for the first image made, which goes with the request for the second one.
         for index, depth in order:
-            if len(picked) >= GENERATE_MODELS[model]["max_photos"]:
+            if len(picked) >= GENERATE_MODELS[model]["max_photos"] - 1:
                 break
             data = tweets[index]["files"][depth][1]
-            if size + len(data) > GENERATE_MAX_BYTES:
+            if size + len(data) > GENERATE_MAX_BYTES - 4 * 1024 * 1024:
                 continue
             picked.add((index, depth))
             size += len(data)
-        parts: list[dict] = [{"text": GENERATE_PROMPT.replace("posts from one account, each", "posts, each")}]
+        parts: list[dict] = [{"text": LINK_PROMPT}]
         for index, tweet in enumerate(tweets):
             text = tweet["text"] or "(no text)"
             if tweet["quote"]:
@@ -950,6 +970,38 @@ def attach(app, access_path: str, tools) -> None:
         total = sum(len(tweet["files"]) for tweet in tweets)
         return parts, {"posts": [tweet["status_id"] for tweet in tweets], "links": [tweet["url"] for tweet in tweets],
                        "photos_sent": len(picked), "photos_total": total}
+
+    def generate_link_one(api_key: str, model: str, parts: list[dict], made_before: list[str], progress) -> tuple[str, list]:
+        """One post from pasted tweets: its text with a tall image, then a second, wide image for it (shown
+        the first one, so the two go together). Without the second, the post keeps the first alone."""
+        if made_before:
+            parts = parts + [{"text": GENERATE_DIFFERENT + "\n".join(f"{n}. {text}" for n, text in enumerate(made_before, 1))}]
+        text, pictures, reason = "", [], ""
+        for attempt in range(2):
+            text, pictures, reason = read_answer(ask_gemini(api_key, model, parts, progress, LINK_SIZES[0]))
+            if pictures or reason not in ("", "STOP"):
+                break
+        if not pictures:
+            if reason not in ("", "STOP", "MAX_TOKENS"):
+                raise GenerateError(f"رفض Gemini توليد الصورة ({reason}).", fatal=False)
+            raise GenerateError("لم يُرجع Gemini صورة.", fatal=False)
+        first = pictures[0]
+        progress("الصورة الثانية بحجم آخر…")
+        second_ask = parts + [{"text": "The first image made for this post:"},
+                              {"inlineData": {"mimeType": first[0], "data": base64.b64encode(first[1]).decode("ascii")}},
+                              {"text": LINK_SECOND_IMAGE.format(post=text or "(no text)")}]
+        second: list = []
+        for attempt in range(2):
+            try:
+                _, second, reason = read_answer(ask_gemini(api_key, model, second_ask, progress, LINK_SIZES[1]))
+            except GenerateError as exc:
+                if exc.fatal and not re.search(r"مشغول|busy", str(exc)):
+                    raise
+                second = []
+                break
+            if second or reason not in ("", "STOP"):
+                break
+        return text, [first] + second[:1]
 
     def save_link_generated(result: dict) -> None:
         """Keep a post made from pasted tweets with the others made that way, in a folder of its own."""
@@ -963,7 +1015,8 @@ def attach(app, access_path: str, tools) -> None:
             name = f"{number}.{EXTENSIONS.get(kind, 'png')}"
             (fresh / name).write_bytes(data)
             names.append(name)
-        kept = {"model": result["model"], "text": result["text"], "images": names, "posts": result["posts"], "links": result["links"],
+        kept = {"model": result["model"], "text": result["text"], "images": names, "sizes": list(LINK_SIZES[:len(names)]),
+                "posts": result["posts"], "links": result["links"],
                 "photos_sent": result["photos_sent"], "photos_total": result["photos_total"], "created_at": made_at,
                 "batch": result["batch"], "number": result["number"], "of": result["of"]}
         (fresh / "result.json").write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -995,7 +1048,7 @@ def attach(app, access_path: str, tools) -> None:
 
                 link_job.update(status="running", message=f"جارٍ توليد {step or 'المنشور'} بـ {label}… {sent}. قد يستغرق دقيقة أو أكثر.")
                 try:
-                    text, pictures = generate_one(api_key, model, parts, made, progress)
+                    text, pictures = generate_link_one(api_key, model, parts, made, progress)
                 except GenerateError as exc:
                     problem, last = (f"{step}: {exc}" if step else str(exc)), exc
                     if exc.fatal:
@@ -1194,6 +1247,8 @@ PAGE = r'''<!doctype html>
     .older .gen-images { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
     .link-row { margin-top: 6px; }
     .gen-source { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+    .gen-images figure { margin: 0; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .gen-images figcaption { color: var(--muted); font-size: 12px; text-align: center; }
     .gen-source a { color: var(--pine); font-weight: 600; }
   </style>
 </head>
@@ -1238,7 +1293,7 @@ PAGE = r'''<!doctype html>
         </select>
         <button id="link-go" class="go" type="button">إرسال إلى Gemini</button>
       </div>
-      <p class="hint">تُقرأ التغريدة (نصها وصورها) وتُرسل إلى Gemini ليصنع منها منشورًا جديدًا بنص وصورة، كما في «توليد». يمكن لصق أكثر من رابط.</p>
+      <p class="hint">تُقرأ التغريدة (نصها وصورها) وتُرسل إلى Gemini ليصنع منها منشورًا جديدًا بنص وصورتين بحجمين مختلفين: طولية وعرضية. يمكن لصق أكثر من رابط.</p>
       <div id="link-notice" class="notice" role="status" hidden></div>
       <div id="link-generated"></div>
       <details id="link-older" class="older" hidden>
@@ -1547,7 +1602,8 @@ PAGE = r'''<!doctype html>
       text.textContent = result.text || "(بلا نص)";
       const images = document.createElement("div");
       images.className = "gen-images";
-      (result.images || []).forEach((name) => {
+      const SIZES = {"3:4": "طولية 3:4", "16:9": "عرضية 16:9"};
+      (result.images || []).forEach((name, index) => {
         const link = document.createElement("a");
         link.href = base + encodeURIComponent(result.id) + "/" + encodeURIComponent(name);
         link.target = "_blank";
@@ -1556,7 +1612,15 @@ PAGE = r'''<!doctype html>
         image.alt = "صورة مولَّدة";
         image.loading = "lazy";
         link.append(image);
-        images.append(link);
+        const size = (result.sizes || [])[index];
+        if (size) {
+          // With its size under it (the posts made from links have two, in two sizes).
+          const figure = document.createElement("figure");
+          const caption = document.createElement("figcaption");
+          caption.textContent = SIZES[size] || size;
+          figure.append(link, caption);
+          images.append(figure);
+        } else images.append(link);
       });
       const copy = document.createElement("button");
       copy.type = "button";
