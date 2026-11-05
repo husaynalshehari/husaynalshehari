@@ -687,7 +687,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <h1>تنفيذ على تغريدات القروب</h1>
         </div>
         <div class="mast-links">
-          <a class="btn btn-ghost" href="{{ api_root }}/tweets">عرض التغريدات</a>
+          {% if not tweets_in_content %}<a class="btn btn-ghost" href="{{ api_root }}/tweets">عرض التغريدات</a>{% endif %}
           {% if content_ready %}<a class="btn btn-ghost" href="{{ api_root }}/content">إنشاء محتوى</a>{% endif %}
         </div>
       </div>
@@ -5634,7 +5634,7 @@ def login_page(access_path: str):
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
         PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(), max_links=MAX_TWEET_LINKS,
-        content_ready=content_ready.is_set() or CONTENT_FILE.is_file(),
+        content_ready=content_ready.is_set() or CONTENT_FILE.is_file(), tweets_in_content=content_shows_tweets,
     ))
     return response
 
@@ -7191,57 +7191,38 @@ load_collected()
 atexit.register(shutdown_jobs)
 
 
-TWEETS_PAGE = r'''<!doctype html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>التغريدات المجموعة</title>
-  <style>
-    :root { --paper: #f3efe6; --sheet: #fffdf8; --ink: #1c1915; --muted: #6e675e; --line: #e4dcd0; --pine: #0f6b50; --clay: #8d3a32; color-scheme: light; }
-    * { box-sizing: border-box; }
-    [hidden] { display: none !important; }
-    body { margin: 0; background: var(--paper); color: var(--ink); font-family: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif; line-height: 1.55; }
-    main { width: min(560px, 100%); margin: 0 auto; padding: 14px 12px 32px; }
-    header { display: flex; align-items: center; gap: 10px; }
-    h1 { margin: 0; font-size: 18px; }
-    header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
-    .back { margin-inline-start: auto; display: inline-flex; align-items: center; min-height: 36px; padding: 0 12px; border-radius: 8px; background: var(--sheet);
-      box-shadow: inset 0 0 0 1px var(--line); color: var(--ink); font-size: 13px; font-weight: 600; text-decoration: none; white-space: nowrap; }
-    details { margin-top: 10px; border-radius: 14px; background: var(--sheet); box-shadow: inset 0 0 0 1px var(--line); }
-    summary { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: pointer; list-style: none; font-weight: 700; }
-    summary::-webkit-details-marker { display: none; }
-    summary .count { margin-inline-start: auto; color: var(--muted); font-size: 13px; font-weight: 600; }
-    summary::after { content: "‹"; color: var(--muted); font-size: 18px; line-height: 1; transition: transform 0.15s; }
-    details[open] summary::after { transform: rotate(-90deg); }
-    ol { list-style: none; margin: 0; padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px; }
-    li { padding: 8px 10px; border-radius: 10px; background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); }
-    .text { margin: 0; font-size: 14px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-    .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 4px; color: var(--muted); font-size: 12px; }
-    .meta .open { margin-inline-start: auto; color: var(--pine); font-weight: 700; text-decoration: none; }
-    .empty { margin-top: 28px; text-align: center; color: var(--muted); }
-    .vbtn { flex: 0 0 auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--pine); color: #f4fbf7;
+# «التغريدات المجموعة»: the tweets collected in the last 7 days, day by day, with «عرض المشاهدات» on the
+# days from 2 to 6 days ago. One part in two places: content.py's page («إنشاء محتوى») shows it under its
+# link box (see tweets_part), and without content.py it is a page of its own (TWEETS_PAGE). Its look is
+# kept inside #tweets, so it changes nothing else on the page it is in; that page may set --tweets-day
+# and --tweets-tweet, the backgrounds of a day and of a tweet.
+TWEETS_PART_STYLE = r'''<style>
+    #tweets { line-height: 1.55; }
+    #tweets .tweets-summary { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+    #tweets details { margin-top: 10px; border-radius: 14px; background: var(--tweets-day, var(--sheet)); box-shadow: inset 0 0 0 1px var(--line); }
+    #tweets summary { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: pointer; list-style: none; font-weight: 700; }
+    #tweets summary::-webkit-details-marker { display: none; }
+    #tweets summary .count { margin-inline-start: auto; color: var(--muted); font-size: 13px; font-weight: 600; }
+    #tweets summary::after { content: "‹"; color: var(--muted); font-size: 18px; line-height: 1; transition: transform 0.15s; }
+    #tweets details[open] summary::after { transform: rotate(-90deg); }
+    #tweets ol { list-style: none; margin: 0; padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+    #tweets li { padding: 8px 10px; border-radius: 10px; background: var(--tweets-tweet, var(--paper)); box-shadow: inset 0 0 0 1px var(--line); }
+    #tweets .text { margin: 0; font-size: 14px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    #tweets .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 4px; color: var(--muted); font-size: 12px; }
+    #tweets .meta .open { margin-inline-start: auto; color: var(--pine); font-weight: 700; text-decoration: none; }
+    #tweets .tweets-empty { margin: 18px 0 6px; text-align: center; color: var(--muted); }
+    #tweets .vbtn { flex: 0 0 auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--pine); color: #f4fbf7; box-shadow: none;
       font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
-    .vbtn:disabled { opacity: 0.45; cursor: default; }
-    .vstatus { margin: 0 12px 8px; color: var(--muted); font-size: 12px; }
-    .vstatus.is-bad { color: var(--clay); }
-    .views { color: var(--pine); font-weight: 800; }
-    .views.is-none { color: var(--muted); font-weight: 600; }
-  </style>
-</head>
-<body>
-  <main>
-    <header>
-      <div>
-        <h1>التغريدات المجموعة</h1>
-        <p id="summary"></p>
-      </div>
-      <a class="back" href="{{ back }}">رجوع</a>
-    </header>
-    <div id="days"></div>
-    <p id="empty" class="empty" hidden>لم تُجمع تغريدات خلال آخر ٧ أيام.</p>
-  </main>
-  <script>
+    #tweets .vbtn:disabled { opacity: 0.45; cursor: default; }
+    #tweets .vstatus { margin: 0 12px 8px; color: var(--muted); font-size: 12px; }
+    #tweets .vstatus.is-bad { color: var(--clay); }
+    #tweets .views { color: var(--pine); font-weight: 800; }
+    #tweets .views.is-none { color: var(--muted); font-weight: 600; }
+  </style>'''
+TWEETS_PART_BODY = '''<p id="tweets-summary" class="tweets-summary"></p>
+      <div id="tweets-days"></div>
+      <p id="tweets-empty" class="tweets-empty" hidden>لم تُجمع تغريدات خلال آخر ٧ أيام.</p>'''
+TWEETS_PART_SCRIPT = r'''<script>
   (() => {
     const tweets = {{ tweets|tojson }};
     const apiRoot = {{ api_root|tojson }};
@@ -7288,10 +7269,10 @@ TWEETS_PAGE = r'''<!doctype html>
     const list = [...days.values()].sort((a, b) => b.key.localeCompare(a.key));
     const byId = new Map();          // tweet id → {tweet, day, li, views}
     let total = tweets.length;
-    const showTotal = () => { document.getElementById("summary").textContent = "آخر ٧ أيام · " + total + " تغريدة"; };
+    const showTotal = () => { document.getElementById("tweets-summary").textContent = "آخر ٧ أيام · " + total + " تغريدة"; };
     showTotal();
-    document.getElementById("empty").hidden = list.length > 0;
-    const box = document.getElementById("days");
+    document.getElementById("tweets-empty").hidden = list.length > 0;
+    const box = document.getElementById("tweets-days");
 
     // The day's tweets: most viewed first once it has counts (tweets without one after), else newest first.
     function order(day) {
@@ -7480,23 +7461,68 @@ TWEETS_PAGE = r'''<!doctype html>
       .then((data) => { if (data.success && apply(data)) follow(); })
       .catch(() => {});
   })();
-  </script>
+  </script>'''
+TWEETS_PAGE = r'''<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>التغريدات المجموعة</title>
+  <style>
+    :root { --paper: #f3efe6; --sheet: #fffdf8; --ink: #1c1915; --muted: #6e675e; --line: #e4dcd0; --pine: #0f6b50; --clay: #8d3a32; color-scheme: light; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font-family: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif; line-height: 1.55; }
+    main { width: min(560px, 100%); margin: 0 auto; padding: 14px 12px 32px; }
+    header { display: flex; align-items: center; gap: 10px; }
+    h1 { margin: 0; font-size: 18px; }
+    .back { margin-inline-start: auto; display: inline-flex; align-items: center; min-height: 36px; padding: 0 12px; border-radius: 8px; background: var(--sheet);
+      box-shadow: inset 0 0 0 1px var(--line); color: var(--ink); font-size: 13px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+  </style>
+  ''' + TWEETS_PART_STYLE + r'''
+</head>
+<body>
+  <main>
+    <header>
+      <h1>التغريدات المجموعة</h1>
+      <a class="back" href="{{ back }}">رجوع</a>
+    </header>
+    <section id="tweets">
+      ''' + TWEETS_PART_BODY + r'''
+    </section>
+  </main>
+  ''' + TWEETS_PART_SCRIPT + r'''
 </body>
 </html>
 '''
 
 
-@app.get("/<access_path>/tweets")
-def tweets_page(access_path: str):
-    """«عرض التغريدات»: the tweets collected in the last 7 days, day by day."""
-    if not hmac.compare_digest(access_path, ACCESS_PATH):
-        abort(404)
+def tweets_part_values() -> dict:
+    """What the tweets part is drawn with: the tweets, the panel's address, this browser's CSRF token
+    (made here when it has none yet) and the server's time (the counts fetched after it are asked for)."""
     csrf_token = session.get("csrf_token")
     if not csrf_token:
         csrf_token = secrets.token_urlsafe(32)
         session["csrf_token"] = csrf_token
-    return render_template_string(TWEETS_PAGE, tweets=collected_payload(), back="/" + ACCESS_PATH,
-                                  api_root="/" + ACCESS_PATH, csrf_token=csrf_token, server_now=time.time())
+    return {"tweets": collected_payload(), "api_root": "/" + ACCESS_PATH, "csrf_token": csrf_token, "server_now": time.time()}
+
+
+def tweets_part() -> dict[str, str]:
+    """The tweets part for content.py's page, drawn now: its style, its markup and its script, each
+    ready to put in the page as it is (the page gives the part's element the id "tweets")."""
+    return {"style": TWEETS_PART_STYLE, "body": TWEETS_PART_BODY,
+            "script": render_template_string(TWEETS_PART_SCRIPT, **tweets_part_values())}
+
+
+@app.get("/<access_path>/tweets")
+def tweets_page(access_path: str):
+    """«عرض التغريدات»: the tweets collected in the last 7 days, day by day. When content.py shows them
+    on its page, under its link box, they are there (an old link to this page goes to them)."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    if content_shows_tweets:
+        return redirect("/" + ACCESS_PATH + "/content#tweets")
+    return render_template_string(TWEETS_PAGE, back="/" + ACCESS_PATH, **tweets_part_values())
 
 
 @app.post("/<access_path>/tweets/views")
@@ -7553,6 +7579,8 @@ CONTENT_FILE = Path(__file__).resolve().with_name("content.py")
 content_ready = threading.Event()
 # Why content.py could not be added when the script started ("" if it was, or was not there).
 content_problem = ""
+# content.py's page shows the collected tweets (under its link box), so they have no page of their own.
+content_shows_tweets = False
 
 
 def content_accounts() -> list[dict]:
@@ -7579,14 +7607,14 @@ def content_error(exc: BaseException) -> str:
 
 
 def attach_content() -> None:
-    global content_problem
+    global content_problem, content_shows_tweets
     if not CONTENT_FILE.is_file():
         return
     try:
         spec = importlib.util.spec_from_file_location("content_page", CONTENT_FILE)
         content = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(content)
-        content.attach(app, ACCESS_PATH, SimpleNamespace(
+        added = content.attach(app, ACCESS_PATH, SimpleNamespace(
             data_dir=DATA_DIR,
             accounts=content_accounts,
             current_token=lambda: screen_payload()["auth_token"],
@@ -7594,11 +7622,14 @@ def attach_content() -> None:
             run_browser=lambda token, work: run_on_fresh_browser(token, work, MAX_PROFILES_PER_ACCOUNT),
             goto_x=goto_x,
             gemini_key=content_gemini_key,
+            tweets_part=tweets_part,
         ))
     except Exception as exc:
         content_problem = content_error(exc)
         print(f"لم تُضف صفحة إنشاء المحتوى ({CONTENT_FILE.name}): {content_problem}", flush=True)
         return
+    # What its page took on (an older content.py says nothing: the tweets keep their own page).
+    content_shows_tweets = isinstance(added, dict) and bool(added.get("tweets"))
     content_ready.set()
 
 

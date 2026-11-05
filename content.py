@@ -6,6 +6,10 @@ read through FxTwitter's free API (no browser and no account needed), go to a Ge
 which makes one new post from their idea: a short text and two pictures in two sizes, a tall one and a
 wide one. Every generated post is kept, each in its own folder data/content_generated/from-links/<time>/.
 
+Under the link box, «التغريدات المجموعة»: the tweets the script collected from the groups in the last
+7 days, day by day, with «عرض المشاهدات» (the script draws that part and answers its requests; an
+older script, without it, keeps them on a page of their own).
+
 «المحتوى السابق» shows, read only, what the page's old accounts part left: for each account it kept,
 the posts generated from its tweets (data/content_generated/<user>/) and its extracted tweets with their
 photos (data/content/<user>/). Nothing of it is deleted.
@@ -283,11 +287,16 @@ def read_answer(payload: dict) -> tuple[str, list[tuple[str, bytes]], str]:
     return clean_post("\n\n".join(texts)), pictures, blocked or str(candidate.get("finishReason") or "")
 
 
-def attach(app, access_path: str, tools) -> None:
+def attach(app, access_path: str, tools) -> dict:
     """Add the page and its requests to the script's app, under the panel's own address.
 
-    tools (from the script): data_dir, gemini_key() -> the Gemini key saved on the panel.
+    tools (from the script): data_dir, gemini_key() -> the Gemini key saved on the panel, and
+    tweets_part() -> the collected tweets' part of the page ({"style", "body", "script"}, ready to put
+    in it), when the script has it.
+
+    Returns what the page took on: {"tweets": True} when it shows the collected tweets.
     """
+    tweets_part = getattr(tools, "tweets_part", None)
     # The generated posts' folder (kept where it was, so the posts made before stay listed), one
     # generation at a time (each is paid for), and how the last one is going.
     links_folder = Path(tools.data_dir) / "content_generated" / LINKS_FOLDER
@@ -325,7 +334,15 @@ def attach(app, access_path: str, tools) -> None:
         csrf_token = session.get("csrf_token")
         if not csrf_token:
             csrf_token = session["csrf_token"] = secrets.token_urlsafe(32)
-        return render_template_string(PAGE, csrf_token=csrf_token, api_root="/" + access_path, panel="/" + access_path, models=GENERATE_MODELS, counts=GENERATE_COUNTS)
+        tweets = None
+        if tweets_part:
+            try:
+                tweets = tweets_part()
+            except Exception:
+                # The rest of the page still works without them.
+                app.logger.warning("content page: the collected tweets could not be shown", exc_info=True)
+        return render_template_string(PAGE, csrf_token=csrf_token, api_root="/" + access_path, panel="/" + access_path, models=GENERATE_MODELS,
+                                      counts=GENERATE_COUNTS, tweets=tweets)
 
     def link_parts(model: str, tweets: list[dict]) -> tuple[list[dict], dict]:
         """The request made of the pasted tweets: the prompt, then each tweet's text and photos."""
@@ -607,6 +624,7 @@ def attach(app, access_path: str, tools) -> None:
     app.add_url_rule("/<access>/content/archive/<key>", "content_archive_account", content_archive_account, methods=["GET"])
     app.add_url_rule("/<access>/content/archive/<key>/generated/<made>/<name>", "content_archive_generated", content_archive_generated, methods=["GET"])
     app.add_url_rule("/<access>/content/archive/<key>/media/<name>", "content_archive_media", content_archive_media, methods=["GET"])
+    return {"tweets": tweets_part is not None}
 
 
 PAGE = r'''<!doctype html>
@@ -675,7 +693,11 @@ PAGE = r'''<!doctype html>
     .kept-text { margin: 4px 0 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
     .kept-photos { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
     .kept-photos img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; display: block; }
+    #tweets { --tweets-day: var(--paper); --tweets-tweet: var(--sheet); }
   </style>
+  {%- if tweets %}
+  {{ tweets["style"]|safe }}
+  {%- endif %}
 </head>
 <body>
   <main>
@@ -711,6 +733,12 @@ PAGE = r'''<!doctype html>
         <div id="link-older-list"></div>
       </details>
     </section>
+    {%- if tweets %}
+    <section id="tweets" class="sheet">
+      <h2>التغريدات المجموعة</h2>
+      {{ tweets["body"]|safe }}
+    </section>
+    {%- endif %}
     <section id="archive" class="sheet" hidden>
       <h2>المحتوى السابق</h2>
       <p class="hint">ما بقي من قسم الحسابات: المنشورات المولَّدة من كل حساب، وتغريداته المستخرجة. للعرض فقط، ولا يُحذف شيء منه.</p>
@@ -1041,6 +1069,9 @@ PAGE = r'''<!doctype html>
     }
   })();
   </script>
+  {%- if tweets %}
+  {{ tweets["script"]|safe }}
+  {%- endif %}
 </body>
 </html>
 '''
