@@ -46,6 +46,10 @@ GENERATE_SECONDS = 240
 # What Gemini is asked to make from the pasted tweets (their texts and photos follow it).
 GENERATE_PROMPT = (
     "You write viral posts for X (Twitter). Below are posts, each with its text and photos.\n"
+    "These posts got high views. First, for yourself (not in your answer), work out why: what in their first words "
+    "makes people stop scrolling, what feeling they stir (curiosity, surprise, anger, laughter), why people reply to "
+    "them or share them, and what their photos add. Then build the new post on those same reasons, not only on the "
+    "same topic.\n"
     "Take the idea behind them and create ONE new post:\n"
     "- The text: very short, one line of a few words (at most 70 characters), as short as a real tweet. "
     "Thrilling, viral and mysterious: it hints and stops. Do not explain and do not tell the story.\n"
