@@ -61,9 +61,12 @@ GENERATE_PROMPT = (
     "- One image for it: edit the photos or create new ones from their idea. Do not return a photo unchanged. "
     "They look like real casual phone photos, like the posts' photos: not staged and not like an ad.\n"
     "- Each image has one detail, tied to the post's idea, that makes people react and comment, the way the posts' "
-    "photos do: a spontaneous 'dumb' slip people will rush to correct (wrong numbers, a wrong label, a misspelled word), "
-    "something odd or funny that does not belong, or a short provocative label or number added on the photo. "
-    "It feels natural, not like a planned joke.\n"
+    "photos do: something odd or funny that does not belong, or a spontaneous 'dumb' slip people will rush to correct "
+    "(something in the wrong place, the wrong way round or the wrong size). It feels natural, not like a planned joke, "
+    "and it is seen, not written.\n"
+    "- No added writing: do not add paper notes, handwritten signs, stickers, labels or captions to explain the idea "
+    "or the joke; the scene tells it by itself. Writing shows only where the real scene already has it (a road sign, "
+    "a shop sign, a screen), or when the idea itself is about something written.\n"
     "- No person in the images: no people, faces or bodies, even when the photos have them.\n"
     "Answer with the post text only, between <post> and </post> (no title, no notes, no translation), and the image."
 )
@@ -92,7 +95,7 @@ LINK_SIZES = ("3:4", "16:9")
 # Then the second image, for the same post: what goes with it after the first image.
 LINK_SECOND_IMAGE = (
     "Now make ONE more image for this same post, as its second photo: another scene or another angle of the same "
-    "idea that goes with the first image, following the same image rules as above. Answer with the image only.\n"
+    "idea that goes with the first image, following the same image rules as above (no added writing). Answer with the image only.\n"
     "The post: <post>{post}</post>"
 )
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
