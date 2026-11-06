@@ -787,6 +787,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
               <label for="phone-screen" title="شاشة جوال، وطولها بالبكسل أثناء الجمع داخل القروب" aria-label="شاشة جوال">جوال</label>
               <input id="phone-height" class="wait-sec" type="number" min="600" max="25000" step="1" value="10000" inputmode="numeric" aria-label="طول شاشة الجوال أثناء الجمع بالبكسل">
             </span>
+            {% if on_phone %}
+            <span class="opt">
+              <input id="mobile-browser" type="checkbox"{% if mobile_browser %} checked{% endif %}>
+              <label for="mobile-browser" title="يظهر المتصفح لـ X كمتصفح Chrome على جوالك هذا، بملف مستقل لكل حساب">متصفح جوال</label>
+            </span>
+            {% endif %}
           </div>
           <div id="stop-row" class="stop-row">
             <input id="stop-tweet" name="stop_tweet" type="text" maxlength="300" autocomplete="off" spellcheck="false"
@@ -959,6 +965,26 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
   } catch (_) {}
   [waitGroups, waitGroupsSec, groupWaitOn, groupWaitSec, accountProfilesOn, accountProfiles, phoneScreen, phoneHeight].forEach((node) => node.addEventListener("change", rememberWaits));
+  // «متصفح جوال» (on a phone): kept by the script itself, so its every browser (tasks, checks) follows it.
+  const mobileBrowser = document.getElementById("mobile-browser");
+  if (mobileBrowser) mobileBrowser.addEventListener("change", async () => {
+    const wanted = mobileBrowser.checked;
+    mobileBrowser.disabled = true;
+    let data;
+    try {
+      data = await postJson("/browser-mode", {mobile: wanted});
+    } catch (_) {
+      data = {success: false, message: "تعذّر الاتصال بالسكربت."};
+    }
+    mobileBrowser.disabled = false;
+    if (!data.success) {
+      mobileBrowser.checked = !wanted;
+      showNotice(data.message || "تعذّر تغيير المتصفح.", false);
+      return;
+    }
+    mobileBrowser.checked = !!data.mobile;
+    showNotice(data.message, true);
+  });
   function secondsFrom(field, min, max, fallback) {
     const value = Number.parseInt(field.value, 10);
     if (!Number.isInteger(value)) return fallback;
@@ -1856,7 +1882,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
       followTask({
         id: started.job_id,
         key: started.job_key,
-        title: name + (account ? " · " + account : "") + (phoneScreen.checked ? " · جوال " + secondsFrom(phoneHeight, 600, 25000, 10000) : ""),
+        title: name + (account ? " · " + account : "") + (phoneScreen.checked ? " · جوال " + secondsFrom(phoneHeight, 600, 25000, 10000) : "")
+          + (mobileBrowser && mobileBrowser.checked ? " · متصفح جوال" : ""),
         startedAt: Date.now()
       });
       showNotice((byLinks ? "بدأت مهمة على " + links.length + " تغريدة من الروابط." : "بدأت مهمة «" + selectedGroup + "».") + " يمكن بدء مهمة أخرى على نفس الحساب أو حساب مختلف.", true);
@@ -2600,6 +2627,9 @@ def real_click(locator) -> None:
     x = box["x"] + local_x
     y = box["y"] + local_y
     page = locator.page
+    if getattr(task_screen, "mobile", False):
+        page.touchscreen.tap(x, y)       # «متصفح جوال»: a finger's tap
+        return
     _move_like_a_hand(page, x, y)
     page.mouse.down()
     page.wait_for_timeout(100)
@@ -2624,6 +2654,9 @@ def click_box(page, box: dict) -> None:
         raise PlaywrightTimeoutError("button box missing")
     x = float(box["x"]) + width * random.uniform(0.4, 0.6)
     y = float(box["y"]) + height * random.uniform(0.4, 0.6)
+    if getattr(task_screen, "mobile", False):
+        page.touchscreen.tap(x, y)       # «متصفح جوال»: a finger's tap
+        return
     _move_like_a_hand(page, x, y)
     page.mouse.down()
     page.wait_for_timeout(100)
@@ -3058,7 +3091,7 @@ def screenshot_article(card) -> bytes | None:
             card.scroll_into_view_if_needed(timeout=4000)
         except Exception:
             pass
-        return card.screenshot(type="jpeg", quality=70, timeout=12000)
+        return card.screenshot(type="jpeg", quality=70, timeout=12000, scale="css")
     except Exception:
         return None
 
@@ -3359,7 +3392,7 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
             image = screenshot_article(card)
             if image is None:
                 try:
-                    image = page.screenshot(type="jpeg", quality=60, timeout=8000)
+                    image = page.screenshot(type="jpeg", quality=60, timeout=8000, scale="css")
                 except Exception:
                     image = None
             if plain:
@@ -3495,19 +3528,118 @@ def browser_launch_options() -> dict:
     return options
 
 
-def open_x_profile(playwright, auth_token: str, profile_dir: Path):
-    """Open the account's permanent browser profile (created on first use)."""
+# «متصفح جوال» (only on a phone, in Termux): the browser shows itself to X as Chrome on this Android
+# phone, the same in every place a site reads it (its real version, Android and the phone's model, a
+# phone screen with touch), and it taps instead of clicking with a mouse. Each account gets a profile
+# of its own for it (<profile>-mobile), so the two never mix. Its graphics and fonts stay Termux's own:
+# they cannot be a phone's, and faking them would only add contradictions.
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+MOBILE_SCREEN = {"width": 384, "height": 854, "scale": 2.8125}   # a Galaxy S21 Ultra at its usual resolution
+MOBILE_TOUCH_POINTS = 5
+BROWSER_MODE_PATH = DATA_DIR / "browser_mode.json"
+browser_mode: dict = {}            # {"mobile": bool}, read from BROWSER_MODE_PATH when first asked
+browser_versions: dict[str, str] = {}
+phone_found: dict[str, str] = {}
+
+
+def mobile_browser_on() -> bool:
+    if "mobile" not in browser_mode:
+        browser_mode["mobile"] = bool((read_private_json(BROWSER_MODE_PATH) or {}).get("mobile"))
+    return bool(TERMUX_PREFIX) and browser_mode["mobile"]
+
+
+def set_browser_mode(mobile: bool) -> None:
+    browser_mode["mobile"] = bool(mobile)
+    write_private_json(BROWSER_MODE_PATH, {"mobile": browser_mode["mobile"]})
+
+
+def browser_version(executable: str) -> str:
+    """The browser's own version ("156.0.8078.79"), read once from the program."""
+    if executable not in browser_versions:
+        try:
+            said = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            said = ""
+        match = re.search(r"\b\d+\.\d+\.\d+\.\d+\b", said or "")
+        browser_versions[executable] = match.group(0) if match else ""
+    return browser_versions[executable]
+
+
+def phone_details() -> tuple[str, str]:
+    """This phone's model and Android version, as a site would read them ("SM-G998U", "15.0.0")."""
+    if not phone_found:
+        def prop(name: str) -> str:
+            try:
+                return subprocess.run(["getprop", name], capture_output=True, text=True, timeout=5).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                return ""
+        release = re.match(r"\d+(?:\.\d+){0,2}", prop("ro.build.version.release"))
+        parts = ((release.group(0) if release else "15").split(".") + ["0", "0"])[:3]
+        phone_found.update(model=re.sub(r"[^A-Za-z0-9 ._-]", "", prop("ro.product.model"))[:40] or "SM-G998U",
+                           android=".".join(parts))
+    return phone_found["model"], phone_found["android"]
+
+
+def mobile_identity(playwright) -> dict | None:
+    """What the browser says it is in «متصفح جوال»: Chrome on this phone. None when its version cannot be read."""
+    version = browser_version(browser_launch_options().get("executable_path") or playwright.chromium.executable_path)
+    if not version:
+        return None
+    model, android = phone_details()
+    return {"user_agent": f"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version.split('.')[0]}.0.0.0 "
+                          "Mobile Safari/537.36",
+            "model": model, "android": android}
+
+
+def tell_phone_details(context, page, identity: dict) -> None:
+    """What only a phone's Chrome adds (its model, Android version, five touch points, an ARM system),
+    beside the browser's own name and version, so each place a site reads agrees with the rest."""
+    try:
+        # The browser's own names and versions (they change with each version) can only be read on a
+        # secure page: one is made up here, served from memory (nothing leaves the phone), then left.
+        probe = "https://phone-details.invalid/"
+        page.route(probe, lambda route: route.fulfill(status=200, content_type="text/html", body="<!doctype html><title>.</title>"))
+        try:
+            page.goto(probe, wait_until="domcontentloaded", timeout=10_000)
+            engine = page.evaluate("""async () => {
+                const data = navigator.userAgentData;
+                if (!data) return null;
+                const more = await data.getHighEntropyValues(["fullVersionList", "uaFullVersion"]);
+                return {brands: data.brands, fullVersionList: more.fullVersionList, fullVersion: more.uaFullVersion};
+            }""")
+        finally:
+            page.unroute(probe)
+        session = context.new_cdp_session(page)
+        if engine:
+            session.send("Emulation.setUserAgentOverride", {
+                "userAgent": identity["user_agent"], "acceptLanguage": "en-US,en;q=0.9", "platform": "Linux aarch64",
+                "userAgentMetadata": {"brands": engine["brands"], "fullVersionList": engine["fullVersionList"],
+                                      "fullVersion": engine["fullVersion"], "platform": "Android", "platformVersion": identity["android"],
+                                      "architecture": "", "model": identity["model"], "mobile": True, "bitness": "", "wow64": False},
+            })
+        session.send("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": MOBILE_TOUCH_POINTS})
+        page.goto("about:blank")
+    except Exception:
+        pass
+
+
+def open_x_profile(playwright, auth_token: str, profile_dir: Path, identity: dict | None = None):
+    """Open the account's permanent browser profile (created on first use); as a phone's Chrome with identity."""
     profile_dir.mkdir(parents=True, exist_ok=True)
+    looks: dict = {"user_agent": DESKTOP_USER_AGENT}
+    if identity:
+        looks = {"user_agent": identity["user_agent"], "is_mobile": True, "has_touch": True, "device_scale_factor": MOBILE_SCREEN["scale"],
+                 "screen": {"width": MOBILE_SCREEN["width"], "height": MOBILE_SCREEN["height"]}}
     context = playwright.chromium.launch_persistent_context(
         str(profile_dir),
         headless=True,
         **browser_launch_options(),
         viewport=screen_size(NORMAL_VIEWPORT_HEIGHT),
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ),
         locale="en-US",
+        **looks,
     )
     context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
@@ -3531,6 +3663,8 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
             pass
     page.set_default_timeout(20_000)
     page.set_default_navigation_timeout(60_000)
+    if identity:
+        tell_phone_details(context, page, identity)
     return context, page
 
 
@@ -3558,7 +3692,7 @@ def capture_live_view(page, job_id: str) -> bool:
         view["taken_at"] = now
     try:
         size = page.viewport_size or {"width": VIEWPORT_WIDTH, "height": NORMAL_VIEWPORT_HEIGHT}
-        image = page.screenshot(type="jpeg", quality=40, timeout=3000,
+        image = page.screenshot(type="jpeg", quality=40, timeout=3000, scale="css",
                                 clip={"x": 0, "y": 0, "width": size["width"], "height": min(size["height"], 1000)})
     except Exception:
         return True
@@ -3628,6 +3762,9 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
     try:
         playwright = sync_playwright().start()
         state = {"context": None}
+        identity = mobile_identity(playwright) if mobile_browser_on() else None
+        task_screen.mobile = identity is not None
+        profile_dir = PROFILES_DIR / (f"{slot_name}-mobile" if identity else slot_name)
 
         def restart(while_closed=None):
             """Close the profile's browser, reopen it on Google, then go to X. Returns the new page.
@@ -3641,7 +3778,7 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
             state["context"] = None
             if while_closed is not None and while_closed() is False:
                 return None
-            state["context"], new_page = open_x_profile(playwright, auth_token, PROFILES_DIR / slot_name)
+            state["context"], new_page = open_x_profile(playwright, auth_token, profile_dir, identity)
             try:
                 new_page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=60_000)
                 new_page.wait_for_timeout(2000)
@@ -3656,7 +3793,7 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
 
         browser_restart.fn = restart
         try:
-            state["context"], page = open_x_profile(playwright, auth_token, PROFILES_DIR / slot_name)
+            state["context"], page = open_x_profile(playwright, auth_token, profile_dir, identity)
             return work(page)
         finally:
             browser_restart.fn = None
@@ -3670,13 +3807,18 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
             except Exception:
                 pass
     finally:
+        task_screen.mobile = False
         profile_lock(slot_name).release()
 
 
 def screen_size(height: int) -> dict:
     """The page size for this thread's task. With "شاشة جوال" it is phone-wide, and the collecting
-    height is the one chosen on the page."""
+    height is the one chosen on the page. With «متصفح جوال» it is the phone's own screen, except while
+    collecting in the group (that height, for speed)."""
     phone_height = getattr(task_screen, "phone_height", 0)
+    if getattr(task_screen, "mobile", False):
+        tall = int(phone_height) if phone_height else PHONE_SCREEN["height"]
+        return {"width": MOBILE_SCREEN["width"], "height": tall if height == COLLECT_VIEWPORT_HEIGHT else MOBILE_SCREEN["height"]}
     if phone_height:
         return {"width": PHONE_SCREEN["width"], "height": int(phone_height) if height == COLLECT_VIEWPORT_HEIGHT else int(height)}
     return {"width": VIEWPORT_WIDTH, "height": int(height)}
@@ -5663,6 +5805,7 @@ def login_page(access_path: str):
     response = make_response(render_template_string(
         PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(), max_links=MAX_TWEET_LINKS,
         content_ready=content_ready.is_set() or CONTENT_FILE.is_file(), tweets_in_content=content_shows_tweets,
+        on_phone=bool(TERMUX_PREFIX), mobile_browser=mobile_browser_on(),
     ))
     return response
 
@@ -6972,6 +7115,26 @@ def group_run_endpoint(access_path: str):
         daemon=True,
     ).start()
     return jsonify(success=True, job_id=job_id, job_key=job_key, message="بدأ التنفيذ.")
+
+
+@app.post("/<access_path>/browser-mode")
+def browser_mode_endpoint(access_path: str):
+    """«متصفح جوال» on or off (on a phone only). Tasks already running carry on as they began."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    if not TERMUX_PREFIX:
+        return jsonify(success=False, message="متصفح الجوال يعمل فقط حين يشتغل السكربت على الجوال (Termux)."), 400
+    mobile = bool(data.get("mobile"))
+    try:
+        set_browser_mode(mobile)
+    except OSError:
+        return jsonify(success=False, message="تعذّر حفظ الاختيار."), 500
+    return jsonify(success=True, mobile=mobile, message=(
+        "من المهمة القادمة يظهر المتصفح لـ X كمتصفح Chrome على جوالك، بملف مستقل لكل حساب. المهام الجارية تكمل كما بدأت."
+        if mobile else "من المهمة القادمة يعود المتصفح كما كان. المهام الجارية تكمل كما بدأت."))
 
 
 @app.post("/<access_path>/retry")
