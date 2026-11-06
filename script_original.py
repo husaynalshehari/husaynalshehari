@@ -3471,9 +3471,13 @@ def profile_lock(key: str) -> threading.Lock:
 
 # On Android, in Termux: the browser is Termux's own Chromium, and Playwright's driver runs on Termux's
 # Node (the Node that comes with Playwright is built for desktop Linux and does not run on Android).
+# The driver also works out where browsers would be downloaded as soon as it starts, and it does not
+# know Android ("Unsupported platform: android"): it is given that folder, so it never asks.
 TERMUX_PREFIX = os.getenv("PREFIX", "") if "/com.termux/" in os.getenv("PREFIX", "") else ""
-if TERMUX_PREFIX and not os.getenv("PLAYWRIGHT_NODEJS_PATH") and Path(TERMUX_PREFIX, "bin", "node").is_file():
-    os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(Path(TERMUX_PREFIX, "bin", "node"))
+if TERMUX_PREFIX:
+    if not os.getenv("PLAYWRIGHT_NODEJS_PATH") and Path(TERMUX_PREFIX, "bin", "node").is_file():
+        os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(Path(TERMUX_PREFIX, "bin", "node"))
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path.home() / ".cache" / "ms-playwright"))
 
 
 def browser_launch_options() -> dict:

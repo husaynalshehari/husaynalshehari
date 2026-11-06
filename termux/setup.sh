@@ -77,7 +77,8 @@ printf '#!/data/data/com.termux/files/usr/bin/bash\nexec gg\n' > "$HOME/.shortcu
 chmod +x "$HOME/.shortcuts/gg"
 
 step "6/6 تجربة المتصفح"
-PLAYWRIGHT_NODEJS_PATH="$PREFIX/bin/node" python - <<'EOF'
+# (Playwright's driver stops on Android unless it is told where browsers would be kept, as gg.py does.)
+PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" PLAYWRIGHT_NODEJS_PATH="$PREFIX/bin/node" python - <<'EOF'
 import os, sys, tempfile
 from playwright.sync_api import sync_playwright
 prefix = os.environ["PREFIX"]
