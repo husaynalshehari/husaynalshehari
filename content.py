@@ -76,6 +76,13 @@ GENERATE_DIFFERENT = (
 GENERATE_COUNTS = (3, 2, 1)
 # The pasted tweets are read through FxTwitter's free API, at most this many at once.
 FX_STATUS_URL = "https://api.fxtwitter.com/status/{}"
+# Gemini's address, in one place.
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
+# «تفكير عميق»: the model thinks more before it answers (better at keeping every rule at once; slower and a
+# little dearer, as its thinking is paid like the text it writes). A model that does not take the setting is
+# asked again without it, and is not sent it again.
+DEEP_THINKING = {"thinkingLevel": "high"}
+thinking_refused: set[str] = set()
 LINK_MAX_TWEETS = 10
 # The generated posts' folder, under data/content_generated.
 LINKS_FOLDER = "from-links"
@@ -169,20 +176,24 @@ def gemini_problem(status: int, detail: str, busy: bool) -> str:
     return "رفض Gemini الطلب" + (f": {detail}" if detail else ".")
 
 
-def ask_gemini(api_key: str, model: str, parts: list[dict], report, aspect: str = "") -> dict:
+def ask_gemini(api_key: str, model: str, parts: list[dict], report, aspect: str = "", deep: bool = False) -> dict:
     """One request answered with text and pictures. A busy Gemini is asked again a few times. aspect: the
-    pictures' shape ("3:4", "16:9"); a model that does not take it is asked again without it."""
-    def request_body(shaped: bool) -> bytes:
+    pictures' shape ("3:4", "16:9"); deep: «تفكير عميق». A model that does not take either is asked again
+    without it."""
+    def request_body(shaped: bool, thinking: bool) -> bytes:
         config: dict = {"responseModalities": ["TEXT", "IMAGE"]}
         if shaped:
             config["imageConfig"] = {"aspectRatio": aspect}
+        if thinking:
+            config["thinkingConfig"] = dict(DEEP_THINKING)
         return json.dumps({"contents": [{"role": "user", "parts": parts}], "generationConfig": config}).encode("utf-8")
     shaped = bool(aspect)
-    body = request_body(shaped)
+    thinking = deep and model not in thinking_refused
+    body = request_body(shaped, thinking)
     waits = (5, 12, 20, 30)
     for attempt in range(len(waits) + 1):
         ask = urllib.request.Request(
-            "https://generativelanguage.googleapis.com/v1beta/models/" + quote(model, safe="") + ":generateContent",
+            GEMINI_URL.format(quote(model, safe="")),
             data=body,
             headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
             method="POST",
@@ -202,7 +213,13 @@ def ask_gemini(api_key: str, model: str, parts: list[dict], report, aspect: str 
                 detail = detail.replace(api_key, "…")
             if shaped and status == 400 and re.search(r"image_?config|aspect", detail, re.I):
                 shaped = False                   # this model takes no image size: asked again without it
-                body = request_body(False)
+                body = request_body(False, thinking)
+                continue
+            if thinking and status == 400 and re.search(r"thinking", detail, re.I):
+                thinking = False                 # this model takes no thinking setting: asked again without it,
+                thinking_refused.add(model)      # and not sent it again
+                report("هذا النموذج لا يقبل «تفكير عميق»، يكمل بدونه…")
+                body = request_body(shaped, False)
                 continue
             busy = status in (429, 500, 502, 503, 504) or bool(
                 re.search(r"high demand|try again later|unavailable|overloaded|resource exhausted|rate limit", detail, re.I))
@@ -379,14 +396,14 @@ def attach(app, access_path: str, tools) -> dict:
         return parts, {"posts": [tweet["status_id"] for tweet in tweets], "links": [tweet["url"] for tweet in tweets],
                        "photos_sent": len(picked), "photos_total": total}
 
-    def generate_link_one(api_key: str, model: str, parts: list[dict], made_before: list[str], progress) -> tuple[str, list]:
+    def generate_link_one(api_key: str, model: str, parts: list[dict], made_before: list[str], progress, deep: bool = False) -> tuple[str, list]:
         """One post from pasted tweets: its text with a tall image, then a second, wide image for it (shown
         the first one, so the two go together). Without the second, the post keeps the first alone."""
         if made_before:
             parts = parts + [{"text": GENERATE_DIFFERENT + "\n".join(f"{n}. {text}" for n, text in enumerate(made_before, 1))}]
         text, pictures, reason = "", [], ""
         for attempt in range(2):
-            text, pictures, reason = read_answer(ask_gemini(api_key, model, parts, progress, LINK_SIZES[0]))
+            text, pictures, reason = read_answer(ask_gemini(api_key, model, parts, progress, LINK_SIZES[0], deep=deep))
             if pictures or reason not in ("", "STOP"):
                 break
         if not pictures:
@@ -401,7 +418,7 @@ def attach(app, access_path: str, tools) -> dict:
         second: list = []
         for attempt in range(2):
             try:
-                _, second, reason = read_answer(ask_gemini(api_key, model, second_ask, progress, LINK_SIZES[1]))
+                _, second, reason = read_answer(ask_gemini(api_key, model, second_ask, progress, LINK_SIZES[1], deep=deep))
             except GenerateError as exc:
                 if exc.fatal and not re.search(r"مشغول|busy", str(exc)):
                     raise
@@ -426,12 +443,12 @@ def attach(app, access_path: str, tools) -> dict:
         kept = {"model": result["model"], "text": result["text"], "images": names, "sizes": list(LINK_SIZES[:len(names)]),
                 "posts": result["posts"], "links": result["links"],
                 "photos_sent": result["photos_sent"], "photos_total": result["photos_total"], "created_at": made_at,
-                "batch": result["batch"], "number": result["number"], "of": result["of"]}
+                "batch": result["batch"], "number": result["number"], "of": result["of"], "deep": bool(result.get("deep"))}
         (fresh / "result.json").write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
         with generated_lock:
             fresh.rename(links_folder / stamp)
 
-    def run_link_generation(api_key: str, status_ids: list[str], model: str, count: int) -> None:
+    def run_link_generation(api_key: str, status_ids: list[str], model: str, count: int, deep: bool = False) -> None:
         """Read the pasted tweets, then make count posts from them one after the other, each kept as soon as
         it is made."""
         label = GENERATE_MODELS[model]["label"].split(" · ")[0]
@@ -455,16 +472,17 @@ def attach(app, access_path: str, tools) -> dict:
                 def progress(message: str, step=step) -> None:
                     link_job.update(status="running", message=f"{step}: {message}" if step else message)
 
-                link_job.update(status="running", message=f"جارٍ توليد {step or 'المنشور'} بـ {label}… {sent}. قد يستغرق دقيقة أو أكثر.")
+                thought = " بتفكير عميق" if deep and model not in thinking_refused else ""
+                link_job.update(status="running", message=f"جارٍ توليد {step or 'المنشور'} بـ {label}{thought}… {sent}. قد يستغرق دقيقة أو أكثر.")
                 try:
-                    text, pictures = generate_link_one(api_key, model, parts, made, progress)
+                    text, pictures = generate_link_one(api_key, model, parts, made, progress, deep)
                 except GenerateError as exc:
                     problem, last = (f"{step}: {exc}" if step else str(exc)), exc
                     if exc.fatal:
                         break
                     continue
-                save_link_generated({**info, "model": model, "text": text, "pictures": pictures,
-                                     "batch": batch, "number": len(made) + 1, "of": count})
+                save_link_generated({**info, "model": model, "text": text, "pictures": pictures, "batch": batch,
+                                     "number": len(made) + 1, "of": count, "deep": deep and model not in thinking_refused})
                 made.append(text)
             if len(made) == count:
                 link_job.update(status="done", message="اكتمل التوليد: " + {1: "منشور واحد.", 2: "منشوران."}.get(count, f"{count} منشورات."))
@@ -512,7 +530,8 @@ def attach(app, access_path: str, tools) -> dict:
             return jsonify(success=False, message="يعمل الآن توليد آخر. انتظر حتى ينتهي."), 409
         link_job.clear()
         link_job.update(status="running", message="جارٍ قراءة التغريدة…")
-        threading.Thread(target=run_link_generation, args=(api_key, status_ids, model, count), name="content-link-generate", daemon=True).start()
+        deep = bool(data.get("deep"))
+        threading.Thread(target=run_link_generation, args=(api_key, status_ids, model, count, deep), name="content-link-generate", daemon=True).start()
         return jsonify(success=True, message="بدأ التوليد.", job=dict(link_job))
 
     def content_link_posts(access: str):
@@ -667,6 +686,15 @@ PAGE = r'''<!doctype html>
     .gen-row button { flex: 1; }
     .gen-row select { flex: 1; min-width: 0; min-height: 36px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px;
       background: var(--sheet); color: var(--ink); font: inherit; font-size: 16px; }
+    .gen-deep { display: flex; align-items: center; gap: 8px; min-height: 36px; margin-top: 6px; padding: 4px 10px; border: 1px solid var(--line);
+      border-radius: 8px; background: var(--sheet); font-size: 13px; cursor: pointer; user-select: none; }
+    .gen-deep b { font-weight: 600; white-space: nowrap; }
+    .gen-deep span { margin-inline-start: auto; color: var(--muted); font-size: 12px; text-align: end; }
+    .gen-deep input { flex: 0 0 auto; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; accent-color: var(--pine); cursor: pointer; }
+    .gen-deep input:focus { box-shadow: none; }
+    .gen-deep:has(input:checked) { border-color: var(--pine); background: var(--ok-bg); color: var(--ok-ink); }
+    .gen-deep:has(input:checked) span { color: var(--ok-ink); }
+    .gen-deep:has(input:focus-visible) { box-shadow: 0 0 0 3px rgba(15, 107, 80, 0.16); }
     .generated { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: var(--ok-bg); box-shadow: inset 0 0 0 1px rgba(15, 107, 80, 0.25); }
     .gen-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 10px; font-size: 13px; }
     .gen-head span { color: var(--muted); font-size: 12px; }
@@ -721,6 +749,7 @@ PAGE = r'''<!doctype html>
           {%- endfor %}
         </select>
       </div>
+      <label class="gen-deep"><input id="link-deep" type="checkbox"><b>تفكير عميق</b><span>يفكر أطول قبل أن يكتب · أبطأ وأغلى قليلًا</span></label>
       <div class="gen-row">
         <select id="link-count" class="gen-count" aria-label="عدد المنشورات">
           {%- for count in counts %}
@@ -773,7 +802,8 @@ PAGE = r'''<!doctype html>
       const made = (result.posts || []).length;
       meta.textContent = ((MODELS[result.model] || {}).label || result.model)
         + " · " + new Date(result.created_at * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"})
-        + " · من " + (result.links ? plural(made, "تغريدة واحدة", "تغريدتين", "تغريدات", "تغريدة") : plural(made, "منشور واحد", "منشورين", "منشورات", "منشورًا"));
+        + " · من " + (result.links ? plural(made, "تغريدة واحدة", "تغريدتين", "تغريدات", "تغريدة") : plural(made, "منشور واحد", "منشورين", "منشورات", "منشورًا"))
+        + (result.deep ? " · تفكير عميق" : "");
       head.append(meta);
       const text = document.createElement("p");
       text.className = "gen-text";
@@ -840,6 +870,7 @@ PAGE = r'''<!doctype html>
     const linkGo = document.getElementById("link-go");
     const linkModel = document.getElementById("link-model");
     const linkCount = document.getElementById("link-count");
+    const linkDeep = document.getElementById("link-deep");
     const linkNotice = document.getElementById("link-notice");
     const linkOlder = document.getElementById("link-older");
     let linkRunning = false;
@@ -901,7 +932,7 @@ PAGE = r'''<!doctype html>
           method: "POST",
           headers: {"Content-Type": "application/json"},
           cache: "no-store",
-          body: JSON.stringify({csrf_token: csrf, links, model: linkModel.value, count: Number(linkCount.value)})
+          body: JSON.stringify({csrf_token: csrf, links, model: linkModel.value, count: Number(linkCount.value), deep: linkDeep.checked})
         });
         data = await response.json();
       } catch (_) {
@@ -917,13 +948,19 @@ PAGE = r'''<!doctype html>
     linkField.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !linkGo.disabled) linkGo.click();
     });
-    // The model and count chosen last, remembered on this browser.
+    // The model, count and «تفكير عميق» chosen last, remembered on this browser.
     try {
       const savedModel = localStorage.getItem("content-generate-model");
       if (savedModel && MODELS[savedModel]) linkModel.value = savedModel;
       const savedCount = localStorage.getItem("content-generate-count");
       if (savedCount && [...linkCount.options].some((option) => option.value === savedCount)) linkCount.value = savedCount;
+      linkDeep.checked = localStorage.getItem("content-generate-deep") === "1";
     } catch (_) {}
+    linkDeep.addEventListener("change", () => {
+      try {
+        localStorage.setItem("content-generate-deep", linkDeep.checked ? "1" : "0");
+      } catch (_) {}
+    });
     linkModel.addEventListener("change", () => {
       try {
         localStorage.setItem("content-generate-model", linkModel.value);
