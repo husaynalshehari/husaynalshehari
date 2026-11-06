@@ -3469,13 +3469,35 @@ def profile_lock(key: str) -> threading.Lock:
         return lock
 
 
+# On Android, in Termux: the browser is Termux's own Chromium, and Playwright's driver runs on Termux's
+# Node (the Node that comes with Playwright is built for desktop Linux and does not run on Android).
+TERMUX_PREFIX = os.getenv("PREFIX", "") if "/com.termux/" in os.getenv("PREFIX", "") else ""
+if TERMUX_PREFIX and not os.getenv("PLAYWRIGHT_NODEJS_PATH") and Path(TERMUX_PREFIX, "bin", "node").is_file():
+    os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(Path(TERMUX_PREFIX, "bin", "node"))
+
+
+def browser_launch_options() -> dict:
+    """The browser's switches, and on Termux where its Chromium is. GG_CHROMIUM_ARGS adds switches
+    (e.g. "--single-process" if Android keeps stopping the browser's helper processes)."""
+    options: dict = {}
+    args = ["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"]
+    if TERMUX_PREFIX:
+        for candidate in (Path(TERMUX_PREFIX, "lib", "chromium", "chrome"), Path(TERMUX_PREFIX, "bin", "chromium-browser")):
+            if candidate.is_file():
+                options["executable_path"] = str(candidate)
+                break
+        args.append("--disable-gpu")
+    options["args"] = args + os.getenv("GG_CHROMIUM_ARGS", "").split()
+    return options
+
+
 def open_x_profile(playwright, auth_token: str, profile_dir: Path):
     """Open the account's permanent browser profile (created on first use)."""
     profile_dir.mkdir(parents=True, exist_ok=True)
     context = playwright.chromium.launch_persistent_context(
         str(profile_dir),
         headless=True,
-        args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"],
+        **browser_launch_options(),
         viewport=screen_size(NORMAL_VIEWPORT_HEIGHT),
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
