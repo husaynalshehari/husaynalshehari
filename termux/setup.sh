@@ -3,7 +3,10 @@
 # a «gg» command that starts it and a «gg-update» command that updates it. Run it again any time:
 # it keeps ~/gg/data (accounts, tasks, saved tweets).
 #
-#   curl -fsSL -o setup.sh https://raw.githubusercontent.com/husaynalshehari/husaynalshehari/ccr-695f6c04-mlgxcr/termux/setup.sh && bash setup.sh
+#   apt update && apt full-upgrade -y -o Dpkg::Options::=--force-confold && curl -fsSL -o setup.sh https://raw.githubusercontent.com/husaynalshehari/husaynalshehari/ccr-695f6c04-mlgxcr/termux/setup.sh && bash setup.sh
+#
+# apt, not pkg: Termux's pkg checks its mirrors with curl, and a curl updated alone (without the rest of Termux)
+# stops working until everything is updated; apt does not need curl.
 set -euo pipefail
 
 RAW="https://raw.githubusercontent.com/husaynalshehari/husaynalshehari/ccr-695f6c04-mlgxcr"
@@ -20,12 +23,13 @@ case "${PREFIX:-}" in
 esac
 
 step "1/6 تحديث Termux"
-pkg update -y
-pkg upgrade -y -o Dpkg::Options::=--force-confold
+apt update
+apt full-upgrade -y -o Dpkg::Options::=--force-confold
 
 step "2/6 Python وNode وChromium (قد يأخذ عدة دقائق)"
-pkg install -y x11-repo
-pkg install -y python python-pip python-greenlet nodejs chromium curl
+apt install -y x11-repo
+apt update                                         # the new repository's package list (Chromium is there)
+apt install -y -o Dpkg::Options::=--force-confold python python-pip python-greenlet nodejs chromium curl
 
 step "3/6 Flask"
 pip_install flask pyee typing-extensions
