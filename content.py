@@ -73,6 +73,13 @@ GENERATE_PROMPT = (
     "- No person in the images: no people, faces or bodies, even when the photos have them.\n"
     "Answer with the post text only, between <post> and </post> (no title, no notes, no translation), and the image."
 )
+# «بصيغة أنا»: when ticked, this goes with the text's rules (after "- Personal:"), so the post says "I" in so many
+# words. Words that fit a man or a woman alike keep it right for any account.
+GENERATE_FIRST_PERSON = (
+    "- First person, in so many words: the text itself says what the writer saw, did, tried, asked or was told, "
+    "with a first-person verb or word (in Arabic, like شفت، جربت، طلبت، قالوا لي), as their own experience. "
+    "Prefer wording that fits a man or a woman alike.\n"
+)
 # Sent after the tweets for the second and third post of one «إرسال إلى Gemini», with the texts made before it.
 GENERATE_DIFFERENT = (
     "Posts already made from these. Yours must be clearly different from them: another angle or another "
@@ -167,6 +174,14 @@ class GenerateError(Exception):
     def __init__(self, message: str, fatal: bool = True):
         super().__init__(message)
         self.fatal = fatal
+
+
+def generate_prompt(first_person: bool = False) -> str:
+    """What Gemini is asked; with «بصيغة أنا», its rule goes with the text's rules."""
+    if not first_person:
+        return GENERATE_PROMPT
+    head, marker, tail = GENERATE_PROMPT.partition("- Controversial:")
+    return head + GENERATE_FIRST_PERSON + marker + tail if marker else GENERATE_PROMPT + "\n" + GENERATE_FIRST_PERSON
 
 
 def gemini_problem(status: int, detail: str, busy: bool) -> str:
@@ -371,7 +386,7 @@ def attach(app, access_path: str, tools) -> dict:
         return render_template_string(PAGE, csrf_token=csrf_token, api_root="/" + access_path, panel="/" + access_path, models=GENERATE_MODELS,
                                       counts=GENERATE_COUNTS, tweets=tweets)
 
-    def link_parts(model: str, tweets: list[dict]) -> tuple[list[dict], dict]:
+    def link_parts(model: str, tweets: list[dict], first_person: bool = False) -> tuple[list[dict], dict]:
         """The request made of the pasted tweets: the prompt, then each tweet's text and photos."""
         order = []
         for depth in range(4):
@@ -389,7 +404,7 @@ def attach(app, access_path: str, tools) -> dict:
                 continue
             picked.add((index, depth))
             size += len(data)
-        parts: list[dict] = [{"text": GENERATE_PROMPT}]
+        parts: list[dict] = [{"text": generate_prompt(first_person)}]
         for index, tweet in enumerate(tweets):
             text = tweet["text"] or "(no text)"
             if tweet["quote"]:
@@ -449,12 +464,16 @@ def attach(app, access_path: str, tools) -> dict:
         kept = {"model": result["model"], "text": result["text"], "images": names, "sizes": list(LINK_SIZES[:len(names)]),
                 "posts": result["posts"], "links": result["links"],
                 "photos_sent": result["photos_sent"], "photos_total": result["photos_total"], "created_at": made_at,
-                "batch": result["batch"], "number": result["number"], "of": result["of"], "deep": bool(result.get("deep"))}
+                "batch": result["batch"], "number": result["number"], "of": result["of"], "deep": bool(result.get("deep")),
+                "first_person": bool(result.get("first_person"))}
         (fresh / "result.json").write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
         with generated_lock:
+            while (links_folder / stamp).exists():       # (two posts kept within one millisecond)
+                stamp = str(int(stamp) + 1)
             fresh.rename(links_folder / stamp)
 
-    def run_link_generation(api_key: str, status_ids: list[str], model: str, count: int, deep: bool = False) -> None:
+    def run_link_generation(api_key: str, status_ids: list[str], model: str, count: int, deep: bool = False,
+                            first_person: bool = False) -> None:
         """Read the pasted tweets, then make count posts from them one after the other, each kept as soon as
         it is made."""
         label = GENERATE_MODELS[model]["label"].split(" · ")[0]
@@ -469,7 +488,7 @@ def attach(app, access_path: str, tools) -> dict:
                 tweet = read_tweet(status_id)
                 tweet["files"] = [photo for photo in (download_photo(address) for address in tweet["photos"]) if photo]
                 tweets.append(tweet)
-            parts, info = link_parts(model, tweets)
+            parts, info = link_parts(model, tweets, first_person)
             sent = (f"أُرسلت {len(tweets)} تغريدات" if len(tweets) > 1 else "أُرسلت التغريدة") + f" و{info['photos_sent']} صورة" + (
                 f" من {info['photos_total']}" if info["photos_sent"] < info["photos_total"] else "")
             for number in range(1, count + 1):
@@ -488,7 +507,8 @@ def attach(app, access_path: str, tools) -> dict:
                         break
                     continue
                 save_link_generated({**info, "model": model, "text": text, "pictures": pictures, "batch": batch,
-                                     "number": len(made) + 1, "of": count, "deep": deep and model not in thinking_refused})
+                                     "number": len(made) + 1, "of": count, "deep": deep and model not in thinking_refused,
+                                     "first_person": first_person})
                 made.append(text)
             if len(made) == count:
                 link_job.update(status="done", message="اكتمل التوليد: " + {1: "منشور واحد.", 2: "منشوران."}.get(count, f"{count} منشورات."))
@@ -537,7 +557,9 @@ def attach(app, access_path: str, tools) -> dict:
         link_job.clear()
         link_job.update(status="running", message="جارٍ قراءة التغريدة…")
         deep = bool(data.get("deep"))
-        threading.Thread(target=run_link_generation, args=(api_key, status_ids, model, count, deep), name="content-link-generate", daemon=True).start()
+        first_person = bool(data.get("first_person"))
+        threading.Thread(target=run_link_generation, args=(api_key, status_ids, model, count, deep, first_person),
+                         name="content-link-generate", daemon=True).start()
         return jsonify(success=True, message="بدأ التوليد.", job=dict(link_job))
 
     def content_link_posts(access: str):
@@ -692,15 +714,15 @@ PAGE = r'''<!doctype html>
     .gen-row button { flex: 1; }
     .gen-row select { flex: 1; min-width: 0; min-height: 36px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px;
       background: var(--sheet); color: var(--ink); font: inherit; font-size: 16px; }
-    .gen-deep { display: flex; align-items: center; gap: 8px; min-height: 36px; margin-top: 6px; padding: 4px 10px; border: 1px solid var(--line);
+    .gen-option { display: flex; align-items: center; gap: 8px; min-height: 36px; margin-top: 6px; padding: 4px 10px; border: 1px solid var(--line);
       border-radius: 8px; background: var(--sheet); font-size: 13px; cursor: pointer; user-select: none; }
-    .gen-deep b { font-weight: 600; white-space: nowrap; }
-    .gen-deep span { margin-inline-start: auto; color: var(--muted); font-size: 12px; text-align: end; }
-    .gen-deep input { flex: 0 0 auto; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; accent-color: var(--pine); cursor: pointer; }
-    .gen-deep input:focus { box-shadow: none; }
-    .gen-deep:has(input:checked) { border-color: var(--pine); background: var(--ok-bg); color: var(--ok-ink); }
-    .gen-deep:has(input:checked) span { color: var(--ok-ink); }
-    .gen-deep:has(input:focus-visible) { box-shadow: 0 0 0 3px rgba(15, 107, 80, 0.16); }
+    .gen-option b { font-weight: 600; white-space: nowrap; }
+    .gen-option span { margin-inline-start: auto; color: var(--muted); font-size: 12px; text-align: end; }
+    .gen-option input { flex: 0 0 auto; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; accent-color: var(--pine); cursor: pointer; }
+    .gen-option input:focus { box-shadow: none; }
+    .gen-option:has(input:checked) { border-color: var(--pine); background: var(--ok-bg); color: var(--ok-ink); }
+    .gen-option:has(input:checked) span { color: var(--ok-ink); }
+    .gen-option:has(input:focus-visible) { box-shadow: 0 0 0 3px rgba(15, 107, 80, 0.16); }
     .generated { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: var(--ok-bg); box-shadow: inset 0 0 0 1px rgba(15, 107, 80, 0.25); }
     .gen-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 10px; font-size: 13px; }
     .gen-head span { color: var(--muted); font-size: 12px; }
@@ -755,7 +777,8 @@ PAGE = r'''<!doctype html>
           {%- endfor %}
         </select>
       </div>
-      <label class="gen-deep"><input id="link-deep" type="checkbox"><b>تفكير عميق</b><span>يفكر أطول قبل أن يكتب · أبطأ وأغلى قليلًا</span></label>
+      <label class="gen-option"><input id="link-deep" type="checkbox"><b>تفكير عميق</b><span>يفكر أطول قبل أن يكتب · أبطأ وأغلى قليلًا</span></label>
+      <label class="gen-option"><input id="link-me" type="checkbox"><b>بصيغة أنا</b><span>النص بصيغة المتكلم: شفت، جربت، طلبت</span></label>
       <div class="gen-row">
         <select id="link-count" class="gen-count" aria-label="عدد المنشورات">
           {%- for count in counts %}
@@ -809,7 +832,7 @@ PAGE = r'''<!doctype html>
       meta.textContent = ((MODELS[result.model] || {}).label || result.model)
         + " · " + new Date(result.created_at * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"})
         + " · من " + (result.links ? plural(made, "تغريدة واحدة", "تغريدتين", "تغريدات", "تغريدة") : plural(made, "منشور واحد", "منشورين", "منشورات", "منشورًا"))
-        + (result.deep ? " · تفكير عميق" : "");
+        + (result.deep ? " · تفكير عميق" : "") + (result.first_person ? " · بصيغة أنا" : "");
       head.append(meta);
       const text = document.createElement("p");
       text.className = "gen-text";
@@ -877,6 +900,7 @@ PAGE = r'''<!doctype html>
     const linkModel = document.getElementById("link-model");
     const linkCount = document.getElementById("link-count");
     const linkDeep = document.getElementById("link-deep");
+    const linkMe = document.getElementById("link-me");
     const linkNotice = document.getElementById("link-notice");
     const linkOlder = document.getElementById("link-older");
     let linkRunning = false;
@@ -938,7 +962,8 @@ PAGE = r'''<!doctype html>
           method: "POST",
           headers: {"Content-Type": "application/json"},
           cache: "no-store",
-          body: JSON.stringify({csrf_token: csrf, links, model: linkModel.value, count: Number(linkCount.value), deep: linkDeep.checked})
+          body: JSON.stringify({csrf_token: csrf, links, model: linkModel.value, count: Number(linkCount.value), deep: linkDeep.checked,
+                               first_person: linkMe.checked})
         });
         data = await response.json();
       } catch (_) {
@@ -954,19 +979,22 @@ PAGE = r'''<!doctype html>
     linkField.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !linkGo.disabled) linkGo.click();
     });
-    // The model, count and «تفكير عميق» chosen last, remembered on this browser.
+    // The model, count, «تفكير عميق» and «بصيغة أنا» chosen last, remembered on this browser.
     try {
       const savedModel = localStorage.getItem("content-generate-model");
       if (savedModel && MODELS[savedModel]) linkModel.value = savedModel;
       const savedCount = localStorage.getItem("content-generate-count");
       if (savedCount && [...linkCount.options].some((option) => option.value === savedCount)) linkCount.value = savedCount;
       linkDeep.checked = localStorage.getItem("content-generate-deep") === "1";
+      linkMe.checked = localStorage.getItem("content-generate-first-person") === "1";
     } catch (_) {}
-    linkDeep.addEventListener("change", () => {
-      try {
-        localStorage.setItem("content-generate-deep", linkDeep.checked ? "1" : "0");
-      } catch (_) {}
-    });
+    for (const [box, key] of [[linkDeep, "content-generate-deep"], [linkMe, "content-generate-first-person"]]) {
+      box.addEventListener("change", () => {
+        try {
+          localStorage.setItem(key, box.checked ? "1" : "0");
+        } catch (_) {}
+      });
+    }
     linkModel.addEventListener("change", () => {
       try {
         localStorage.setItem("content-generate-model", linkModel.value);
