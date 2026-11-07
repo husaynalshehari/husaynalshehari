@@ -1056,8 +1056,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const showGemini = document.getElementById("show-gemini");
   // A user's copy: the owner sets the Gemini key and model; here they are only shown.
   const geminiByOwner = {{ (not owner_copy)|tojson }};
-  // A user's copy: whether its comments can be written (by Grok, or by Gemini with its key), as the script says.
-  let commentsReady = false;
   editGemini.hidden = geminiByOwner;
   function lockGemini(locked) {
     geminiKey.readOnly = locked;
@@ -1452,7 +1450,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (geminiByOwner) {
         geminiKey.value = data.gemini_api_key || "";
         geminiModel.value = data.gemini_model || "";
-        commentsReady = data.comments_ready === undefined ? Boolean(data.gemini_api_key) : Boolean(data.comments_ready);
       } else {
         if (data.gemini_api_key && document.activeElement !== geminiKey) {
           geminiKey.value = data.gemini_api_key;
@@ -1834,7 +1831,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
     if (!actions.length) { showNotice("اختر إجراءً واحدًا على الأقل.", false); return; }
     if (actions.includes("comment") && geminiByOwner) {
-      if (!commentsReady) { showNotice("لا يوجد مفتاح للتعليقات في هذه النسخة. اطلبه من صاحب البرنامج.", false); return; }
+      // (Its keys come from the owner when it starts: the script waits for them, and says if they do not come.)
     } else if (actions.includes("comment")) {
       if (!geminiKey.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل مفتاح Gemini.", false); geminiKey.focus(); return; }
       if (!geminiModel.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل اسم النموذج.", false); geminiModel.focus(); return; }
@@ -3143,7 +3140,7 @@ def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
 
 
 # Users' comments by Grok (xAI), when the owner chooses it in «توزيع البرنامج»: its key and model come with
-# the copy's check-in (kept in data/grok.json), and each comment is asked with the same prompt as Gemini's,
+# the copy's check-in (kept in memory only), and each comment is asked with the same prompt as Gemini's,
 # through xAI's Responses API, with the tweet's picture. The owner's own copy keeps Gemini.
 GROK_URL = "https://api.x.ai/v1/responses"
 GROK_PATH = DATA_DIR / "grok.json"
@@ -3164,24 +3161,15 @@ def valid_grok_model(value: str) -> bool:
     return bool(re.fullmatch(r"[a-z0-9][a-z0-9.\-]{1,60}", value or ""))
 
 
-def persist_grok_unlocked() -> None:
-    write_private_json(GROK_PATH, {"version": 2, "engine": saved_grok["engine"], "api_key_sealed": seal_key(saved_grok["api_key"]),
-                                   "model": saved_grok["model"]})
-
-
 def load_grok() -> None:
-    loaded = read_private_json(GROK_PATH) or {}
-    plain = str(loaded.get("api_key") or "").strip()
-    key = open_key(loaded.get("api_key_sealed")).strip() if loaded.get("api_key_sealed") else plain
-    model = str(loaded.get("model") or "").strip()
-    grok = loaded.get("engine") == "grok" and valid_grok_key(key) and valid_grok_model(model)
+    """Grok's key is kept in memory only, from the copy's check-ins, never on its disk: a file from before
+    (data/grok.json, which held it) is removed, and the copy starts with Gemini until its first check-in."""
+    try:
+        GROK_PATH.unlink()
+    except OSError:
+        pass
     with grok_lock:
-        saved_grok.update(engine="grok" if grok else "gemini", api_key=key if grok else "", model=model if grok else "")
-        if plain:
-            try:
-                persist_grok_unlocked()    # a key kept in the clear before: now sealed
-            except OSError:
-                pass
+        saved_grok.update(engine="gemini", api_key="", model="")
 
 
 def apply_owner_comments(engine: str, key: str, model: str) -> None:
@@ -3190,12 +3178,7 @@ def apply_owner_comments(engine: str, key: str, model: str) -> None:
     grok = engine == "grok" and valid_grok_key(key) and valid_grok_model(model)
     wanted = {"engine": "grok" if grok else "gemini", "api_key": key if grok else "", "model": model if grok else ""}
     with grok_lock:
-        if saved_grok != wanted:
-            saved_grok.update(wanted)
-            try:
-                persist_grok_unlocked()
-            except OSError:
-                pass
+        saved_grok.update(wanted)              # (in memory only)
 
 
 def grok_comments_on() -> bool:
@@ -3297,6 +3280,8 @@ def write_comment(api_key: str, model: str, image: bytes | None, tweet_text: str
                   account: str = "", tweet_id: str = "") -> str:
     """One reply, by whoever writes this copy's comments: Grok when the owner chose it for users' copies, else
     Gemini (with the task's key and model, or this copy's saved ones)."""
+    if not is_owner_copy() and not wait_for_owner_keys():
+        raise RuntimeError(no_keys_message())
     if grok_comments_on():
         with grok_lock:
             key, grok_model = saved_grok["api_key"], saved_grok["model"]
@@ -6620,7 +6605,7 @@ def ask_update_source(path: str, timeout: float, report: dict | None = None) -> 
 # A user's copy checks in with the owner this often, and when its page opens.
 OWNER_SYNC_EVERY = 120
 owner_sync_lock = threading.Lock()
-owner_sync_state = {"at": 0.0}
+owner_sync_state = {"at": 0.0, "ok": False}
 
 
 def apply_owner_gemini(key: str, model: str = "") -> None:
@@ -6663,15 +6648,19 @@ def sync_with_owner() -> None:
                     "total_cost": round(int(gemini_usage.get("comments") or 0) * GEMINI_PRICE_PER_COMMENT, 6),
                 }
             status, body = ask_update_source("/user/sync", 15, report)
-            owner_sync_state["at"] = time.monotonic()
             try:
                 answer = json.loads(body.decode("utf-8")) if status == 200 else {}
             except (UnicodeDecodeError, json.JSONDecodeError):
                 answer = {}
-            if not isinstance(answer, dict) or not answer.get("success"):
+            ok = isinstance(answer, dict) and bool(answer.get("success"))
+            if ok:
+                # The keys, into memory only (see apply_owner_gemini, apply_owner_comments).
+                apply_owner_gemini(str(answer.get("gemini_key") or ""), str(answer.get("gemini_model") or ""))
+                apply_owner_comments(str(answer.get("comments_engine") or ""), str(answer.get("grok_key") or ""), str(answer.get("grok_model") or ""))
+            # (Set once the answer is applied: whoever waits for the keys sees them with it.)
+            owner_sync_state.update(at=time.monotonic(), ok=ok)
+            if not ok:
                 return
-            apply_owner_gemini(str(answer.get("gemini_key") or ""), str(answer.get("gemini_model") or ""))
-            apply_owner_comments(str(answer.get("comments_engine") or ""), str(answer.get("grok_key") or ""), str(answer.get("grok_model") or ""))
             if isinstance(answer.get("skip_users"), list):
                 store_skip_users(answer["skip_users"])
             wanted = str(answer.get("reset_id") or "")
@@ -6680,6 +6669,36 @@ def sync_with_owner() -> None:
             reset_gemini_cost(wanted)
     finally:
         owner_sync_lock.release()
+
+
+def owner_keys_ready(gemini_only: bool = False) -> bool:
+    """A user's copy has what writes its comments: Grok (the owner's choice) or its Gemini key; with
+    gemini_only, its Gemini key (for «إنشاء محتوى»)."""
+    with gemini_lock:
+        gemini = valid_gemini_key(str(saved_gemini.get("api_key") or ""))
+    return gemini or (not gemini_only and grok_comments_on())
+
+
+def wait_for_owner_keys(seconds: float = 10.0, gemini_only: bool = False) -> bool:
+    """A user's copy keeps its keys in memory only, from its check-ins: when it has none (it has just
+    started, or the owner could not be reached), it checks in now and waits a little for them. It stops
+    waiting as soon as the owner answers without them. True when it has them."""
+    if is_owner_copy() or owner_keys_ready(gemini_only):
+        return True
+    began = time.monotonic()
+    while True:
+        sync_with_owner()                      # (returns at once while another check-in is under way)
+        answered = owner_sync_state["ok"] and owner_sync_state["at"] >= began
+        if owner_keys_ready(gemini_only) or answered or time.monotonic() - began >= seconds:
+            return owner_keys_ready(gemini_only)
+        time.sleep(1)
+
+
+def no_keys_message() -> str:
+    """Why a user's copy has no key for its comments."""
+    if not owner_sync_state.get("ok"):
+        return "تعذّر الاتصال بصاحب البرنامج لجلب مفتاح التعليقات. حاول بعد قليل."
+    return "لا يوجد مفتاح للتعليقات في هذه النسخة. اطلبه من صاحب البرنامج."
 
 
 def owner_sync_loop() -> None:
@@ -6789,11 +6808,12 @@ def remember_gemini(api_key: str, model: str) -> None:
         persist_gemini_unlocked()
 
 
-# The API keys (Gemini's, Grok's) are kept on disk sealed, so data/gemini.json and data/grok.json show
-# nothing readable: each is encrypted with a key made from a secret in this program and this copy's own
-# update key (a stream from SHA-256 with a random nonce each time it is saved, and a tag that tells a
-# damaged file, or one from another copy). Only the running program opens them. A file from before, with
-# the key in the clear, is read once and saved sealed.
+# A user's copy never keeps an API key on its disk: the owner's Gemini and Grok keys come with each
+# check-in and stay in the running program's memory only (a copy just started asks for them at once). The
+# owner's own copy keeps the Gemini key typed in its panel in data/gemini.json, sealed, so the file shows
+# nothing readable: it is encrypted with a key made from a secret in this program and this copy's update key
+# (a stream from SHA-256 with a random nonce each time it is saved, and a tag that tells a damaged file).
+# A file from before, with a key in the clear (or a user's copy's sealed one), is rewritten without it.
 KEY_SEAL_SECRET = bytes.fromhex("d8867d215ab7fb097f3a535a380696b36506ee694e0ef27fdba0c4f8fd77b658")
 
 
@@ -6841,23 +6861,29 @@ def open_key(sealed) -> str:
 
 
 def persist_gemini_unlocked() -> None:
-    write_private_json(GEMINI_PATH, {"version": 2, "api_key_sealed": seal_key(saved_gemini["api_key"]), "model": saved_gemini["model"],
+    # The owner's copy keeps its own key, sealed; a user's copy keeps the owner's key in memory only, from its
+    # check-ins, never on its disk.
+    sealed = seal_key(saved_gemini["api_key"]) if is_owner_copy() else ""
+    write_private_json(GEMINI_PATH, {"version": 2, "api_key_sealed": sealed, "model": saved_gemini["model"],
                                      "managed": bool(saved_gemini.get("managed"))})
 
 
 def load_gemini() -> None:
     global saved_gemini
     loaded = read_private_json(GEMINI_PATH) or {}
+    owner = is_owner_copy()
     plain = str(loaded.get("api_key") or "").strip()
-    key = open_key(loaded.get("api_key_sealed")).strip() if loaded.get("api_key_sealed") else plain
+    sealed = loaded.get("api_key_sealed")
+    # A user's copy reads no key from its disk: the owner's comes with its first check-in.
+    key = ((open_key(sealed).strip() if sealed else plain) if owner else "")
     model = normalize_gemini_model(str(loaded.get("model") or "")) or "gemini-3.5-flash"
     if key and not valid_gemini_key(key):
         key = ""
     # managed: the owner set this key from «توزيع البرنامج», and may delete it from there.
     saved_gemini = {"api_key": key, "model": model, "managed": bool(key and loaded.get("managed"))}
-    if plain:
+    if plain or (sealed and not owner):
         with gemini_lock:
-            persist_gemini_unlocked()      # a key kept in the clear before: now sealed
+            persist_gemini_unlocked()      # the owner's key now sealed; a user's copy: the key taken off its disk
 
 
 def persist_sessions_unlocked() -> None:
@@ -7326,6 +7352,8 @@ def group_run_endpoint(access_path: str):
     if not is_owner_copy():
         # A user's copy uses the Gemini key and model the owner set; what the page sends is ignored.
         gemini_api_key, gemini_model = "", ""
+    if "comment" in requested_actions and not is_owner_copy():
+        wait_for_owner_keys()                  # (a copy just started gets them now)
     if "comment" in requested_actions and not grok_comments_on():
         if not gemini_api_key:
             gemini_api_key = saved_gemini.get("api_key") or ""
@@ -7333,7 +7361,7 @@ def group_run_endpoint(access_path: str):
             gemini_model = normalize_gemini_model(saved_gemini.get("model") or "")
         if not valid_gemini_key(gemini_api_key) or not gemini_model:
             if not is_owner_copy():
-                return jsonify(success=False, message="لا يوجد مفتاح للتعليقات في هذه النسخة. اطلبه من صاحب البرنامج."), 400
+                return jsonify(success=False, message=no_keys_message()), 400
             return jsonify(success=False, message="أدخل مفتاح Gemini واسم النموذج قبل التعليق."), 400
         if is_owner_copy():
             remember_gemini(gemini_api_key, gemini_model or "")
@@ -7499,6 +7527,8 @@ def list_sessions_endpoint(access_path: str):
         gemini_key = f"{gemini_key[:4]}…{gemini_key[-4:]}"
     # A user's copy: whether someone (Grok, or Gemini with its key) can write its comments.
     comments_ready = grok_comments_on() or valid_gemini_key(saved_gemini.get("api_key") or "")
+    if not comments_ready and not is_owner_copy() and not owner_sync_state["ok"] and time.monotonic() - owner_sync_state["at"] > 5:
+        threading.Thread(target=sync_with_owner, name="owner-sync", daemon=True).start()   # (no keys yet: ask now)
     return jsonify(success=True, sessions=rows, gemini_api_key=gemini_key, gemini_model=gemini_model, comments_ready=comments_ready)
 
 
@@ -8261,7 +8291,8 @@ def content_accounts() -> list[dict]:
 
 
 def content_gemini_key() -> str:
-    """The Gemini key saved on the panel (the owner's, on users' copies)."""
+    """The Gemini key saved on the panel (the owner's, on users' copies: in memory, from the check-ins)."""
+    wait_for_owner_keys(gemini_only=True)
     with gemini_lock:
         return str(saved_gemini.get("api_key") or "")
 
