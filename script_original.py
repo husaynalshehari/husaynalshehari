@@ -3087,9 +3087,9 @@ REPLY_ANGLES = (
     "one honest feeling it gives you, and why",
 )
 # How long, in words: drawn at random too, all within REPLY_MAX_CHARS.
-REPLY_LENGTHS = ((4, 6), (5, 7), (6, 8))
+REPLY_LENGTHS = ((6, 10), (8, 13), (10, 16))
 # The most a posted reply may be, in characters (spaces included).
-REPLY_MAX_CHARS = 50
+REPLY_MAX_CHARS = 100
 # How much of the tweet's text goes with the screenshot: enough for a long post to be read to its end (a story
 # cut at its start was answered wrongly).
 REPLY_TWEET_TEXT = 1200
