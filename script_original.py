@@ -3086,8 +3086,10 @@ REPLY_ANGLES = (
     "what you would do in that situation",
     "one honest feeling it gives you, and why",
 )
-# How long, in words: drawn at random too.
-REPLY_LENGTHS = ((7, 12), (10, 16), (15, 24))
+# How long, in words: drawn at random too, all within REPLY_MAX_CHARS.
+REPLY_LENGTHS = ((4, 6), (5, 7), (6, 8))
+# The most a posted reply may be, in characters (spaces included).
+REPLY_MAX_CHARS = 50
 # How much of the tweet's text goes with the screenshot: enough for a long post to be read to its end (a story
 # cut at its start was answered wrongly).
 REPLY_TWEET_TEXT = 1200
@@ -3143,11 +3145,13 @@ def reply_prompt(voice: str, account: str = "", tweet_id: str = "") -> str:
         f"This time: {random.choice(REPLY_ANGLES)}. Your manner (always the same): {reply_manner(account)}. "
         "If the tweet is a prayer (دعاء), about religion, a death, an illness or other sad news, leave the angle and "
         "the manner: reply sincerely and respectfully, with no joke and no disagreement. "
-        f"{low} to {high} words. Finish the sentence. Never stop mid-word or mid-phrase, and do not end with a comma. "
+        f"At most {REPLY_MAX_CHARS} characters, spaces included (about {low} to {high} words). Finish the sentence. "
+        "Never stop mid-word or mid-phrase. "
         "Write in the tweet's own language. An Arabic tweet gets everyday spoken Saudi Arabic (عامية سعودية بيضاء), "
         "the way people really type on X, never formal Arabic (فصحى): no words like الأولى، ينبغي، لا تثبت، ما زال، "
-        "إذ، لذا، حيث، كما أن، and no tanween (like نضجاً). A tweet in another language (English, Turkish…) gets "
-        "its reply in that language. " + REPLY_VOICES.get(voice, REPLY_VOICES[DEFAULT_REPLY_VOICE]) + " "
+        "إذ، لذا، حيث، كما أن. A tweet in another language (English, Turkish…) gets its reply in that language. "
+        "Plain letters only: no diacritics (no تشكيل: no fatha, damma, kasra, tanween, shadda or sukun), and no "
+        "commas (، or ,). " + REPLY_VOICES.get(voice, REPLY_VOICES[DEFAULT_REPLY_VOICE]) + " "
         "Sound like a real person, specific and casual, not a teacher, a preacher, a brand or an assistant: no "
         "advice or lessons to the author or to people (nothing like: الأولى أن، يجب، الأفضل أن، تذكّر، نصيحتي), no "
         "general wisdom or sayings, no neat conclusion; say what you think or feel, from your own side. "
@@ -3491,11 +3495,11 @@ def grok_comment(api_key: str, model: str, image: bytes | None, tweet_text: str,
 
 # Comments by Claude (Anthropic), when the owner chooses it in «توزيع البرنامج»: the same as Grok's (its key and
 # model come with each check-in, in memory only), asked through the Messages API with the same prompt and the
-# tweet's picture, at low effort (a short reply needs little thinking, and it costs less).
+# tweet's picture, at medium effort (it thinks a little before it writes).
 CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 CLAUDE_API_VERSION = "2026-10-21"
 CLAUDE_DEFAULT_MODEL = "claude-haiku-5-5"   # (as in g.py: the model when none is set there)
-CLAUDE_EFFORT = "low"
+CLAUDE_EFFORT = "medium"
 # Models that take no effort setting (older ones), asked again without it and not sent it again.
 claude_effort_refused: set[str] = set()
 
@@ -3518,7 +3522,7 @@ def claude_answer_text(answer: dict) -> str:
 def claude_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE,
                    account: str = "", tweet_id: str = "") -> str:
     """One reply to a tweet by Claude: the same prompt as Gemini's and Grok's, the tweet's picture with it, at
-    low effort. A model that takes no effort setting is asked again without it; a busy Claude is asked again
+    medium effort. A model that takes no effort setting is asked again without it; a busy Claude is asked again
     a few times."""
     prompt = reply_prompt(voice, account, tweet_id)
     if image:
@@ -3537,7 +3541,8 @@ def claude_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
     for _ in range(2):               # a reply that comes back cut off is asked for once more
         payload = None
         for try_index in range(len(busy_waits) + 1):
-            body: dict = {"model": model, "max_tokens": 1024, "messages": [{"role": "user", "content": content}]}
+            # (Its thinking counts toward max_tokens: room for it, and for the short reply after it.)
+            body: dict = {"model": model, "max_tokens": 2048, "messages": [{"role": "user", "content": content}]}
             if effort:
                 body["output_config"] = {"effort": CLAUDE_EFFORT}
             request = urllib.request.Request(CLAUDE_URL, data=json.dumps(body).encode("utf-8"), method="POST",
@@ -3598,23 +3603,60 @@ def claude_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
     return ""
 
 
+# Arabic diacritics (تشكيل): tanween, fatha, damma, kasra, shadda, sukun, and the other marks over or under letters.
+ARABIC_DIACRITICS = re.compile(r"[\u064B-\u0652\u0656-\u065F\u0670]")
+# Words a reply cannot end on, when one that is too long is shortened.
+HANGING_WORDS = {"و", "او", "أو", "بس", "لكن", "لان", "لأن", "عشان", "اللي", "الي", "في", "من", "على", "عن", "مع", "الى",
+                 "إلى", "يعني", "ثم", "حتى", "اذا", "إذا", "لو", "ما", "لا", "كان", "and", "or", "but", "the", "to", "of",
+                 "in", "a", "an", "with", "for", "that", "ve", "ama", "ile", "için", "bir", "de", "da"}
+
+
+def polish_comment(text: str) -> str:
+    """The reply as it is posted: no Arabic diacritics and no commas (a number's thousands keep their digits)."""
+    text = ARABIC_DIACRITICS.sub("", text or "")
+    text = re.sub(r"(?<=\d),(?=\d{3})", "", text)
+    text = re.sub(r"\s*[،,؛;]\s*", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def fit_comment(text: str, limit: int = REPLY_MAX_CHARS) -> str:
+    """A reply cut to at most limit characters, at a word, and not on a word that leaves it hanging."""
+    words = text.split()
+    while words and len(" ".join(words)) > limit:
+        words.pop()
+    while words and words[-1].lower() in HANGING_WORDS:
+        words.pop()
+    return " ".join(words)
+
+
 def write_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE,
                   account: str = "", tweet_id: str = "") -> str:
     """One reply, by whoever writes this copy's comments: Grok or Claude when the owner chose one of them in
     «توزيع البرنامج» (for users' copies and the owner's alike), else Gemini (with the task's key and model, or
-    this copy's saved ones)."""
+    this copy's saved ones). It is posted with no diacritics and no commas, in at most REPLY_MAX_CHARS
+    characters: one that comes back longer is asked for once more, then shortened at a word."""
     if not is_owner_copy() and not wait_for_owner_keys():
         raise RuntimeError(no_keys_message())
     engine, key, engine_model = comments_writer()
-    if engine == "grok":
-        return grok_comment(key, engine_model, image, tweet_text, voice, account, tweet_id)
-    if engine == "claude":
-        return claude_comment(key, engine_model, image, tweet_text, voice, account, tweet_id)
-    if not api_key:
+    if engine == "gemini" and not api_key:
         with gemini_lock:
             api_key = str(saved_gemini.get("api_key") or "")
             model = model or normalize_gemini_model(str(saved_gemini.get("model") or ""))
-    return gemini_comment(api_key, model, image, tweet_text, voice, account, tweet_id)
+
+    def ask() -> str:
+        if engine == "grok":
+            return grok_comment(key, engine_model, image, tweet_text, voice, account, tweet_id)
+        if engine == "claude":
+            return claude_comment(key, engine_model, image, tweet_text, voice, account, tweet_id)
+        return gemini_comment(api_key, model, image, tweet_text, voice, account, tweet_id)
+
+    first = polish_comment(ask())
+    if len(first) <= REPLY_MAX_CHARS:
+        return first
+    second = polish_comment(ask())               # too long: asked for once more
+    if second and len(second) <= REPLY_MAX_CHARS:
+        return second
+    return fit_comment(min((text for text in (first, second) if text), key=len))
 
 
 def screenshot_article(card) -> bytes | None:
