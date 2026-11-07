@@ -6007,6 +6007,68 @@ def refine_collected_links(results: list[dict]) -> None:
             persist_collected_unlocked()
 
 
+# Once per copy, when it starts: the tweets it worked on lately put in «التغريدات المجموعة» as if they had
+# been collected then, so a copy that has not collected any yet (it was updated since) has them on its page.
+# From its tasks of the last day: each tweet a group task collected, with its text and group, at the
+# task's time; then from the tweets its accounts acted on in the last 8 hours (kept to skip them), the
+# ones not found there, at their first action. Their views and content are then asked for.
+COLLECTED_FILLED_PATH = DATA_DIR / "collected_filled.json"
+
+
+def fill_collected_from_history() -> int:
+    """Add those tweets (the ones not saved yet) and ask for their views; how many were added."""
+    if COLLECTED_FILLED_PATH.exists():
+        return 0
+    found: dict[str, dict] = {}
+    with jobs_lock:
+        tasks = [dict(job) for job in jobs.values()]
+    for job in tasks:
+        group = re.sub(r"\s+", " ", str(job.get("username") or "")).strip()[:80]
+        if job.get("kind") != "execute" or group == LINKS_TASK_NAME or not isinstance(job.get("items"), list):
+            continue
+        try:
+            at = int(float(job.get("created_at") or 0))
+        except (TypeError, ValueError):
+            continue
+        for item in job["items"]:
+            url = str(item.get("url") or "") if isinstance(item, dict) else ""
+            status_id = tweet_status_id(url)
+            if not status_id or not at:
+                continue
+            text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+            text = "" if text == "تغريدة" else text[:300]
+            row = found.get(status_id)
+            if row is None or at < row["at"]:
+                found[status_id] = {"url": url[:300], "text": text or (row or {}).get("text", ""), "group": group, "at": at}
+            elif text and not row["text"]:
+                row["text"] = text
+    with done_history_lock:
+        acted: dict[str, float] = {}
+        for tweets in done_history.values():
+            for status_id, done in tweets.items():
+                if done and re.fullmatch(r"\d{6,25}", status_id):
+                    acted[status_id] = min(min(done.values()), acted.get(status_id, float("inf")))
+    for status_id, at in acted.items():
+        if status_id not in found:
+            found[status_id] = {"url": f"https://x.com/i/web/status/{status_id}", "text": "", "group": "", "at": int(at)}
+    now = time.time()
+    added = []
+    with collected_lock:
+        for status_id, row in found.items():
+            if status_id not in collected_tweets and now - row["at"] < COLLECTED_KEEP_SECONDS and not tweet_is_ignored(row["url"]):
+                collected_tweets[status_id] = row
+                added.append(status_id)
+        if added:
+            persist_collected_unlocked()
+    try:
+        write_private_json(COLLECTED_FILLED_PATH, {"at": now, "added": len(added)})
+    except OSError:
+        pass
+    if added:
+        queue_views(sorted(added, key=lambda status_id: -found[status_id]["at"]))
+    return len(added)
+
+
 def collected_payload() -> list[dict]:
     """The saved tweets for the page, newest first; ignored accounts left out."""
     with collected_lock:
@@ -8101,6 +8163,10 @@ if __name__ == "__main__":
             pass
         print("For public use, configure HTTPS and set PUBLIC_BASE_URL.", flush=True)
     start_distribution(bind_host)
+    try:
+        fill_collected_from_history()
+    except Exception as exc:          # (never in the way of starting)
+        print(f"لم تُضف التغريدات الأخيرة إلى التغريدات المجموعة: {type(exc).__name__}: {exc}", flush=True)
     if not is_owner_copy():
         threading.Thread(target=owner_sync_loop, name="owner-sync", daemon=True).start()
     app.run(host=bind_host, port=port, debug=False, threaded=True)
