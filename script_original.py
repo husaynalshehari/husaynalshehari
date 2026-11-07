@@ -849,7 +849,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             {% if owner_copy %}<button id="show-gemini" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Gemini</button>
             {% if grok_here %}<button id="show-grok" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Grok</button>
             <span id="comments-by-grok" class="engine-note" hidden>التعليقات بواسطة Grok، بالمفتاح المحفوظ في «مفتاح Grok».</span>
-            {% else %}<span id="comments-by-grok" class="engine-note" hidden>التعليقات بواسطة Grok، كما اخترت للمستخدمين في «توزيع البرنامج».</span>{% endif %}{% endif %}
+            {% else %}<span id="comments-by-grok" class="engine-note" data-text="التعليقات بواسطة {engine}، كما اخترت للمستخدمين في «توزيع البرنامج»." hidden>التعليقات بواسطة Grok، كما اخترت للمستخدمين في «توزيع البرنامج».</span>{% endif %}{% endif %}
           </div>
           <div id="gemini-fields" class="gemini-fields" hidden>
             {% if not owner_copy %}<p class="gemini-owner">يضبط صاحب البرنامج مفتاح التعليقات ونموذجها.</p>{% endif %}
@@ -1080,11 +1080,16 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const geminiByOwner = {{ (not owner_copy)|tojson }};
   editGemini.hidden = geminiByOwner;
   // The owner's copy: Grok writes its comments when it is the one chosen in «توزيع البرنامج» (as the script says).
-  let commentsByGrok = false;
+  // (Grok or Claude, chosen in «توزيع البرنامج»: no Gemini key is asked for then.)
+  let commentsByOther = false;
   const engineNote = document.getElementById("comments-by-grok");
   function showCommentsEngine(engine) {
-    commentsByGrok = engine === "grok";
-    if (engineNote) engineNote.hidden = !commentsByGrok;
+    commentsByOther = engine === "grok" || engine === "claude";
+    if (!engineNote) return;
+    engineNote.hidden = !commentsByOther;
+    if (commentsByOther && engineNote.dataset.text) {
+      engineNote.textContent = engineNote.dataset.text.replace("{engine}", engine === "claude" ? "Claude" : "Grok");
+    }
   }
   // A copy with no «توزيع البرنامج»: its own «مفتاح Grok», typed here, writes its comments when saved.
   const grokFields = document.getElementById("grok-fields");
@@ -1931,7 +1936,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       repostButton.disabled = true;          // (not sent twice while it asks)
       await loadCommentsEngine();
       repostButton.disabled = false;
-      if (!commentsByGrok) {
+      if (!commentsByOther) {
         if (!geminiKey.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل مفتاح Gemini.", false); geminiKey.focus(); return; }
         if (!geminiModel.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل اسم النموذج.", false); geminiModel.focus(); return; }
       }
@@ -3313,10 +3318,11 @@ def own_grok_shown() -> dict:
 
 
 def apply_owner_comments(engine: str, key: str, model: str) -> None:
-    """Who the owner chose to write this copy's comments (from its check-in): Grok, with its key and model,
-    or Gemini (Grok's key is then dropped here)."""
-    grok = engine == "grok" and valid_grok_key(key) and valid_grok_model(model)
-    wanted = {"engine": "grok" if grok else "gemini", "api_key": key if grok else "", "model": model if grok else ""}
+    """Who the owner chose to write this copy's comments (from its check-in): Grok or Claude, with its key and
+    model, or Gemini (the other key is then dropped here)."""
+    valid = (engine == "grok" and valid_grok_key(key) and valid_grok_model(model)) or \
+        (engine == "claude" and valid_claude_key(key) and valid_claude_model(model))
+    wanted = {"engine": engine if valid else "gemini", "api_key": key if valid else "", "model": model if valid else ""}
     with grok_lock:
         saved_grok.update(wanted)              # (in memory only)
 
@@ -3335,34 +3341,53 @@ def owner_comments_choice() -> dict:
     this one) {"engine", "api_key", "model"}: from g.py's page when this program serves it, else from what
     that page saved beside this script."""
     page = distribution_page
+    names = ("comments_engine", "grok_key", "grok_model", "claude_key", "claude_model")
     if page is not None:
         with page.store_lock:
-            saved = {name: page.store.get(name) for name in ("comments_engine", "grok_key", "grok_model")}
-        default = str(getattr(page, "GROK_DEFAULT_MODEL", "") or GROK_DEFAULT_MODEL)
+            saved = {name: page.store.get(name) for name in names}
+        grok_default = str(getattr(page, "GROK_DEFAULT_MODEL", "") or GROK_DEFAULT_MODEL)
+        claude_default = str(getattr(page, "CLAUDE_DEFAULT_MODEL", "") or CLAUDE_DEFAULT_MODEL)
     else:
-        saved, default = distribution_saved(), GROK_DEFAULT_MODEL
-    return {"engine": str(saved.get("comments_engine") or ""), "api_key": str(saved.get("grok_key") or "").strip(),
-            "model": str(saved.get("grok_model") or "").strip().lower() or default}
+        saved, grok_default, claude_default = distribution_saved(), GROK_DEFAULT_MODEL, CLAUDE_DEFAULT_MODEL
+    engine = str(saved.get("comments_engine") or "")
+    if engine == "claude":
+        return {"engine": engine, "api_key": str(saved.get("claude_key") or "").strip(),
+                "model": str(saved.get("claude_model") or "").strip().lower() or claude_default}
+    return {"engine": engine, "api_key": str(saved.get("grok_key") or "").strip(),
+            "model": str(saved.get("grok_model") or "").strip().lower() or grok_default}
 
 
-def grok_settings() -> tuple[str, str]:
-    """(key, model) when Grok writes this copy's comments, else ("", ""): the owner's choice in «توزيع البرنامج»,
-    for users' copies (from their check-ins) and for the owner's own copy alike."""
+def comments_writer() -> tuple[str, str, str]:
+    """Who writes this copy's comments: ("grok" | "claude", key, model), or ("gemini", "", "") — the owner's
+    choice in «توزيع البرنامج», for users' copies (from their check-ins) and for the owner's own copy alike."""
     if is_owner_copy() and not grok_typed_here():
         choice = owner_comments_choice()
     else:
         # A user's copy (from its check-ins), or a copy with no «توزيع البرنامج» (the key typed in its panel).
         with grok_lock:
             choice = dict(saved_grok)
-    key, model = str(choice.get("api_key") or ""), str(choice.get("model") or "")
-    if choice.get("engine") == "grok" and valid_grok_key(key) and valid_grok_model(model):
-        return key, model
-    return "", ""
+    engine, key, model = choice.get("engine"), str(choice.get("api_key") or ""), str(choice.get("model") or "")
+    if engine == "grok" and valid_grok_key(key) and valid_grok_model(model):
+        return "grok", key, model
+    if engine == "claude" and valid_claude_key(key) and valid_claude_model(model):
+        return "claude", key, model
+    return "gemini", "", ""
+
+
+def grok_settings() -> tuple[str, str]:
+    """(key, model) when Grok writes this copy's comments, else ("", "")."""
+    engine, key, model = comments_writer()
+    return (key, model) if engine == "grok" else ("", "")
 
 
 def grok_comments_on() -> bool:
-    """Whether Grok writes this copy's comments (see grok_settings)."""
+    """Whether Grok writes this copy's comments (see comments_writer)."""
     return bool(grok_settings()[0])
+
+
+def gemini_writes_comments() -> bool:
+    """Whether Gemini writes this copy's comments (no Grok or Claude chosen)."""
+    return comments_writer()[0] == "gemini"
 
 
 def grok_answer_text(answer: dict) -> str:
@@ -3452,15 +3477,127 @@ def grok_comment(api_key: str, model: str, image: bytes | None, tweet_text: str,
     return ""
 
 
+# Comments by Claude (Anthropic), when the owner chooses it in «توزيع البرنامج»: the same as Grok's (its key and
+# model come with each check-in, in memory only), asked through the Messages API with the same prompt and the
+# tweet's picture, at low effort (a short reply needs little thinking, and it costs less).
+CLAUDE_URL = "https://api.anthropic.com/v1/messages"
+CLAUDE_API_VERSION = "2026-10-21"
+CLAUDE_DEFAULT_MODEL = "claude-haiku-5-5"   # (as in g.py: the model when none is set there)
+CLAUDE_EFFORT = "low"
+# Models that take no effort setting (older ones), asked again without it and not sent it again.
+claude_effort_refused: set[str] = set()
+
+
+def valid_claude_key(value: str) -> bool:
+    return bool(re.fullmatch(r"sk-ant-[A-Za-z0-9_\-]{20,250}", value or ""))
+
+
+def valid_claude_model(value: str) -> bool:
+    return bool(re.fullmatch(r"[a-z0-9][a-z0-9.\-]{1,60}", value or ""))
+
+
+def claude_answer_text(answer: dict) -> str:
+    """The text of a Messages API answer: its text blocks (it may begin with thinking blocks)."""
+    parts = [str(block.get("text") or "") for block in answer.get("content") or []
+             if isinstance(block, dict) and block.get("type") == "text"]
+    return "\n".join(parts)
+
+
+def claude_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE,
+                   account: str = "", tweet_id: str = "") -> str:
+    """One reply to a tweet by Claude: the same prompt as Gemini's and Grok's, the tweet's picture with it, at
+    low effort. A model that takes no effort setting is asked again without it; a busy Claude is asked again
+    a few times."""
+    prompt = reply_prompt(voice, account, tweet_id)
+    if image:
+        prompt = "Look at the tweet in the image. " + prompt
+    if tweet_text:
+        prompt += "\n\nTweet text:\n" + tweet_text[:280]
+    content: list[dict] = []
+    if image:
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                    "data": base64.b64encode(image).decode("ascii")}})
+    content.append({"type": "text", "text": prompt})
+    effort = model not in claude_effort_refused
+    busy_waits = (5, 12, 20, 30)
+    best = ""
+    saw_busy = False
+    for _ in range(2):               # a reply that comes back cut off is asked for once more
+        payload = None
+        for try_index in range(len(busy_waits) + 1):
+            body: dict = {"model": model, "max_tokens": 1024, "messages": [{"role": "user", "content": content}]}
+            if effort:
+                body["output_config"] = {"effort": CLAUDE_EFFORT}
+            request = urllib.request.Request(CLAUDE_URL, data=json.dumps(body).encode("utf-8"), method="POST",
+                                             headers={"Content-Type": "application/json", "x-api-key": api_key,
+                                                      "anthropic-version": CLAUDE_API_VERSION})
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                detail, code = "", ""
+                try:
+                    data = json.loads(exc.read(4096).decode("utf-8", "replace"))
+                    error = data.get("error") if isinstance(data, dict) else None
+                    if isinstance(error, dict):
+                        detail = str(error.get("message") or "")
+                        code = str((error.get("details") or {}).get("error_code") or "") if isinstance(error.get("details"), dict) else ""
+                except Exception:
+                    detail = ""
+                detail = re.sub(r"\s+", " ", detail.replace(api_key, "…") if api_key else detail).strip()[:160]
+                if effort and exc.code == 400 and re.search(r"effort|output_config", detail, re.I):
+                    effort = False       # this model takes no effort setting: asked again without it,
+                    claude_effort_refused.add(model)    # and not sent it again
+                    continue
+                if exc.code in (401, 403):
+                    raise RuntimeError("مفتاح Claude غير صالح أو بلا صلاحية. أخبر صاحب البرنامج.") from None
+                if code == "enforced_spend_limit_reached" or re.search(r"usage limits|credit balance|billing", detail, re.I):
+                    raise RuntimeError("بلغ حساب Claude حد الصرف أو نفد رصيده. أخبر صاحب البرنامج.") from None
+                if exc.code in (429, 500, 502, 503, 504, 529):
+                    saw_busy = True
+                    if try_index < len(busy_waits):
+                        time.sleep(busy_waits[try_index])
+                        continue
+                    break
+                raise RuntimeError(("رفض Claude الطلب: " + detail) if detail else f"تعذر الاتصال بـ Claude (رمز {exc.code}).") from None
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                if try_index < 2:
+                    time.sleep(busy_waits[try_index])
+                    continue
+                raise RuntimeError("تعذر الاتصال بـ Claude") from exc
+        if not isinstance(payload, dict):
+            break
+        if payload.get("stop_reason") == "refusal":
+            raise RuntimeError("امتنع Claude عن التعليق على هذه التغريدة.")
+        text = clean_comment(claude_answer_text(payload))
+        if comment_is_complete(text):
+            record_comment_generated()
+            remember_reply(account, tweet_id, text)
+            return text
+        if len(text) > len(best):
+            best = text
+    if comment_is_complete(best):
+        record_comment_generated()
+        remember_reply(account, tweet_id, best)
+        return best
+    if saw_busy:
+        raise RuntimeError("Claude مشغول مؤقتًا بعد عدة محاولات. أعد التنفيذ بعد قليل.")
+    return ""
+
+
 def write_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE,
                   account: str = "", tweet_id: str = "") -> str:
-    """One reply, by whoever writes this copy's comments: Grok when the owner chose it in «توزيع البرنامج» (for
-    users' copies and the owner's alike), else Gemini (with the task's key and model, or this copy's saved ones)."""
+    """One reply, by whoever writes this copy's comments: Grok or Claude when the owner chose one of them in
+    «توزيع البرنامج» (for users' copies and the owner's alike), else Gemini (with the task's key and model, or
+    this copy's saved ones)."""
     if not is_owner_copy() and not wait_for_owner_keys():
         raise RuntimeError(no_keys_message())
-    key, grok_model = grok_settings()
-    if key:
-        return grok_comment(key, grok_model, image, tweet_text, voice, account, tweet_id)
+    engine, key, engine_model = comments_writer()
+    if engine == "grok":
+        return grok_comment(key, engine_model, image, tweet_text, voice, account, tweet_id)
+    if engine == "claude":
+        return claude_comment(key, engine_model, image, tweet_text, voice, account, tweet_id)
     if not api_key:
         with gemini_lock:
             api_key = str(saved_gemini.get("api_key") or "")
@@ -6836,7 +6973,9 @@ def sync_with_owner() -> None:
             if ok:
                 # The keys, into memory only (see apply_owner_gemini, apply_owner_comments).
                 apply_owner_gemini(str(answer.get("gemini_key") or ""), str(answer.get("gemini_model") or ""))
-                apply_owner_comments(str(answer.get("comments_engine") or ""), str(answer.get("grok_key") or ""), str(answer.get("grok_model") or ""))
+                engine = str(answer.get("comments_engine") or "")
+                kind = "claude" if engine == "claude" else "grok"
+                apply_owner_comments(engine, str(answer.get(kind + "_key") or ""), str(answer.get(kind + "_model") or ""))
             # (Set once the answer is applied: whoever waits for the keys sees them with it.)
             owner_sync_state.update(at=time.monotonic(), ok=ok)
             if not ok:
@@ -6856,7 +6995,7 @@ def owner_keys_ready(gemini_only: bool = False) -> bool:
     gemini_only, its Gemini key (for «إنشاء محتوى»)."""
     with gemini_lock:
         gemini = valid_gemini_key(str(saved_gemini.get("api_key") or ""))
-    return gemini or (not gemini_only and grok_comments_on())
+    return gemini or (not gemini_only and not gemini_writes_comments())
 
 
 def wait_for_owner_keys(seconds: float = 10.0, gemini_only: bool = False) -> bool:
@@ -7534,7 +7673,7 @@ def group_run_endpoint(access_path: str):
         gemini_api_key, gemini_model = "", ""
     if "comment" in requested_actions and not is_owner_copy():
         wait_for_owner_keys()                  # (a copy just started gets them now)
-    if "comment" in requested_actions and not grok_comments_on():
+    if "comment" in requested_actions and gemini_writes_comments():
         if not gemini_api_key:
             gemini_api_key = saved_gemini.get("api_key") or ""
         if not gemini_model:
@@ -7709,9 +7848,9 @@ def list_sessions_endpoint(access_path: str):
         gemini_key = f"{gemini_key[:4]}…{gemini_key[-4:]}"
     # Whether someone (Grok, or Gemini with its key) can write this copy's comments; the owner's page is also
     # told when Grok writes them (chosen in «توزيع البرنامج»), and then asks for no Gemini key.
-    grok = grok_comments_on()
-    comments_ready = grok or valid_gemini_key(saved_gemini.get("api_key") or "")
-    engine = ("grok" if grok else "gemini") if is_owner_copy() else ""
+    writer = comments_writer()[0]
+    comments_ready = writer != "gemini" or valid_gemini_key(saved_gemini.get("api_key") or "")
+    engine = writer if is_owner_copy() else ""
     if not comments_ready and not is_owner_copy() and not owner_sync_state["ok"] and time.monotonic() - owner_sync_state["at"] > 5:
         threading.Thread(target=sync_with_owner, name="owner-sync", daemon=True).start()   # (no keys yet: ask now)
     own = own_grok_shown() if grok_typed_here() else {"grok_key": "", "grok_model": ""}

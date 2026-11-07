@@ -44,11 +44,13 @@ store_lock = threading.Lock()
 store: dict = {"password_hash": "", "password_salt": "", "address": "", "users": [], "published_version": "",
                # The totals since the beginning of users that were deleted, so the overall total stays whole.
                "removed": {"comments": 0, "cost": 0.0},
-               # Who writes users' comments: "gemini" (each user's Gemini key, set in «إدارة») or "grok" (the
-               # owner's Grok key and model below, sent to users' copies while Grok is the one).
-               "comments_engine": "gemini", "grok_key": "", "grok_model": ""}
+               # Who writes users' comments: "gemini" (each user's Gemini key, set in «إدارة»), "grok" or
+               # "claude" (the owner's key and model below, sent to users' copies while that one is chosen).
+               "comments_engine": "gemini", "grok_key": "", "grok_model": "", "claude_key": "", "claude_model": ""}
 # The Grok model used when none is set.
 GROK_DEFAULT_MODEL = "grok-4.3"
+# The Claude model used when none is set: the fastest and cheapest, and it reads the tweet's picture.
+CLAUDE_DEFAULT_MODEL = "claude-haiku-5-5"
 attempts: dict[str, deque[float]] = defaultdict(deque)
 attempts_lock = threading.Lock()
 
@@ -128,9 +130,12 @@ def load_store() -> None:
                 "comments": count_or_none(removed.get("comments"), int) or 0,
                 "cost": count_or_none(removed.get("cost"), float) or 0.0,
             },
-            "comments_engine": "grok" if loaded.get("comments_engine") == "grok" and loaded.get("grok_key") else "gemini",
+            "comments_engine": ("grok" if loaded.get("comments_engine") == "grok" and loaded.get("grok_key")
+                                else "claude" if loaded.get("comments_engine") == "claude" and loaded.get("claude_key") else "gemini"),
             "grok_key": str(loaded.get("grok_key") or ""),
             "grok_model": str(loaded.get("grok_model") or ""),
+            "claude_key": str(loaded.get("claude_key") or ""),
+            "claude_model": str(loaded.get("claude_model") or ""),
         })
 
 
@@ -273,6 +278,8 @@ def state_payload() -> dict:
             "comments_engine": store["comments_engine"],
             "grok_key": f"{store['grok_key'][:4]}…{store['grok_key'][-4:]}" if store["grok_key"] else "",
             "grok_model": store["grok_model"] or GROK_DEFAULT_MODEL,
+            "claude_key": f"{store['claude_key'][:7]}…{store['claude_key'][-4:]}" if store["claude_key"] else "",
+            "claude_model": store["claude_model"] or CLAUDE_DEFAULT_MODEL,
         }
 
 
@@ -381,14 +388,37 @@ def control_change():
             store["grok_model"] = "" if model == GROK_DEFAULT_MODEL else model
             save_store_unlocked()
         elif action == "grok_key_delete":
-            store.update(grok_key="", grok_model="", comments_engine="gemini")
+            store.update(grok_key="", grok_model="")
+            if store["comments_engine"] == "grok":
+                store["comments_engine"] = "gemini"
+            save_store_unlocked()
+        elif action == "claude_key":
+            # The key (when typed) and the model (when typed; empty: the default).
+            api_key = str(data.get("api_key") or "").strip()
+            model = str(data.get("model") or "").strip().lower()
+            if api_key and not re.fullmatch(r"sk-ant-[A-Za-z0-9_\-]{20,250}", api_key):
+                return jsonify(success=False, message="صيغة مفتاح Claude غير صالحة (يبدأ بـ sk-ant-)."), 400
+            if model and not re.fullmatch(r"[a-z0-9][a-z0-9.\-]{1,60}", model):
+                return jsonify(success=False, message="اسم نموذج Claude غير صالح."), 400
+            if not api_key and not store["claude_key"]:
+                return jsonify(success=False, message="الصق مفتاح Claude."), 400
+            if api_key:
+                store["claude_key"] = api_key
+            store["claude_model"] = "" if model == CLAUDE_DEFAULT_MODEL else model
+            save_store_unlocked()
+        elif action == "claude_key_delete":
+            store.update(claude_key="", claude_model="")
+            if store["comments_engine"] == "claude":
+                store["comments_engine"] = "gemini"
             save_store_unlocked()
         elif action == "comments_engine":
             engine = str(data.get("engine") or "")
-            if engine not in ("gemini", "grok"):
-                return jsonify(success=False, message="اختر Gemini أو Grok."), 400
+            if engine not in ("gemini", "grok", "claude"):
+                return jsonify(success=False, message="اختر Gemini أو Grok أو Claude."), 400
             if engine == "grok" and not store["grok_key"]:
                 return jsonify(success=False, message="احفظ مفتاح Grok أولًا."), 400
+            if engine == "claude" and not store["claude_key"]:
+                return jsonify(success=False, message="احفظ مفتاح Claude أولًا."), 400
             store["comments_engine"] = engine
             save_store_unlocked()
         elif action == "add":
@@ -544,10 +574,14 @@ def user_sync():
             }
             save_store_unlocked()
             grok = store["comments_engine"] == "grok" and bool(store["grok_key"])
+            claude = store["comments_engine"] == "claude" and bool(store["claude_key"])
             answer = {"success": True, "gemini_key": user["gemini_key"], "gemini_model": user["gemini_model"], "reset_id": user["reset_id"], "skip_users": read_skip_users(),
-                      # Who writes this copy's comments; Grok's key only while Grok is the one.
-                      "comments_engine": "grok" if grok else "gemini", "grok_key": store["grok_key"] if grok else "",
-                      "grok_model": (store["grok_model"] or GROK_DEFAULT_MODEL) if grok else ""}
+                      # Who writes this copy's comments; Grok's or Claude's key only while that one is chosen.
+                      "comments_engine": "grok" if grok else "claude" if claude else "gemini",
+                      "grok_key": store["grok_key"] if grok else "",
+                      "grok_model": (store["grok_model"] or GROK_DEFAULT_MODEL) if grok else "",
+                      "claude_key": store["claude_key"] if claude else "",
+                      "claude_model": (store["claude_model"] or CLAUDE_DEFAULT_MODEL) if claude else ""}
     if not ready:
         return jsonify(success=False, message="غير متاح الآن."), 404
     if not user:
@@ -688,7 +722,8 @@ PAGE = r'''<!doctype html>
     .tile small { display: block; color: var(--muted); font-size: 11px; }
     .manage .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .manage .close { width: 100%; margin-top: 14px; }
-    #manage-key, #manage-model, #grok-key, #grok-model { direction: ltr; text-align: start; }
+    #manage-key, #manage-model, #grok-key, #grok-model, #claude-key, #claude-model { direction: ltr; text-align: start; }
+    .engine-key { margin-top: 12px; }
     .engine { display: flex; gap: 6px; }
     .engine button { flex: 1; }
     .engine button[aria-checked="true"] { background: var(--pine); color: #fff; box-shadow: none; }
@@ -762,6 +797,7 @@ PAGE = r'''<!doctype html>
       <div class="engine" role="radiogroup" aria-label="من يكتب التعليقات">
         <button id="engine-gemini" type="button" role="radio" data-engine="gemini">Gemini</button>
         <button id="engine-grok" type="button" role="radio" data-engine="grok">Grok</button>
+        <button id="engine-claude" type="button" role="radio" data-engine="claude">Claude</button>
       </div>
       <p id="engine-now" class="hint"></p>
       <label for="grok-key">مفتاح Grok</label>
@@ -776,7 +812,19 @@ PAGE = r'''<!doctype html>
       <div class="row" id="grok-drop-row" hidden>
         <button id="grok-delete" type="button" class="drop">حذف مفتاح Grok</button>
       </div>
-      <p class="hint">المفعّل منهما يكتب تعليقات كل المستخدمين، ويصلهم خلال دقيقتين. Gemini: بمفتاح كل مستخدم في «إدارة». Grok: بهذا المفتاح لكل المستخدمين، ويُرسل لنسخهم ما دام مفعّلًا. نسختك أنت تبقى على مفتاحها.</p>
+      <label for="claude-key" class="engine-key">مفتاح Claude</label>
+      <div class="row">
+        <input id="claude-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
+        <button id="claude-save" type="button">حفظ</button>
+      </div>
+      <div class="row grok-model-row">
+        <input id="claude-model" type="text" autocomplete="off" spellcheck="false" maxlength="62" aria-label="نموذج Claude" placeholder="claude-haiku-5-5">
+      </div>
+      <p id="claude-now" class="hint"></p>
+      <div class="row" id="claude-drop-row" hidden>
+        <button id="claude-delete" type="button" class="drop">حذف مفتاح Claude</button>
+      </div>
+      <p class="hint">المفعّل منها يكتب تعليقات كل المستخدمين، ويصلهم خلال دقيقتين. Gemini: بمفتاح كل مستخدم في «إدارة». Grok وClaude: بالمفتاح المحفوظ هنا لكل المستخدمين، ويُرسل لنسخهم ما دام مفعّلًا. نسختك أنت تتبع الاختيار نفسه.</p>
     </section>
     <section id="totals-part" class="sheet" hidden>
       <label>تكلفة التعليقات لكل المستخدمين</label>
@@ -861,11 +909,17 @@ PAGE = r'''<!doctype html>
       }
       document.getElementById("engine-now").textContent = data.comments_engine === "grok"
         ? "مفعّل: Grok (" + data.grok_model + ") لتعليقات كل المستخدمين."
-        : "مفعّل: Gemini لتعليقات كل المستخدمين.";
+        : data.comments_engine === "claude"
+          ? "مفعّل: Claude (" + data.claude_model + ") لتعليقات كل المستخدمين."
+          : "مفعّل: Gemini لتعليقات كل المستخدمين.";
       document.getElementById("grok-now").textContent = data.grok_key ? "المفتاح المحفوظ: " + data.grok_key + " · " + data.grok_model : "لا يوجد مفتاح Grok.";
       document.getElementById("grok-drop-row").hidden = !data.grok_key;
       const grokModel = document.getElementById("grok-model");
       if (document.activeElement !== grokModel) grokModel.value = data.grok_key ? data.grok_model : "";
+      document.getElementById("claude-now").textContent = data.claude_key ? "المفتاح المحفوظ: " + data.claude_key + " · " + data.claude_model : "لا يوجد مفتاح Claude.";
+      document.getElementById("claude-drop-row").hidden = !data.claude_key;
+      const claudeModel = document.getElementById("claude-model");
+      if (document.activeElement !== claudeModel) claudeModel.value = data.claude_key ? data.claude_model : "";
       const totals = data.totals || {};
       document.getElementById("totals-part").hidden = !data.password_set;
       document.getElementById("sum-cost").textContent = "$" + Number(totals.cost || 0).toFixed(3);
@@ -1042,7 +1096,8 @@ PAGE = r'''<!doctype html>
       button.addEventListener("click", () => {
         if (button.getAttribute("aria-checked") === "true") return;
         const engine = button.dataset.engine;
-        change({action: "comments_engine", engine}, "فُعّل " + (engine === "grok" ? "Grok" : "Gemini") + " لتعليقات المستخدمين. يصلهم خلال دقيقتين.");
+        const names = {gemini: "Gemini", grok: "Grok", claude: "Claude"};
+        change({action: "comments_engine", engine}, "فُعّل " + names[engine] + " لتعليقات المستخدمين. يصلهم خلال دقيقتين.");
       });
     }
     document.getElementById("grok-save").addEventListener("click", async () => {
@@ -1051,8 +1106,17 @@ PAGE = r'''<!doctype html>
       if (await change({action: "grok_key", api_key: field.value.trim(), model: model.value.trim()}, "حُفظ مفتاح Grok.")) field.value = "";
     });
     document.getElementById("grok-delete").addEventListener("click", async () => {
-      if (!window.confirm("حذف مفتاح Grok؟ تعود تعليقات المستخدمين إلى Gemini.")) return;
-      await change({action: "grok_key_delete"}, "حُذف مفتاح Grok، وعادت التعليقات إلى Gemini.");
+      if (!window.confirm("حذف مفتاح Grok؟ إن كان Grok المفعّل تعود تعليقات المستخدمين إلى Gemini.")) return;
+      await change({action: "grok_key_delete"}, "حُذف مفتاح Grok.");
+    });
+    document.getElementById("claude-save").addEventListener("click", async () => {
+      const field = document.getElementById("claude-key");
+      const model = document.getElementById("claude-model");
+      if (await change({action: "claude_key", api_key: field.value.trim(), model: model.value.trim()}, "حُفظ مفتاح Claude.")) field.value = "";
+    });
+    document.getElementById("claude-delete").addEventListener("click", async () => {
+      if (!window.confirm("حذف مفتاح Claude؟ إن كان Claude المفعّل تعود تعليقات المستخدمين إلى Gemini.")) return;
+      await change({action: "claude_key_delete"}, "حُذف مفتاح Claude.");
     });
     document.getElementById("skip-save").addEventListener("click", () => {
       change({action: "skip_users", users: document.getElementById("skip-users").value}, "حُفظت الحسابات المتجاهَلة.");
