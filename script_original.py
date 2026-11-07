@@ -3076,7 +3076,7 @@ DEFAULT_REPLY_VOICE = "male"
 # How a reply takes the tweet: one is drawn at random for each reply, so the group's accounts do not all answer
 # one tweet the same way (and one account does not answer every tweet the same way).
 REPLY_ANGLES = (
-    "your own opinion on its topic, with your own reason",
+    "your own take on it, the way you would say it to a friend",
     "you disagree with one point in it, and say why",
     "a short experience of yours that it reminds you of",
     "a detail in it that most people will miss",
@@ -3088,11 +3088,14 @@ REPLY_ANGLES = (
 )
 # How long, in words: drawn at random too.
 REPLY_LENGTHS = ((7, 12), (10, 16), (15, 24))
+# How much of the tweet's text goes with the screenshot: enough for a long post to be read to its end (a story
+# cut at its start was answered wrongly).
+REPLY_TWEET_TEXT = 1200
 # How an account writes: one manner for each account (drawn from it, so it stays the same), as a real person
 # keeps their own.
 REPLY_MANNERS = (
     "short and direct, no emojis",
-    "calm and thoughtful",
+    "calm and down-to-earth",
     "sarcastic and witty",
     "blunt and critical, but not rude",
     "easygoing; now and then one emoji at the end",
@@ -3131,7 +3134,9 @@ def reply_prompt(voice: str, account: str = "", tweet_id: str = "") -> str:
     an angle and a length drawn for this reply, and the replies it must not look like."""
     low, high = random.choice(REPLY_LENGTHS)
     prompt = (
-        "Write one public reply to this tweet, as one ordinary reader giving your own personal opinion. "
+        "Write one public reply to this tweet, as one ordinary person scrolling X who gives your own personal opinion. "
+        "Read the whole tweet first and answer what it really says (its point, and its ending when it tells a story); "
+        "do not guess beyond it. "
         "Speak about its topic, not to please its author: do not compliment, thank or flatter the author, do not "
         "praise the tweet (nothing like: well said, you're right, great post, صدقت، كفو، أبدعت، كلامك ذهب), and do "
         "not just agree. Honest, never rude: no insults, and do not mock the author. "
@@ -3139,9 +3144,16 @@ def reply_prompt(voice: str, account: str = "", tweet_id: str = "") -> str:
         "If the tweet is a prayer (دعاء), about religion, a death, an illness or other sad news, leave the angle and "
         "the manner: reply sincerely and respectfully, with no joke and no disagreement. "
         f"{low} to {high} words. Finish the sentence. Never stop mid-word or mid-phrase, and do not end with a comma. "
-        "Use the same language as the tweet. " + REPLY_VOICES.get(voice, REPLY_VOICES[DEFAULT_REPLY_VOICE]) + " "
-        "Sound like a real person: specific, casual, not like a brand or an assistant. Do not open with filler "
-        "(like صراحة، فعلاً، والله) or by repeating the tweet. "
+        "Write in the tweet's own language. An Arabic tweet gets everyday spoken Saudi Arabic (عامية سعودية بيضاء), "
+        "the way people really type on X, never formal Arabic (فصحى): no words like الأولى، ينبغي، لا تثبت، ما زال، "
+        "إذ، لذا، حيث، كما أن، and no tanween (like نضجاً). A tweet in another language (English, Turkish…) gets "
+        "its reply in that language. " + REPLY_VOICES.get(voice, REPLY_VOICES[DEFAULT_REPLY_VOICE]) + " "
+        "Sound like a real person, specific and casual, not a teacher, a preacher, a brand or an assistant: no "
+        "advice or lessons to the author or to people (nothing like: الأولى أن، يجب، الأفضل أن، تذكّر، نصيحتي), no "
+        "general wisdom or sayings, no neat conclusion; say what you think or feel, from your own side. "
+        "The image is only a screenshot to read the tweet: never mention it, the picture, the post or the tweet "
+        "(no الصورة، المنشور، التغريدة); react to what is in them. "
+        "Do not open with filler (like صراحة، فعلاً، والله) or by repeating the tweet. "
         "No hashtags, no links, no quotes, no labels, no introduction. Return only the finished reply."
     )
     with replies_memory_lock:
@@ -3163,7 +3175,7 @@ def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
     if image:
         prompt = "Look at the tweet in the image. " + prompt
     if tweet_text:
-        prompt += "\n\nTweet text:\n" + tweet_text[:280]
+        prompt += "\n\nTweet text:\n" + tweet_text[:REPLY_TWEET_TEXT]
     parts: list[dict] = [{"text": prompt}]
     if image:
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(image).decode("ascii")}})
@@ -3410,7 +3422,7 @@ def grok_comment(api_key: str, model: str, image: bytes | None, tweet_text: str,
     if image:
         prompt = "Look at the tweet in the image. " + prompt
     if tweet_text:
-        prompt += "\n\nTweet text:\n" + tweet_text[:280]
+        prompt += "\n\nTweet text:\n" + tweet_text[:REPLY_TWEET_TEXT]
     content: list[dict] = [{"type": "input_text", "text": prompt}]
     if image:
         content.append({"type": "input_image", "image_url": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")})
@@ -3512,7 +3524,7 @@ def claude_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
     if image:
         prompt = "Look at the tweet in the image. " + prompt
     if tweet_text:
-        prompt += "\n\nTweet text:\n" + tweet_text[:280]
+        prompt += "\n\nTweet text:\n" + tweet_text[:REPLY_TWEET_TEXT]
     content: list[dict] = []
     if image:
         content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
@@ -3795,6 +3807,19 @@ RESOLVE_PARENT_JS = r"""
 """
 
 
+def article_text(card) -> str:
+    """The tweet's own text as its opened page shows it (a long post whole, where the collected text stops
+    at 280 letters); "" when it has none (a picture alone)."""
+    try:
+        found = card.locator('[data-testid="tweetText"]')
+        if not found.count():
+            return ""
+        text = found.first.inner_text(timeout=2000)
+    except Exception:
+        return ""
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
 def resolve_comment_target(page, path: str, needs_parent: bool) -> tuple[str, object]:
     if needs_parent:
         try:
@@ -3921,9 +3946,10 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
                 result["actions"]["comment"] = "سبق الرد خلال ٨ ساعات — تم التخطي"
             elif "comment" in actions:
                 reply_to = tweet_status_id(target_path)
-                comment = write_comment(api_key, model, image, str(item.get("text") or ""), voice, account, reply_to)
+                tweet_text = article_text(card) or str(item.get("text") or "")
+                comment = write_comment(api_key, model, image, tweet_text, voice, account, reply_to)
                 if len(comment.split()) < 4:
-                    comment = write_comment(api_key, model, image, str(item.get("text") or ""), voice, account, reply_to)
+                    comment = write_comment(api_key, model, image, tweet_text, voice, account, reply_to)
                 if len(comment.split()) < 4:
                     result["actions"]["comment"] = "لم يُرجع النموذج تعليقًا صالحًا"
                 else:
