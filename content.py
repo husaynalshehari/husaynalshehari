@@ -80,22 +80,31 @@ GENERATE_FIRST_PERSON = (
     "with a first-person verb or word (in Arabic, like شفت، جربت، طلبت، قالوا لي), as their own experience. "
     "Prefer wording that fits a man or a woman alike.\n"
 )
-# Sent after the tweets for the second and third post of one «إرسال إلى Gemini», with the texts made before it.
+# Sent after the tweets for the second and third post of one «إنشاء منشور», with the texts made before it.
 GENERATE_DIFFERENT = (
     "Posts already made from these. Yours must be clearly different from them: another angle or another "
     "idea from these posts, and another image:\n"
 )
-# How many posts one «إرسال إلى Gemini» makes (offered on the page; the first is the default).
+# How many posts one «إنشاء منشور» makes (offered on the page; the first is the default).
 GENERATE_COUNTS = (3, 2, 1)
 # The page on users' copies: one model, always «تفكير عميق», and no model named or to choose.
 USERS_MODEL = "gemini-nano-banana-2.1"
-# What that page says instead of the messages that name or offer another model ("" leaves a note out).
+# What that page says instead of the messages about the key (the owner's) or that offer another model
+# ("" leaves a note out), and the refusals it says without their details.
+UNAVAILABLE = "الإنشاء غير متاح الآن. أخبر صاحب البرنامج."
 USERS_WORDING = (
-    ("هذا النموذج غير متاح لمفتاح Gemini المحفوظ. اختر نموذجًا آخر.", "التوليد غير متاح الآن لمفتاح Gemini. أخبر صاحب البرنامج."),
+    ("هذا النموذج غير متاح للمفتاح المحفوظ في اللوحة. اختر نموذجًا آخر.", UNAVAILABLE),
+    ("المفتاح المحفوظ في اللوحة غير صالح.", UNAVAILABLE),
+    ("حصة المفتاح المحفوظ في اللوحة لا تسمح بهذا الطلب الآن: انتهت الحصة، أو أن الفوترة غير مفعّلة عليه.", UNAVAILABLE),
+    ("لا يوجد مفتاح محفوظ في اللوحة.", UNAVAILABLE),
     (" أو اختر نموذجًا آخر", ""),
     (" أو اختر نموذجًا أسرع", ""),
     ("جرّب تغريدة أو نموذجًا آخر.", "جرّب تغريدة أخرى."),
     ("هذا النموذج لا يقبل «تفكير عميق»، يكمل بدونه…", ""),
+)
+USERS_WORDING_PATTERNS = (
+    (r"رُفض الطلب: [^\n]*", "رُفض الطلب. أعد المحاولة أو جرّب تغريدة أخرى."),
+    (r"رُفض إنشاء الصورة \([^)]*\)\.", "رُفض إنشاء الصورة لهذه التغريدة."),
 )
 # The day a user's copy counts its posts in (see posts_per_day in attach): Saudi time, UTC+3.
 DAY_OFFSET_SECONDS = 3 * 3600
@@ -181,7 +190,7 @@ def download_photo(address: str) -> tuple[str, bytes] | None:
 
 class GenerateError(Exception):
     """A generation that cannot go on; the message is shown on the page. fatal=False: only this post
-    failed (no picture, or refused), so the next one of the same «إرسال إلى Gemini» is still tried."""
+    failed (no picture, or refused), so the next one of the same «إنشاء منشور» is still tried."""
 
     def __init__(self, message: str, fatal: bool = True):
         super().__init__(message)
@@ -206,16 +215,16 @@ def generate_prompt(first_person: bool = False) -> str:
 
 
 def gemini_problem(status: int, detail: str, busy: bool) -> str:
-    """What to show for a request Gemini turned down."""
+    """What to show for a request Gemini turned down (the page names no service)."""
     if re.search(r"api key not valid|api_key_invalid|invalid api key", detail, re.I):
-        return "مفتاح Gemini المحفوظ غير صالح."
+        return "المفتاح المحفوظ في اللوحة غير صالح."
     if status == 404 or re.search(r"not found|is not supported", detail, re.I):
-        return "هذا النموذج غير متاح لمفتاح Gemini المحفوظ. اختر نموذجًا آخر."
+        return "هذا النموذج غير متاح للمفتاح المحفوظ في اللوحة. اختر نموذجًا آخر."
     if re.search(r"quota|billing", detail, re.I):
-        return "حصة مفتاح Gemini لا تسمح بهذا الطلب الآن: انتهت الحصة، أو أن الفوترة غير مفعّلة على المفتاح."
+        return "حصة المفتاح المحفوظ في اللوحة لا تسمح بهذا الطلب الآن: انتهت الحصة، أو أن الفوترة غير مفعّلة عليه."
     if busy:
-        return "Gemini مشغول الآن. أعد المحاولة بعد قليل أو اختر نموذجًا آخر."
-    return "رفض Gemini الطلب" + (f": {detail}" if detail else ".")
+        return "الخدمة مشغولة الآن. أعد المحاولة بعد قليل أو اختر نموذجًا آخر."
+    return "رُفض الطلب" + (f": {detail}" if detail else ".")
 
 
 def ask_gemini(api_key: str, model: str, parts: list[dict], report, aspect: str = "", deep: bool = False) -> dict:
@@ -267,26 +276,26 @@ def ask_gemini(api_key: str, model: str, parts: list[dict], report, aspect: str 
                 re.search(r"high demand|try again later|unavailable|overloaded|resource exhausted|rate limit", detail, re.I))
             # "limit: 0": this key has no quota at all for the model, so asking again is no use.
             if busy and attempt < len(waits) and not re.search(r"limit:\s*0\b", detail):
-                report(f"Gemini مشغول الآن، إعادة المحاولة بعد {waits[attempt]} ثانية…")
+                report(f"الخدمة مشغولة الآن، إعادة المحاولة بعد {arabic_count(waits[attempt], 'ثانية', 'ثانيتين', 'ثوانٍ', 'ثانية')}…")
                 time.sleep(waits[attempt])
                 continue
             raise GenerateError(gemini_problem(status, detail, busy)) from None
         except urllib.error.URLError as exc:
             # Not connected, so the request did not go out: asked again.
             if attempt < 2:
-                report("تعذّر الاتصال بـ Gemini، إعادة المحاولة…")
+                report("تعذّر الاتصال، إعادة المحاولة…")
                 time.sleep(waits[attempt])
                 continue
-            raise GenerateError("تعذّر الاتصال بـ Gemini.") from exc
+            raise GenerateError("تعذّر الاتصال بخدمة الإنشاء.") from exc
         # Cut off after the request went out: not asked again, as Gemini may still make (and charge
         # for) its pictures.
         except TimeoutError as exc:
-            raise GenerateError(f"لم يرد Gemini خلال {GENERATE_SECONDS // 60} دقائق. أعد المحاولة أو اختر نموذجًا أسرع.") from exc
+            raise GenerateError(f"لم يكتمل الإنشاء خلال {GENERATE_SECONDS // 60} دقائق. أعد المحاولة أو اختر نموذجًا أسرع.") from exc
         except OSError as exc:
-            raise GenerateError("انقطع الاتصال بـ Gemini أثناء التوليد. أعد المحاولة.") from exc
+            raise GenerateError("انقطع الاتصال أثناء الإنشاء. أعد المحاولة.") from exc
         except ValueError as exc:
-            raise GenerateError("وصل من Gemini رد غير مفهوم. أعد المحاولة.") from exc
-    raise GenerateError("Gemini مشغول الآن. أعد المحاولة بعد قليل أو اختر نموذجًا آخر.")
+            raise GenerateError("وصل رد غير مفهوم. أعد المحاولة.") from exc
+    raise GenerateError("الخدمة مشغولة الآن. أعد المحاولة بعد قليل أو اختر نموذجًا آخر.")
 
 
 # A label the model may put before the post ("Post Text:", "المنشور:"), and the start of a note it may
@@ -370,6 +379,8 @@ def attach(app, access_path: str, tools) -> dict:
         if users_page:
             for old, new in USERS_WORDING:
                 message = message.replace(old, new)
+            for pattern, new in USERS_WORDING_PATTERNS:
+                message = re.sub(pattern, new, message)
         return message
     tweets_part = getattr(tools, "tweets_part", None)
     # The generated posts' folder (kept where it was, so the posts made before stay listed), one
@@ -440,7 +451,9 @@ def attach(app, access_path: str, tools) -> dict:
             except Exception:
                 # The rest of the page still works without them.
                 app.logger.warning("content page: the collected tweets could not be shown", exc_info=True)
-        return render_template_string(PAGE, csrf_token=csrf_token, api_root="/" + access_path, panel="/" + access_path, models=GENERATE_MODELS,
+        # (The users' page is sent no models: none is named on it, not even in its source.)
+        return render_template_string(PAGE, csrf_token=csrf_token, api_root="/" + access_path, panel="/" + access_path,
+                                      models={} if users_page else GENERATE_MODELS,
                                       counts=GENERATE_COUNTS, tweets=tweets, limit=allowance(), users_page=users_page)
 
     def link_parts(model: str, tweets: list[dict], first_person: bool = False) -> tuple[list[dict], dict]:
@@ -486,8 +499,8 @@ def attach(app, access_path: str, tools) -> dict:
                 break
         if not pictures:
             if reason not in ("", "STOP", "MAX_TOKENS"):
-                raise GenerateError(f"رفض Gemini توليد الصورة ({reason}).", fatal=False)
-            raise GenerateError("لم يُرجع Gemini صورة.", fatal=False)
+                raise GenerateError(f"رُفض إنشاء الصورة ({reason}).", fatal=False)
+            raise GenerateError("لم تُصنع صورة.", fatal=False)
         first = pictures[0]
         progress("الصورة الثانية بحجم آخر…")
         second_ask = parts + [{"text": "The first image made for this post:"},
@@ -533,7 +546,6 @@ def attach(app, access_path: str, tools) -> dict:
                             first_person: bool = False) -> None:
         """Read the pasted tweets, then make count posts from them one after the other, each kept as soon as
         it is made."""
-        label = GENERATE_MODELS[model]["label"].split(" · ")[0]
         batch = str(int(time.time() * 1000))
         made: list[str] = []
         problem = ""
@@ -546,8 +558,10 @@ def attach(app, access_path: str, tools) -> dict:
                 tweet["files"] = [photo for photo in (download_photo(address) for address in tweet["photos"]) if photo]
                 tweets.append(tweet)
             parts, info = link_parts(model, tweets, first_person)
-            sent = (f"أُرسلت {len(tweets)} تغريدات" if len(tweets) > 1 else "أُرسلت التغريدة") + f" و{info['photos_sent']} صورة" + (
-                f" من {info['photos_total']}" if info["photos_sent"] < info["photos_total"] else "")
+            photos = info["photos_sent"]
+            sent = ("قُرئت " + arabic_count(len(tweets), "التغريدة", "تغريدتان", "تغريدات", "تغريدة")
+                    + (" و" + arabic_count(photos, "صورة واحدة", "صورتان", "صور", "صورة") if photos else " بلا صور")
+                    + (f" من {info['photos_total']}" if photos < info["photos_total"] else ""))
             for number in range(1, count + 1):
                 step = f"المنشور {number} من {count}" if count > 1 else ""
 
@@ -556,9 +570,9 @@ def attach(app, access_path: str, tools) -> dict:
                     if message:
                         link_job.update(status="running", message=f"{step}: {message}" if step else message)
 
-                thought = " بتفكير عميق" if deep and model not in thinking_refused else ""
-                by = "" if users_page else f" بـ {label}{thought}"
-                link_job.update(status="running", message=f"جارٍ توليد {step or 'المنشور'}{by}… {sent}. قد يستغرق دقيقة أو أكثر.")
+                # (No service or model named; the owner's page says when it thinks deeply.)
+                thought = " بتفكير عميق" if deep and not users_page and model not in thinking_refused else ""
+                link_job.update(status="running", message=f"جارٍ توليد {step or 'المنشور'}{thought}… {sent}. قد يستغرق دقيقة أو أكثر.")
                 try:
                     text, pictures = generate_link_one(api_key, model, parts, made, progress, deep)
                 except GenerateError as exc:
@@ -587,7 +601,7 @@ def attach(app, access_path: str, tools) -> dict:
             generating.release()
 
     def content_link_generate(access: str):
-        """«إرسال إلى Gemini»: the pasted tweets go to the chosen Gemini model; the page follows it."""
+        """«إنشاء منشور»: the pasted tweets go to the chosen Gemini model; the page follows it."""
         allowed(access)
         data = request.get_json(silent=True) or {}
         if not csrf_ok(data):
@@ -599,7 +613,7 @@ def attach(app, access_path: str, tools) -> dict:
             return jsonify(success=False, message=f"الحد الأقصى {LINK_MAX_TWEETS} تغريدات في المرة الواحدة."), 400
         model = USERS_MODEL if users_page else str(data.get("model") or "")
         if model not in GENERATE_MODELS:
-            return jsonify(success=False, message="اختر نموذج Gemini."), 400
+            return jsonify(success=False, message="اختر النموذج."), 400
         try:
             count = int(data.get("count") or GENERATE_COUNTS[0])
         except (TypeError, ValueError):
@@ -611,7 +625,7 @@ def attach(app, access_path: str, tools) -> dict:
             return jsonify(success=False, message="حدّث ملف السكربت لاستخدام التوليد."), 400
         api_key = gemini_key()
         if not api_key:
-            return jsonify(success=False, message="لا يوجد مفتاح Gemini محفوظ في اللوحة."), 400
+            return jsonify(success=False, message=worded("لا يوجد مفتاح محفوظ في اللوحة.")), 400
         if not generating.acquire(blocking=False):
             return jsonify(success=False, message="يعمل الآن توليد آخر. انتظر حتى ينتهي."), 409
         quota = allowance()
@@ -629,7 +643,7 @@ def attach(app, access_path: str, tools) -> dict:
         return jsonify(success=True, message="بدأ التوليد.", job=dict(link_job))
 
     def content_link_posts(access: str):
-        """The posts made from pasted tweets, and how the last «إرسال إلى Gemini» is going."""
+        """The posts made from pasted tweets, and how the last «إنشاء منشور» is going."""
         allowed(access)
         return jsonify(success=True, job=dict(link_job), generated=read_results(links_folder), limit=allowance())
 
@@ -840,7 +854,7 @@ PAGE = r'''<!doctype html>
       </div>
       {%- if not users_page %}
       <div class="gen-row">
-        <select id="link-model" aria-label="نموذج Gemini">
+        <select id="link-model" aria-label="النموذج">
           {%- for id, model in models.items() %}
           <option value="{{ id }}">{{ model.label }}</option>
           {%- endfor %}
@@ -857,12 +871,12 @@ PAGE = r'''<!doctype html>
           {%- endfor %}
         </select>
         {%- endif %}
-        <button id="link-go" class="go" type="button"{% if limit and limit.left <= 0 %} disabled{% endif %}>إرسال إلى Gemini</button>
+        <button id="link-go" class="go" type="button"{% if limit and limit.left <= 0 %} disabled{% endif %}>إنشاء منشور</button>
       </div>
       {%- if limit %}
       <p id="link-limit" class="hint limit{% if limit.left <= 0 %} is-used{% endif %}">{{ limit.text }}</p>
       {%- endif %}
-      <p class="hint">تُقرأ التغريدة (نصها وصورها) وتُرسل إلى Gemini ليصنع منها منشورًا جديدًا بنص وصورتين بحجمين مختلفين: طولية وعرضية. يمكن لصق أكثر من رابط.</p>
+      <p class="hint">تُقرأ التغريدة (نصها وصورها) ويُصنع منها منشور جديد بنص وصورتين بحجمين مختلفين: طولية وعرضية. يمكن لصق أكثر من رابط.</p>
       <div id="link-notice" class="notice" role="status" hidden></div>
       <div id="link-generated"></div>
       <details id="link-older" class="older" hidden>
@@ -973,8 +987,8 @@ PAGE = r'''<!doctype html>
     }
 
 
-    // «من رابط تغريدة»: the pasted tweets go to Gemini; the posts made from links show under it, the
-    // last «إرسال إلى Gemini»'s on top and the earlier ones folded.
+    // «من رابط تغريدة»: a post is made from the pasted tweets; the posts made from links show under it, the
+    // last «إنشاء منشور»'s on top and the earlier ones folded.
     const linkField = document.getElementById("link");
     const linkGo = document.getElementById("link-go");
     const linkModel = document.getElementById("link-model");
