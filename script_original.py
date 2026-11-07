@@ -61,6 +61,12 @@ APP_VERSION = "1.0"
 # The owner's copy fills both in when it hands the program out; both stay empty in the owner's copy.
 UPDATE_SOURCE = ""
 UPDATE_KEY = ""
+# In a copy given to a user: the owner's content.py («إنشاء محتوى»), packed in by g.py when it hands the
+# program out (gzip, then base64), so the user's copy has the page with no file of its own. Empty in the
+# owner's copy, which uses content.py beside it.
+CONTENT_EMBEDDED = ""
+# On users' copies, the posts «إنشاء محتوى» may make in one day (Saudi time). The owner's copy has no limit.
+USER_POSTS_PER_DAY = 1
 ATTEMPT_WINDOW_SECONDS = 300
 MAX_ATTEMPTS_PER_CLIENT = 5
 MAX_REPOSTS_REQUEST = 1000
@@ -5744,7 +5750,8 @@ def login_page(access_path: str):
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
         PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(), max_links=MAX_TWEET_LINKS,
-        content_ready=content_ready.is_set() or CONTENT_FILE.is_file(), tweets_in_content=content_shows_tweets,
+        content_ready=content_ready.is_set() or (CONTENT_FILE.is_file() if is_owner_copy() else bool(CONTENT_EMBEDDED)),
+        tweets_in_content=content_shows_tweets,
     ))
     return response
 
@@ -7934,13 +7941,22 @@ def content_error(exc: BaseException) -> str:
 
 
 def attach_content() -> None:
+    """Add «إنشاء محتوى»: from content.py beside the owner's script, or, on a user's copy, from the one the
+    owner packed into it (a content.py put beside a user's copy is not used: the page is the owner's)."""
     global content_problem, content_shows_tweets
-    if not CONTENT_FILE.is_file():
+    owner = is_owner_copy()
+    if not (CONTENT_FILE.is_file() if owner else CONTENT_EMBEDDED):
         return
     try:
-        spec = importlib.util.spec_from_file_location("content_page", CONTENT_FILE)
-        content = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(content)
+        if owner:
+            spec = importlib.util.spec_from_file_location("content_page", CONTENT_FILE)
+            content = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(content)
+        else:
+            source = gzip.decompress(base64.b64decode(CONTENT_EMBEDDED)).decode("utf-8")
+            content = importlib.util.module_from_spec(importlib.util.spec_from_loader("content_page", loader=None, origin=str(CONTENT_FILE)))
+            content.__file__ = str(CONTENT_FILE)
+            exec(compile(source, str(CONTENT_FILE), "exec"), content.__dict__)
         added = content.attach(app, ACCESS_PATH, SimpleNamespace(
             data_dir=DATA_DIR,
             accounts=content_accounts,
@@ -7950,6 +7966,7 @@ def attach_content() -> None:
             goto_x=goto_x,
             gemini_key=content_gemini_key,
             tweets_part=tweets_part,
+            posts_per_day=None if owner else USER_POSTS_PER_DAY,
         ))
     except Exception as exc:
         content_problem = content_error(exc)
@@ -7999,7 +8016,12 @@ def content_unavailable(access: str):
     if not hmac.compare_digest(access, ACCESS_PATH):
         abort(404)
     problem = fix = ""
-    if not CONTENT_FILE.is_file():
+    if not is_owner_copy():
+        if content_problem:
+            reason, problem, fix = "تعذّر تحميل صفحة إنشاء المحتوى في هذه النسخة:", content_problem, "أرسل هذه الرسالة لصاحب البرنامج."
+        else:
+            reason = "صفحة إنشاء المحتوى لم تصل إلى هذه النسخة بعد: تصل مع تحديث ينشره صاحب البرنامج."
+    elif not CONTENT_FILE.is_file():
         reason = "لا يوجد ملف content.py بجانب gg.py في هذا المجلد."
     elif content_problem:
         reason, problem, fix = "تعذّر تحميل content.py عند تشغيل gg.py:", content_problem, "أعد تنزيل content.py ثم أعد تشغيل gg.py."

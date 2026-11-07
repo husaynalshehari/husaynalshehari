@@ -8,6 +8,8 @@ the first visit sets it.
 """
 from __future__ import annotations
 
+import base64
+import gzip
 import hashlib
 import hmac
 import json
@@ -186,8 +188,14 @@ def next_version(version: str) -> str:
 
 def program_for(user_key: str, address: str) -> bytes:
     """The program as a user gets it: the script with the published version, this address and the
-    user's key filled in."""
+    user's key filled in, and the owner's content.py («إنشاء محتوى») packed into it."""
     text = PROGRAM_PATH.read_text(encoding="utf-8")
+    content = PROGRAM_PATH.with_name("content.py")
+    if content.is_file():
+        # The same bytes every time (no time in the gzip header): the copy checks the file it downloads
+        # against the sha256 it was told just before.
+        packed = base64.b64encode(gzip.compress(content.read_bytes(), mtime=0)).decode("ascii")
+        text = re.sub(r'^CONTENT_EMBEDDED = ".*"$', lambda _: f'CONTENT_EMBEDDED = "{packed}"', text, count=1, flags=re.M)
     with store_lock:
         version = published_version_unlocked()
     text = re.sub(r'^APP_VERSION = ".*"$', lambda _: f"APP_VERSION = {json.dumps(version)}", text, count=1, flags=re.M)
@@ -693,7 +701,7 @@ PAGE = r'''<!doctype html>
         <input id="next-version" type="text" inputmode="decimal" spellcheck="false" maxlength="20" aria-label="رقم الإصدار الجديد">
         <button id="publish" type="button">نشر التحديث</button>
       </div>
-      <p class="hint">ضع ملف <span id="program-name"></span> الجديد مكان القديم أولًا، ثم اضغط «نشر التحديث»، فيظهر زر «تحديث» عند المستخدمين.</p>
+      <p class="hint">ضع ملف <span id="program-name"></span> الجديد مكان القديم أولًا (ومعه content.py إن تغيّر: صفحة «إنشاء محتوى» تصلهم معه)، ثم اضغط «نشر التحديث»، فيظهر زر «تحديث» عند المستخدمين.</p>
     </section>
     <section id="skip-part" class="sheet" hidden>
       <label for="skip-users">حسابات متجاهَلة</label>

@@ -87,6 +87,8 @@ GENERATE_DIFFERENT = (
 )
 # How many posts one «إرسال إلى Gemini» makes (offered on the page; the first is the default).
 GENERATE_COUNTS = (3, 2, 1)
+# The day a user's copy counts its posts in (see posts_per_day in attach): Saudi time, UTC+3.
+DAY_OFFSET_SECONDS = 3 * 3600
 # The pasted tweets are read through FxTwitter's free API, at most this many at once.
 FX_STATUS_URL = "https://api.fxtwitter.com/status/{}"
 # Gemini's address, in one place.
@@ -174,6 +176,15 @@ class GenerateError(Exception):
     def __init__(self, message: str, fatal: bool = True):
         super().__init__(message)
         self.fatal = fatal
+
+
+def arabic_count(n: int, one: str, two: str, few: str, many: str) -> str:
+    """A count in Arabic: ساعة، ساعتين، 3 ساعات، 11 ساعة."""
+    if n == 1:
+        return one
+    if n == 2:
+        return two
+    return f"{n} {few if 3 <= n % 100 <= 10 else many}"
 
 
 def generate_prompt(first_person: bool = False) -> str:
@@ -332,12 +343,14 @@ def read_answer(payload: dict) -> tuple[str, list[tuple[str, bytes]], str]:
 def attach(app, access_path: str, tools) -> dict:
     """Add the page and its requests to the script's app, under the panel's own address.
 
-    tools (from the script): data_dir, gemini_key() -> the Gemini key saved on the panel, and
+    tools (from the script): data_dir, gemini_key() -> the Gemini key saved on the panel,
     tweets_part() -> the collected tweets' part of the page ({"style", "body", "script"}, ready to put
-    in it), when the script has it.
+    in it), when the script has it, and posts_per_day: on a user's copy, the posts it may make in one day.
 
     Returns what the page took on: {"tweets": True} when it shows the collected tweets.
     """
+    # On a user's copy, the posts it may make in one day (Saudi time); None or 0 on the owner's: no limit.
+    posts_per_day = getattr(tools, "posts_per_day", None)
     tweets_part = getattr(tools, "tweets_part", None)
     # The generated posts' folder (kept where it was, so the posts made before stay listed), one
     # generation at a time (each is paid for), and how the last one is going.
@@ -371,6 +384,30 @@ def attach(app, access_path: str, tools) -> dict:
                     found.append({**loaded, "id": entry.name})
         return sorted(found, key=lambda row: str(row["id"]).zfill(16), reverse=True)
 
+    def allowance() -> dict | None:
+        """On a user's copy (tools.posts_per_day): the posts left today and when tomorrow's come, with the
+        line the page shows. None on the owner's copy, which has no limit. Only a post that was made counts."""
+        if not posts_per_day:
+            return None
+        now = time.time()
+        start = (now + DAY_OFFSET_SECONDS) // 86400 * 86400 - DAY_OFFSET_SECONDS
+        made = sum(1 for row in read_results(links_folder) if float(row.get("created_at") or 0) >= start)
+        left = max(0, posts_per_day - made)
+        minutes = max(1, int(start + 86400 - now + 59) // 60)
+        hours, minutes = divmod(minutes, 60)
+        renews = " و".join(part for part in (
+            arabic_count(hours, "ساعة", "ساعتين", "ساعات", "ساعة") if hours else "",
+            arabic_count(minutes, "دقيقة", "دقيقتين", "دقائق", "دقيقة") if minutes else "") if part)
+        if not left:
+            text = (("استخدمت منشور اليوم." if posts_per_day == 1 else "استخدمت منشورات اليوم.")
+                    + f" يتجدد بعد {renews}، عند منتصف الليل بتوقيت السعودية.")
+        elif posts_per_day == 1:
+            text = "لك منشور واحد كل يوم، ومنشور اليوم متاح."
+        else:
+            text = (f"لك {arabic_count(posts_per_day, 'منشور واحد', 'منشوران', 'منشورات', 'منشورًا')} كل يوم، "
+                    f"بقي منها اليوم {arabic_count(left, 'منشور واحد', 'منشوران', 'منشورات', 'منشورًا')}.")
+        return {"per_day": posts_per_day, "left": left, "text": text}
+
     def content_page(access: str):
         allowed(access)
         csrf_token = session.get("csrf_token")
@@ -384,7 +421,7 @@ def attach(app, access_path: str, tools) -> dict:
                 # The rest of the page still works without them.
                 app.logger.warning("content page: the collected tweets could not be shown", exc_info=True)
         return render_template_string(PAGE, csrf_token=csrf_token, api_root="/" + access_path, panel="/" + access_path, models=GENERATE_MODELS,
-                                      counts=GENERATE_COUNTS, tweets=tweets)
+                                      counts=GENERATE_COUNTS, tweets=tweets, limit=allowance())
 
     def link_parts(model: str, tweets: list[dict], first_person: bool = False) -> tuple[list[dict], dict]:
         """The request made of the pasted tweets: the prompt, then each tweet's text and photos."""
@@ -554,6 +591,12 @@ def attach(app, access_path: str, tools) -> dict:
             return jsonify(success=False, message="لا يوجد مفتاح Gemini محفوظ في اللوحة."), 400
         if not generating.acquire(blocking=False):
             return jsonify(success=False, message="يعمل الآن توليد آخر. انتظر حتى ينتهي."), 409
+        quota = allowance()
+        if quota is not None:
+            if quota["left"] <= 0:
+                generating.release()
+                return jsonify(success=False, message=quota["text"], limit=quota), 429
+            count = min(count, quota["left"])
         link_job.clear()
         link_job.update(status="running", message="جارٍ قراءة التغريدة…")
         deep = bool(data.get("deep"))
@@ -565,7 +608,7 @@ def attach(app, access_path: str, tools) -> dict:
     def content_link_posts(access: str):
         """The posts made from pasted tweets, and how the last «إرسال إلى Gemini» is going."""
         allowed(access)
-        return jsonify(success=True, job=dict(link_job), generated=read_results(links_folder))
+        return jsonify(success=True, job=dict(link_job), generated=read_results(links_folder), limit=allowance())
 
     # «المحتوى السابق»: what the old accounts part left, read only.
     data_dir = Path(tools.data_dir)
@@ -723,6 +766,8 @@ PAGE = r'''<!doctype html>
     .gen-option:has(input:checked) { border-color: var(--pine); background: var(--ok-bg); color: var(--ok-ink); }
     .gen-option:has(input:checked) span { color: var(--ok-ink); }
     .gen-option:has(input:focus-visible) { box-shadow: 0 0 0 3px rgba(15, 107, 80, 0.16); }
+    .hint.limit { color: var(--ok-ink); font-weight: 600; }
+    .hint.limit.is-used { color: var(--clay); }
     .generated { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: var(--ok-bg); box-shadow: inset 0 0 0 1px rgba(15, 107, 80, 0.25); }
     .gen-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 10px; font-size: 13px; }
     .gen-head span { color: var(--muted); font-size: 12px; }
@@ -780,13 +825,18 @@ PAGE = r'''<!doctype html>
       <label class="gen-option"><input id="link-deep" type="checkbox"><b>تفكير عميق</b><span>يفكر أطول قبل أن يكتب · أبطأ وأغلى قليلًا</span></label>
       <label class="gen-option"><input id="link-me" type="checkbox"><b>بصيغة أنا</b><span>النص بصيغة المتكلم: شفت، جربت، طلبت</span></label>
       <div class="gen-row">
+        {%- if not limit %}
         <select id="link-count" class="gen-count" aria-label="عدد المنشورات">
           {%- for count in counts %}
           <option value="{{ count }}">{{ {1: "منشور واحد", 2: "منشوران"}.get(count, count ~ " منشورات") }}</option>
           {%- endfor %}
         </select>
-        <button id="link-go" class="go" type="button">إرسال إلى Gemini</button>
+        {%- endif %}
+        <button id="link-go" class="go" type="button"{% if limit and limit.left <= 0 %} disabled{% endif %}>إرسال إلى Gemini</button>
       </div>
+      {%- if limit %}
+      <p id="link-limit" class="hint limit{% if limit.left <= 0 %} is-used{% endif %}">{{ limit.text }}</p>
+      {%- endif %}
       <p class="hint">تُقرأ التغريدة (نصها وصورها) وتُرسل إلى Gemini ليصنع منها منشورًا جديدًا بنص وصورتين بحجمين مختلفين: طولية وعرضية. يمكن لصق أكثر من رابط.</p>
       <div id="link-notice" class="notice" role="status" hidden></div>
       <div id="link-generated"></div>
@@ -898,7 +948,11 @@ PAGE = r'''<!doctype html>
     const linkField = document.getElementById("link");
     const linkGo = document.getElementById("link-go");
     const linkModel = document.getElementById("link-model");
+    // (No count on a user's copy: it makes one post at a time, within its posts of the day.)
     const linkCount = document.getElementById("link-count");
+    const linkLimitLine = document.getElementById("link-limit");
+    // On a user's copy: {per_day, left, text}; null on the owner's (no limit).
+    let linkLimit = {{ limit|tojson }};
     const linkDeep = document.getElementById("link-deep");
     const linkMe = document.getElementById("link-me");
     const linkNotice = document.getElementById("link-notice");
@@ -907,9 +961,19 @@ PAGE = r'''<!doctype html>
     let linkPolling = 0;
     let linkShows = "";
 
+    function showLimit(limit) {
+      if (limit === undefined) return;
+      linkLimit = limit;
+      if (linkLimitLine && limit) {
+        linkLimitLine.textContent = limit.text;
+        linkLimitLine.classList.toggle("is-used", limit.left <= 0);
+      }
+      linkGo.disabled = linkRunning || Boolean(linkLimit && linkLimit.left <= 0);
+    }
+
     function showLinkJob(job) {
       linkRunning = job.status === "running";
-      linkGo.disabled = linkRunning;
+      linkGo.disabled = linkRunning || Boolean(linkLimit && linkLimit.left <= 0);
       linkNotice.hidden = !job.status;
       if (job.status) {
         linkNotice.textContent = job.message;
@@ -940,6 +1004,7 @@ PAGE = r'''<!doctype html>
       }
       const wasRunning = linkRunning;
       showLinkJob(data.job || {});
+      showLimit(data.limit);
       showLinkGenerated(Array.isArray(data.generated) ? data.generated : []);
       if (wasRunning && !linkRunning && (data.job || {}).status === "done") {
         document.getElementById("link-generated").scrollIntoView({block: "start", behavior: "smooth"});
@@ -962,7 +1027,7 @@ PAGE = r'''<!doctype html>
           method: "POST",
           headers: {"Content-Type": "application/json"},
           cache: "no-store",
-          body: JSON.stringify({csrf_token: csrf, links, model: linkModel.value, count: Number(linkCount.value), deep: linkDeep.checked,
+          body: JSON.stringify({csrf_token: csrf, links, model: linkModel.value, count: linkCount ? Number(linkCount.value) : 1, deep: linkDeep.checked,
                                first_person: linkMe.checked})
         });
         data = await response.json();
@@ -971,6 +1036,7 @@ PAGE = r'''<!doctype html>
       }
       if (!data.success) {
         showLinkJob({status: "failed", message: data.message || "تعذّر بدء التوليد."});
+        showLimit(data.limit);
         return;
       }
       showLinkJob(data.job);
@@ -984,7 +1050,7 @@ PAGE = r'''<!doctype html>
       const savedModel = localStorage.getItem("content-generate-model");
       if (savedModel && MODELS[savedModel]) linkModel.value = savedModel;
       const savedCount = localStorage.getItem("content-generate-count");
-      if (savedCount && [...linkCount.options].some((option) => option.value === savedCount)) linkCount.value = savedCount;
+      if (linkCount && savedCount && [...linkCount.options].some((option) => option.value === savedCount)) linkCount.value = savedCount;
       linkDeep.checked = localStorage.getItem("content-generate-deep") === "1";
       linkMe.checked = localStorage.getItem("content-generate-first-person") === "1";
     } catch (_) {}
@@ -1000,11 +1066,13 @@ PAGE = r'''<!doctype html>
         localStorage.setItem("content-generate-model", linkModel.value);
       } catch (_) {}
     });
-    linkCount.addEventListener("change", () => {
-      try {
-        localStorage.setItem("content-generate-count", linkCount.value);
-      } catch (_) {}
-    });
+    if (linkCount) {
+      linkCount.addEventListener("change", () => {
+        try {
+          localStorage.setItem("content-generate-count", linkCount.value);
+        } catch (_) {}
+      });
+    }
     loadLinkPosts();
 
     // «المحتوى السابق»: the accounts the old part kept, each opened to show its generated posts and its
