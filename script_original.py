@@ -471,6 +471,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .gemini-fields[hidden] { display: none !important; }
     .reply-voice { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; }
     .reply-voice[hidden] { display: none !important; }
+    .engine-note { flex-basis: 100%; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .engine-note[hidden] { display: none !important; }
     .voice-label { font-size: 12px; font-weight: 600; color: var(--muted); }
     .voices { display: flex; gap: 4px; }
     /* Smaller than the actions above them. */
@@ -842,7 +844,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
               <label class="choice"><input type="radio" name="reply-voice" value="female"><span class="choice-title">مؤنث</span></label>
               <label class="choice"><input type="radio" name="reply-voice" value="neutral"><span class="choice-title">عام</span></label>
             </div>
-            {% if owner_copy %}<button id="show-gemini" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Gemini</button>{% endif %}
+            {% if owner_copy %}<button id="show-gemini" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Gemini</button>
+            <span id="comments-by-grok" class="engine-note" hidden>التعليقات بواسطة Grok، كما اخترت للمستخدمين في «توزيع البرنامج».</span>{% endif %}
           </div>
           <div id="gemini-fields" class="gemini-fields" hidden>
             {% if not owner_copy %}<p class="gemini-owner">يضبط صاحب البرنامج مفتاح التعليقات ونموذجها.</p>{% endif %}
@@ -1057,6 +1060,13 @@ EMBEDDED_PAGE = r'''<!doctype html>
   // A user's copy: the owner sets the Gemini key and model; here they are only shown.
   const geminiByOwner = {{ (not owner_copy)|tojson }};
   editGemini.hidden = geminiByOwner;
+  // The owner's copy: Grok writes its comments when it is the one chosen in «توزيع البرنامج» (as the script says).
+  let commentsByGrok = false;
+  const engineNote = document.getElementById("comments-by-grok");
+  function showCommentsEngine(engine) {
+    commentsByGrok = engine === "grok";
+    if (engineNote) engineNote.hidden = !commentsByGrok;
+  }
   function lockGemini(locked) {
     geminiKey.readOnly = locked;
     geminiModel.readOnly = locked;
@@ -1447,6 +1457,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (!response.ok) return;
       sessionRows = data.sessions || [];
       renderSessions();
+      showCommentsEngine(data.comments_engine);
       if (geminiByOwner) {
         geminiKey.value = data.gemini_api_key || "";
         geminiModel.value = data.gemini_model || "";
@@ -1460,6 +1471,19 @@ EMBEDDED_PAGE = r'''<!doctype html>
           localStorage.setItem("x_gemini_model", data.gemini_model);
         }
       }
+    } catch (_) {}
+  }
+
+  // Who writes the comments now (it may have changed in «توزيع البرنامج» since the page opened); nothing else
+  // on the page is touched.
+  async function loadCommentsEngine() {
+    try {
+      const response = await fetchWithTimeout(apiRoot + "/sessions", {
+        headers: {"X-CSRF-Token": csrf, "X-Client-Id": clientId()},
+        cache: "no-store"
+      });
+      const data = await response.json();
+      if (response.ok) showCommentsEngine(data.comments_engine);
     } catch (_) {}
   }
 
@@ -1833,8 +1857,13 @@ EMBEDDED_PAGE = r'''<!doctype html>
     if (actions.includes("comment") && geminiByOwner) {
       // (Its keys come from the owner when it starts: the script waits for them, and says if they do not come.)
     } else if (actions.includes("comment")) {
-      if (!geminiKey.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل مفتاح Gemini.", false); geminiKey.focus(); return; }
-      if (!geminiModel.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل اسم النموذج.", false); geminiModel.focus(); return; }
+      repostButton.disabled = true;          // (not sent twice while it asks)
+      await loadCommentsEngine();
+      repostButton.disabled = false;
+      if (!commentsByGrok) {
+        if (!geminiKey.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل مفتاح Gemini.", false); geminiKey.focus(); return; }
+        if (!geminiModel.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل اسم النموذج.", false); geminiModel.focus(); return; }
+      }
       rememberGeminiLocal();
     }
     repostButton.disabled = true;
@@ -3139,10 +3168,12 @@ def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
     return ""
 
 
-# Users' comments by Grok (xAI), when the owner chooses it in «توزيع البرنامج»: its key and model come with
-# the copy's check-in (kept in memory only), and each comment is asked with the same prompt as Gemini's,
-# through xAI's Responses API, with the tweet's picture. The owner's own copy keeps Gemini.
+# Comments by Grok (xAI), when the owner chooses it in «توزيع البرنامج»: for users' copies, its key and model
+# come with each check-in (kept in memory only); the owner's own copy follows the same choice, with the key
+# and model saved there. Each comment is asked with the same prompt as Gemini's, through xAI's Responses
+# API, with the tweet's picture.
 GROK_URL = "https://api.x.ai/v1/responses"
+GROK_DEFAULT_MODEL = "grok-4.3"             # (as in g.py: the model when none is set there)
 GROK_PATH = DATA_DIR / "grok.json"
 # Comments are asked with no reasoning: much faster (and cheaper) than thinking first, and enough for a reply
 # this short. A model that does not take the setting is asked again without it (with its own default), and
@@ -3181,12 +3212,47 @@ def apply_owner_comments(engine: str, key: str, model: str) -> None:
         saved_grok.update(wanted)              # (in memory only)
 
 
-def grok_comments_on() -> bool:
-    """A user's copy whose comments the owner gave to Grok."""
+def distribution_saved() -> dict:
+    """What «توزيع البرنامج» saved beside this script (g.py's data/distribution.json), only read here."""
+    try:
+        loaded = json.loads((CONTROL_FILE.with_name("data") / "distribution.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def owner_comments_choice() -> dict:
+    """The owner's copy: who writes the comments, as chosen in «توزيع البرنامج» for users' copies (the same for
+    this one) {"engine", "api_key", "model"}: from g.py's page when this program serves it, else from what
+    that page saved beside this script."""
+    page = distribution_page
+    if page is not None:
+        with page.store_lock:
+            saved = {name: page.store.get(name) for name in ("comments_engine", "grok_key", "grok_model")}
+        default = str(getattr(page, "GROK_DEFAULT_MODEL", "") or GROK_DEFAULT_MODEL)
+    else:
+        saved, default = distribution_saved(), GROK_DEFAULT_MODEL
+    return {"engine": str(saved.get("comments_engine") or ""), "api_key": str(saved.get("grok_key") or "").strip(),
+            "model": str(saved.get("grok_model") or "").strip().lower() or default}
+
+
+def grok_settings() -> tuple[str, str]:
+    """(key, model) when Grok writes this copy's comments, else ("", ""): the owner's choice in «توزيع البرنامج»,
+    for users' copies (from their check-ins) and for the owner's own copy alike."""
     if is_owner_copy():
-        return False
-    with grok_lock:
-        return saved_grok["engine"] == "grok" and bool(saved_grok["api_key"])
+        choice = owner_comments_choice()
+    else:
+        with grok_lock:
+            choice = dict(saved_grok)
+    key, model = str(choice.get("api_key") or ""), str(choice.get("model") or "")
+    if choice.get("engine") == "grok" and valid_grok_key(key) and valid_grok_model(model):
+        return key, model
+    return "", ""
+
+
+def grok_comments_on() -> bool:
+    """Whether Grok writes this copy's comments (see grok_settings)."""
+    return bool(grok_settings()[0])
 
 
 def grok_answer_text(answer: dict) -> str:
@@ -3278,13 +3344,12 @@ def grok_comment(api_key: str, model: str, image: bytes | None, tweet_text: str,
 
 def write_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE,
                   account: str = "", tweet_id: str = "") -> str:
-    """One reply, by whoever writes this copy's comments: Grok when the owner chose it for users' copies, else
-    Gemini (with the task's key and model, or this copy's saved ones)."""
+    """One reply, by whoever writes this copy's comments: Grok when the owner chose it in «توزيع البرنامج» (for
+    users' copies and the owner's alike), else Gemini (with the task's key and model, or this copy's saved ones)."""
     if not is_owner_copy() and not wait_for_owner_keys():
         raise RuntimeError(no_keys_message())
-    if grok_comments_on():
-        with grok_lock:
-            key, grok_model = saved_grok["api_key"], saved_grok["model"]
+    key, grok_model = grok_settings()
+    if key:
         return grok_comment(key, grok_model, image, tweet_text, voice, account, tweet_id)
     if not api_key:
         with gemini_lock:
@@ -6535,6 +6600,8 @@ BACKUPS_DIR = DATA_DIR / "backups"
 MAX_PROGRAM_BYTES = 8 * 1024 * 1024
 # Set once g.py's page is up.
 distribution_started = threading.Event()
+# g.py's page, once this program serves it.
+distribution_page = None
 # Set while a user's copy installs an update: no new task starts.
 updating = threading.Event()
 update_check_cache: dict = {"at": 0.0, "answer": None}
@@ -6571,6 +6638,8 @@ def start_distribution(bind_host: str) -> None:
         print(f"لم تبدأ صفحة التوزيع ({CONTROL_FILE.name}) على المنفذ {CONTROL_PORT}: {reason}", flush=True)
         return
     threading.Thread(target=server.serve_forever, name="distribution", daemon=True).start()
+    global distribution_page
+    distribution_page = control             # (its choice of who writes the comments is this copy's too)
     distribution_started.set()
     print(f"صفحة التوزيع ({CONTROL_FILE.name}) على المنفذ {CONTROL_PORT}", flush=True)
 
@@ -7365,6 +7434,8 @@ def group_run_endpoint(access_path: str):
             return jsonify(success=False, message="أدخل مفتاح Gemini واسم النموذج قبل التعليق."), 400
         if is_owner_copy():
             remember_gemini(gemini_api_key, gemini_model or "")
+    elif "comment" in requested_actions and is_owner_copy() and valid_gemini_key(gemini_api_key) and gemini_model:
+        remember_gemini(gemini_api_key, gemini_model)      # (Grok writes the comments; the key typed is kept all the same)
     if updating.is_set():
         return jsonify(success=False, message="يجري تحديث البرنامج. انتظر قليلًا ثم أعد المحاولة."), 503
     with jobs_lock:
@@ -7525,11 +7596,15 @@ def list_sessions_endpoint(access_path: str):
     if gemini_key and not is_owner_copy():
         # A user's page only shows that a key is there; the copy itself uses it.
         gemini_key = f"{gemini_key[:4]}…{gemini_key[-4:]}"
-    # A user's copy: whether someone (Grok, or Gemini with its key) can write its comments.
-    comments_ready = grok_comments_on() or valid_gemini_key(saved_gemini.get("api_key") or "")
+    # Whether someone (Grok, or Gemini with its key) can write this copy's comments; the owner's page is also
+    # told when Grok writes them (chosen in «توزيع البرنامج»), and then asks for no Gemini key.
+    grok = grok_comments_on()
+    comments_ready = grok or valid_gemini_key(saved_gemini.get("api_key") or "")
+    engine = ("grok" if grok else "gemini") if is_owner_copy() else ""
     if not comments_ready and not is_owner_copy() and not owner_sync_state["ok"] and time.monotonic() - owner_sync_state["at"] > 5:
         threading.Thread(target=sync_with_owner, name="owner-sync", daemon=True).start()   # (no keys yet: ask now)
-    return jsonify(success=True, sessions=rows, gemini_api_key=gemini_key, gemini_model=gemini_model, comments_ready=comments_ready)
+    return jsonify(success=True, sessions=rows, gemini_api_key=gemini_key, gemini_model=gemini_model, comments_ready=comments_ready,
+                   comments_engine=engine)
 
 
 @app.get("/<access_path>/gemini-usage")
