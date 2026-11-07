@@ -2877,7 +2877,9 @@ def clean_comment(raw: str) -> str:
 
 
 def comment_is_complete(text: str) -> bool:
-    words = [word for word in (text or "").split() if word]
+    # An emoji or two at the end are fine: the words before them are what is checked.
+    text = re.sub(r"[\s\u200d\ufe0f\u2600-\u27bf\U0001f000-\U0001faff]+$", "", text or "")
+    words = [word for word in text.split() if word]
     if len(words) < 6:
         return False
     if re.search(r"[،,؛;:：\-–—/\\*]$", text.strip()):
@@ -2960,17 +2962,93 @@ REPLY_VOICES = {
 }
 # The voice when none (or an unknown one) is given.
 DEFAULT_REPLY_VOICE = "male"
+# How a reply takes the tweet: one is drawn at random for each reply, so the group's accounts do not all answer
+# one tweet the same way (and one account does not answer every tweet the same way).
+REPLY_ANGLES = (
+    "your own opinion on its topic, with your own reason",
+    "you disagree with one point in it, and say why",
+    "a short experience of yours that it reminds you of",
+    "a detail in it that most people will miss",
+    "a light, dry joke about the situation",
+    "you doubt one part of it, as someone who has seen otherwise",
+    "a comparison with something from everyday life",
+    "what you would do in that situation",
+    "one honest feeling it gives you, and why",
+)
+# How long, in words: drawn at random too.
+REPLY_LENGTHS = ((7, 12), (10, 16), (15, 24))
+# How an account writes: one manner for each account (drawn from it, so it stays the same), as a real person
+# keeps their own.
+REPLY_MANNERS = (
+    "short and direct, no emojis",
+    "calm and thoughtful",
+    "sarcastic and witty",
+    "blunt and critical, but not rude",
+    "easygoing; now and then one emoji at the end",
+    "curious; sometimes ends with a short question",
+    "practical; speaks from experience",
+    "playful, with everyday slang",
+)
+# The last replies written on this copy, by account and by tweet: the next reply is told not to look like them.
+REPLIES_REMEMBERED = 8
+replies_by_account: dict[str, list[str]] = {}
+replies_by_tweet: dict[str, list[str]] = {}
+replies_memory_lock = threading.Lock()
 
 
-def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE) -> str:
+def reply_manner(account: str) -> str:
+    """The account's own manner of writing (always the same one for an account)."""
+    if not account:
+        return random.choice(REPLY_MANNERS)
+    drawn = int(hashlib.sha256(("reply-manner:" + account).encode("utf-8")).hexdigest()[:8], 16)
+    return REPLY_MANNERS[drawn % len(REPLY_MANNERS)]
+
+
+def remember_reply(account: str, tweet_id: str, text: str) -> None:
+    with replies_memory_lock:
+        for book, key in ((replies_by_account, account), (replies_by_tweet, tweet_id)):
+            if key:
+                kept = book.setdefault(key, [])
+                kept.append(text)
+                del kept[:-REPLIES_REMEMBERED]
+        while len(replies_by_tweet) > 500:
+            replies_by_tweet.pop(next(iter(replies_by_tweet)))
+
+
+def reply_prompt(voice: str, account: str = "", tweet_id: str = "") -> str:
+    """What the model is asked for one reply: a personal opinion (not a compliment), in the account's manner, with
+    an angle and a length drawn for this reply, and the replies it must not look like."""
+    low, high = random.choice(REPLY_LENGTHS)
     prompt = (
-        "Write one complete public reply of 10 to 20 words. "
-        "Finish the sentence. Never stop mid-word or mid-phrase, and do not end with a comma. "
+        "Write one public reply to this tweet, as one ordinary reader giving your own personal opinion. "
+        "Speak about its topic, not to please its author: do not compliment, thank or flatter the author, do not "
+        "praise the tweet (nothing like: well said, you're right, great post, صدقت، كفو، أبدعت، كلامك ذهب), and do "
+        "not just agree. Honest, never rude: no insults, and do not mock the author. "
+        f"This time: {random.choice(REPLY_ANGLES)}. Your manner (always the same): {reply_manner(account)}. "
+        "If the tweet is a prayer (دعاء), about religion, a death, an illness or other sad news, leave the angle and "
+        "the manner: reply sincerely and respectfully, with no joke and no disagreement. "
+        f"{low} to {high} words. Finish the sentence. Never stop mid-word or mid-phrase, and do not end with a comma. "
         "Use the same language as the tweet. " + REPLY_VOICES.get(voice, REPLY_VOICES[DEFAULT_REPLY_VOICE]) + " "
-        "Sound like a real person: specific, casual, "
-        "not like a brand or an assistant. No hashtags, no links, no quotes, no labels, no introduction. "
-        "Return only the finished reply."
+        "Sound like a real person: specific, casual, not like a brand or an assistant. Do not open with filler "
+        "(like صراحة، فعلاً، والله) or by repeating the tweet. "
+        "No hashtags, no links, no quotes, no labels, no introduction. Return only the finished reply."
     )
+    with replies_memory_lock:
+        own = list(replies_by_account.get(account) or []) if account else []
+        others = [text for text in (replies_by_tweet.get(tweet_id) or []) if text not in own] if tweet_id else []
+    if others:
+        prompt += ("\n\nReplies other people already wrote to this same tweet. Yours must say something else, "
+                   "in another way:\n" + "\n".join("- " + text for text in others))
+    if own:
+        prompt += ("\n\nYour own last replies to other tweets. This one must not look like them (another opening, "
+                   "another shape, other words):\n" + "\n".join("- " + text for text in own))
+    return prompt
+
+
+def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE,
+                   account: str = "", tweet_id: str = "") -> str:
+    """One reply to a tweet, from the account (its profile key) to the tweet (its id)."""
+    prompt = reply_prompt(voice, account, tweet_id)
     if image:
         prompt = "Look at the tweet in the image. " + prompt
     if tweet_text:
@@ -2983,7 +3061,8 @@ def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
     best = ""
     saw_busy = False
     for thinking, max_tokens in attempts:
-        config: dict = {"temperature": 0.7, "maxOutputTokens": max_tokens}
+        # The model's own temperature (1.0): Google advises it for Gemini 3, and it keeps the replies varied.
+        config: dict = {"temperature": 1.0, "maxOutputTokens": max_tokens}
         if thinking:
             config["thinkingConfig"] = thinking
         body = {"contents": [{"parts": parts}], "generationConfig": config}
@@ -3041,11 +3120,13 @@ def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
         text = clean_comment(" ".join(texts))
         if comment_is_complete(text):
             record_comment_generated()
+            remember_reply(account, tweet_id, text)
             return text
         if len(text) > len(best):
             best = text
     if comment_is_complete(best):
         record_comment_generated()
+        remember_reply(account, tweet_id, best)
         return best
     if saw_busy:
         raise RuntimeError("النموذج مشغول مؤقتًا بعد عدة محاولات. غيّر النموذج أو أعد التنفيذ بعد قليل.")
@@ -3367,9 +3448,10 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
             if replied_before or ("comment" in actions and already_done_recently(account, tweet_status_id(target_path), ["comment"])):
                 result["actions"]["comment"] = "سبق الرد خلال ٨ ساعات — تم التخطي"
             elif "comment" in actions:
-                comment = gemini_comment(api_key, model, image, str(item.get("text") or ""), voice)
+                reply_to = tweet_status_id(target_path)
+                comment = gemini_comment(api_key, model, image, str(item.get("text") or ""), voice, account, reply_to)
                 if len(comment.split()) < 4:
-                    comment = gemini_comment(api_key, model, image, str(item.get("text") or ""), voice)
+                    comment = gemini_comment(api_key, model, image, str(item.get("text") or ""), voice, account, reply_to)
                 if len(comment.split()) < 4:
                     result["actions"]["comment"] = "لم يُرجع النموذج تعليقًا صالحًا"
                 else:
