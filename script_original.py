@@ -3164,12 +3164,24 @@ def valid_grok_model(value: str) -> bool:
     return bool(re.fullmatch(r"[a-z0-9][a-z0-9.\-]{1,60}", value or ""))
 
 
+def persist_grok_unlocked() -> None:
+    write_private_json(GROK_PATH, {"version": 2, "engine": saved_grok["engine"], "api_key_sealed": seal_key(saved_grok["api_key"]),
+                                   "model": saved_grok["model"]})
+
+
 def load_grok() -> None:
     loaded = read_private_json(GROK_PATH) or {}
-    key, model = str(loaded.get("api_key") or "").strip(), str(loaded.get("model") or "").strip()
+    plain = str(loaded.get("api_key") or "").strip()
+    key = open_key(loaded.get("api_key_sealed")).strip() if loaded.get("api_key_sealed") else plain
+    model = str(loaded.get("model") or "").strip()
     grok = loaded.get("engine") == "grok" and valid_grok_key(key) and valid_grok_model(model)
     with grok_lock:
         saved_grok.update(engine="grok" if grok else "gemini", api_key=key if grok else "", model=model if grok else "")
+        if plain:
+            try:
+                persist_grok_unlocked()    # a key kept in the clear before: now sealed
+            except OSError:
+                pass
 
 
 def apply_owner_comments(engine: str, key: str, model: str) -> None:
@@ -3181,7 +3193,7 @@ def apply_owner_comments(engine: str, key: str, model: str) -> None:
         if saved_grok != wanted:
             saved_grok.update(wanted)
             try:
-                write_private_json(GROK_PATH, dict(saved_grok))
+                persist_grok_unlocked()
             except OSError:
                 pass
 
@@ -6777,19 +6789,75 @@ def remember_gemini(api_key: str, model: str) -> None:
         persist_gemini_unlocked()
 
 
+# The API keys (Gemini's, Grok's) are kept on disk sealed, so data/gemini.json and data/grok.json show
+# nothing readable: each is encrypted with a key made from a secret in this program and this copy's own
+# update key (a stream from SHA-256 with a random nonce each time it is saved, and a tag that tells a
+# damaged file, or one from another copy). Only the running program opens them. A file from before, with
+# the key in the clear, is read once and saved sealed.
+KEY_SEAL_SECRET = bytes.fromhex("d8867d215ab7fb097f3a535a380696b36506ee694e0ef27fdba0c4f8fd77b658")
+
+
+def key_seal_material() -> bytes:
+    return hashlib.sha256(KEY_SEAL_SECRET + UPDATE_KEY.encode("utf-8")).digest()
+
+
+def key_stream(material: bytes, nonce: bytes, length: int) -> bytes:
+    stream = bytearray()
+    counter = 0
+    while len(stream) < length:
+        stream += hashlib.sha256(material + nonce + counter.to_bytes(4, "big")).digest()
+        counter += 1
+    return bytes(stream[:length])
+
+
+def seal_key(text: str) -> str:
+    """A key as it is kept on disk ("" for none)."""
+    if not text:
+        return ""
+    material, nonce, raw = key_seal_material(), os.urandom(16), text.encode("utf-8")
+    body = bytes(a ^ b for a, b in zip(raw, key_stream(material, nonce, len(raw))))
+    tag = hmac.new(material, nonce + body, hashlib.sha256).digest()[:16]
+    return "s1:" + base64.b64encode(nonce + tag + body).decode("ascii")
+
+
+def open_key(sealed) -> str:
+    """The key a sealed one holds; "" when there is none, or it is damaged or another copy's."""
+    if not isinstance(sealed, str) or not sealed.startswith("s1:"):
+        return ""
+    try:
+        data = base64.b64decode(sealed[3:], validate=True)
+    except ValueError:
+        return ""
+    if len(data) <= 32:
+        return ""
+    nonce, tag, body = data[:16], data[16:32], data[32:]
+    material = key_seal_material()
+    if not hmac.compare_digest(tag, hmac.new(material, nonce + body, hashlib.sha256).digest()[:16]):
+        return ""
+    try:
+        return bytes(a ^ b for a, b in zip(body, key_stream(material, nonce, len(body)))).decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
 def persist_gemini_unlocked() -> None:
-    write_private_json(GEMINI_PATH, {"version": 1, "api_key": saved_gemini["api_key"], "model": saved_gemini["model"], "managed": bool(saved_gemini.get("managed"))})
+    write_private_json(GEMINI_PATH, {"version": 2, "api_key_sealed": seal_key(saved_gemini["api_key"]), "model": saved_gemini["model"],
+                                     "managed": bool(saved_gemini.get("managed"))})
 
 
 def load_gemini() -> None:
     global saved_gemini
     loaded = read_private_json(GEMINI_PATH) or {}
-    key = str(loaded.get("api_key") or "").strip()
+    plain = str(loaded.get("api_key") or "").strip()
+    key = open_key(loaded.get("api_key_sealed")).strip() if loaded.get("api_key_sealed") else plain
     model = normalize_gemini_model(str(loaded.get("model") or "")) or "gemini-3.5-flash"
     if key and not valid_gemini_key(key):
         key = ""
     # managed: the owner set this key from «توزيع البرنامج», and may delete it from there.
     saved_gemini = {"api_key": key, "model": model, "managed": bool(key and loaded.get("managed"))}
+    if plain:
+        with gemini_lock:
+            persist_gemini_unlocked()      # a key kept in the clear before: now sealed
 
 
 def persist_sessions_unlocked() -> None:
