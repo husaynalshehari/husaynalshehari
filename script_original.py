@@ -845,7 +845,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             {% if owner_copy %}<button id="show-gemini" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Gemini</button>{% endif %}
           </div>
           <div id="gemini-fields" class="gemini-fields" hidden>
-            {% if not owner_copy %}<p class="gemini-owner">يضبط مفتاح Gemini والنموذج صاحب البرنامج.</p>{% endif %}
+            {% if not owner_copy %}<p class="gemini-owner">يضبط صاحب البرنامج مفتاح التعليقات ونموذجها.</p>{% endif %}
             <div>
               <label class="field-label" for="gemini-key">مفتاح Gemini</label>
               <input id="gemini-key" type="password" maxlength="256" autocomplete="off" spellcheck="false" readonly
@@ -1056,6 +1056,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const showGemini = document.getElementById("show-gemini");
   // A user's copy: the owner sets the Gemini key and model; here they are only shown.
   const geminiByOwner = {{ (not owner_copy)|tojson }};
+  // A user's copy: whether its comments can be written (by Grok, or by Gemini with its key), as the script says.
+  let commentsReady = false;
   editGemini.hidden = geminiByOwner;
   function lockGemini(locked) {
     geminiKey.readOnly = locked;
@@ -1450,6 +1452,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (geminiByOwner) {
         geminiKey.value = data.gemini_api_key || "";
         geminiModel.value = data.gemini_model || "";
+        commentsReady = data.comments_ready === undefined ? Boolean(data.gemini_api_key) : Boolean(data.comments_ready);
       } else {
         if (data.gemini_api_key && document.activeElement !== geminiKey) {
           geminiKey.value = data.gemini_api_key;
@@ -1831,7 +1834,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
     if (!actions.length) { showNotice("اختر إجراءً واحدًا على الأقل.", false); return; }
     if (actions.includes("comment") && geminiByOwner) {
-      if (!geminiKey.value.trim()) { showNotice("لا يوجد مفتاح Gemini لهذه النسخة. اطلبه من صاحب البرنامج.", false); return; }
+      if (!commentsReady) { showNotice("لا يوجد مفتاح للتعليقات في هذه النسخة. اطلبه من صاحب البرنامج.", false); return; }
     } else if (actions.includes("comment")) {
       if (!geminiKey.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل مفتاح Gemini.", false); geminiKey.focus(); return; }
       if (!geminiModel.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل اسم النموذج.", false); geminiModel.focus(); return; }
@@ -3139,6 +3142,153 @@ def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
     return ""
 
 
+# Users' comments by Grok (xAI), when the owner chooses it in «توزيع البرنامج»: its key and model come with
+# the copy's check-in (kept in data/grok.json), and each comment is asked with the same prompt as Gemini's,
+# through xAI's Responses API, with the tweet's picture. The owner's own copy keeps Gemini.
+GROK_URL = "https://api.x.ai/v1/responses"
+GROK_PATH = DATA_DIR / "grok.json"
+grok_lock = threading.Lock()
+saved_grok: dict = {"engine": "gemini", "api_key": "", "model": ""}
+
+
+def valid_grok_key(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_\-]{20,256}", value or ""))
+
+
+def valid_grok_model(value: str) -> bool:
+    return bool(re.fullmatch(r"[a-z0-9][a-z0-9.\-]{1,60}", value or ""))
+
+
+def load_grok() -> None:
+    loaded = read_private_json(GROK_PATH) or {}
+    key, model = str(loaded.get("api_key") or "").strip(), str(loaded.get("model") or "").strip()
+    grok = loaded.get("engine") == "grok" and valid_grok_key(key) and valid_grok_model(model)
+    with grok_lock:
+        saved_grok.update(engine="grok" if grok else "gemini", api_key=key if grok else "", model=model if grok else "")
+
+
+def apply_owner_comments(engine: str, key: str, model: str) -> None:
+    """Who the owner chose to write this copy's comments (from its check-in): Grok, with its key and model,
+    or Gemini (Grok's key is then dropped here)."""
+    grok = engine == "grok" and valid_grok_key(key) and valid_grok_model(model)
+    wanted = {"engine": "grok" if grok else "gemini", "api_key": key if grok else "", "model": model if grok else ""}
+    with grok_lock:
+        if saved_grok != wanted:
+            saved_grok.update(wanted)
+            try:
+                write_private_json(GROK_PATH, dict(saved_grok))
+            except OSError:
+                pass
+
+
+def grok_comments_on() -> bool:
+    """A user's copy whose comments the owner gave to Grok."""
+    if is_owner_copy():
+        return False
+    with grok_lock:
+        return saved_grok["engine"] == "grok" and bool(saved_grok["api_key"])
+
+
+def grok_answer_text(answer: dict) -> str:
+    """The text of a Responses API answer: output[] → message → content[] → output_text."""
+    parts = []
+    for item in answer.get("output") or []:
+        if isinstance(item, dict) and item.get("type") == "message":
+            for content in item.get("content") or []:
+                if isinstance(content, dict) and content.get("type") == "output_text":
+                    parts.append(str(content.get("text") or ""))
+    return "\n".join(parts) or str(answer.get("output_text") or "")
+
+
+def grok_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE,
+                 account: str = "", tweet_id: str = "") -> str:
+    """One reply to a tweet by Grok: the same prompt as Gemini's, the tweet's picture with it. A model that does
+    not take the reasoning setting is asked again without it; a busy Grok is asked again a few times."""
+    prompt = reply_prompt(voice, account, tweet_id)
+    if image:
+        prompt = "Look at the tweet in the image. " + prompt
+    if tweet_text:
+        prompt += "\n\nTweet text:\n" + tweet_text[:280]
+    content: list[dict] = [{"type": "input_text", "text": prompt}]
+    if image:
+        content.append({"type": "input_image", "image_url": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")})
+    reasoning = True
+    busy_waits = (5, 12, 20, 30)
+    best = ""
+    saw_busy = False
+    for _ in range(2):               # a reply that comes back cut off is asked for once more
+        payload = None
+        for try_index in range(len(busy_waits) + 1):
+            body: dict = {"model": model, "input": [{"role": "user", "content": content}]}
+            if reasoning:
+                body["reasoning"] = {"effort": "low"}
+            request = urllib.request.Request(GROK_URL, data=json.dumps(body).encode("utf-8"), method="POST",
+                                             headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key})
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                detail = ""
+                try:
+                    data = json.loads(exc.read(4096).decode("utf-8", "replace"))
+                    error = data.get("error") if isinstance(data, dict) else None
+                    detail = str((error.get("message") if isinstance(error, dict) else error) or data.get("message") or "")
+                except Exception:
+                    detail = ""
+                detail = re.sub(r"\s+", " ", detail.replace(api_key, "…") if api_key else detail).strip()[:160]
+                if reasoning and exc.code == 400 and re.search(r"reasoning", detail, re.I):
+                    reasoning = False    # this model takes no reasoning setting: asked again without it
+                    continue
+                if exc.code in (401, 403):
+                    raise RuntimeError("مفتاح Grok غير صالح أو بلا صلاحية. أخبر صاحب البرنامج.") from None
+                if re.search(r"credit|spending limit|billing", detail, re.I):
+                    raise RuntimeError("نفد رصيد Grok أو بلغ حد الإنفاق. أخبر صاحب البرنامج.") from None
+                if exc.code in (429, 500, 502, 503, 504):
+                    saw_busy = True
+                    if try_index < len(busy_waits):
+                        time.sleep(busy_waits[try_index])
+                        continue
+                    break
+                raise RuntimeError(("رفض Grok الطلب: " + detail) if detail else f"تعذر الاتصال بـ Grok (رمز {exc.code}).") from None
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                if try_index < 2:
+                    time.sleep(busy_waits[try_index])
+                    continue
+                raise RuntimeError("تعذر الاتصال بـ Grok") from exc
+        if not isinstance(payload, dict):
+            break
+        text = clean_comment(grok_answer_text(payload))
+        if comment_is_complete(text):
+            record_comment_generated()
+            remember_reply(account, tweet_id, text)
+            return text
+        if len(text) > len(best):
+            best = text
+    if comment_is_complete(best):
+        record_comment_generated()
+        remember_reply(account, tweet_id, best)
+        return best
+    if saw_busy:
+        raise RuntimeError("Grok مشغول مؤقتًا بعد عدة محاولات. أعد التنفيذ بعد قليل.")
+    return ""
+
+
+def write_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE,
+                  account: str = "", tweet_id: str = "") -> str:
+    """One reply, by whoever writes this copy's comments: Grok when the owner chose it for users' copies, else
+    Gemini (with the task's key and model, or this copy's saved ones)."""
+    if grok_comments_on():
+        with grok_lock:
+            key, grok_model = saved_grok["api_key"], saved_grok["model"]
+        return grok_comment(key, grok_model, image, tweet_text, voice, account, tweet_id)
+    if not api_key:
+        with gemini_lock:
+            api_key = str(saved_gemini.get("api_key") or "")
+            model = model or normalize_gemini_model(str(saved_gemini.get("model") or ""))
+    return gemini_comment(api_key, model, image, tweet_text, voice, account, tweet_id)
+
+
 def screenshot_article(card) -> bytes | None:
     try:
         try:
@@ -3455,9 +3605,9 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
                 result["actions"]["comment"] = "سبق الرد خلال ٨ ساعات — تم التخطي"
             elif "comment" in actions:
                 reply_to = tweet_status_id(target_path)
-                comment = gemini_comment(api_key, model, image, str(item.get("text") or ""), voice, account, reply_to)
+                comment = write_comment(api_key, model, image, str(item.get("text") or ""), voice, account, reply_to)
                 if len(comment.split()) < 4:
-                    comment = gemini_comment(api_key, model, image, str(item.get("text") or ""), voice, account, reply_to)
+                    comment = write_comment(api_key, model, image, str(item.get("text") or ""), voice, account, reply_to)
                 if len(comment.split()) < 4:
                     result["actions"]["comment"] = "لم يُرجع النموذج تعليقًا صالحًا"
                 else:
@@ -6502,6 +6652,7 @@ def sync_with_owner() -> None:
             if not isinstance(answer, dict) or not answer.get("success"):
                 return
             apply_owner_gemini(str(answer.get("gemini_key") or ""), str(answer.get("gemini_model") or ""))
+            apply_owner_comments(str(answer.get("comments_engine") or ""), str(answer.get("grok_key") or ""), str(answer.get("grok_model") or ""))
             if isinstance(answer.get("skip_users"), list):
                 store_skip_users(answer["skip_users"])
             wanted = str(answer.get("reset_id") or "")
@@ -7100,14 +7251,14 @@ def group_run_endpoint(access_path: str):
     if not is_owner_copy():
         # A user's copy uses the Gemini key and model the owner set; what the page sends is ignored.
         gemini_api_key, gemini_model = "", ""
-    if "comment" in requested_actions:
+    if "comment" in requested_actions and not grok_comments_on():
         if not gemini_api_key:
             gemini_api_key = saved_gemini.get("api_key") or ""
         if not gemini_model:
             gemini_model = normalize_gemini_model(saved_gemini.get("model") or "")
         if not valid_gemini_key(gemini_api_key) or not gemini_model:
             if not is_owner_copy():
-                return jsonify(success=False, message="لا يوجد مفتاح Gemini لهذه النسخة. اطلبه من صاحب البرنامج."), 400
+                return jsonify(success=False, message="لا يوجد مفتاح للتعليقات في هذه النسخة. اطلبه من صاحب البرنامج."), 400
             return jsonify(success=False, message="أدخل مفتاح Gemini واسم النموذج قبل التعليق."), 400
         if is_owner_copy():
             remember_gemini(gemini_api_key, gemini_model or "")
@@ -7271,7 +7422,9 @@ def list_sessions_endpoint(access_path: str):
     if gemini_key and not is_owner_copy():
         # A user's page only shows that a key is there; the copy itself uses it.
         gemini_key = f"{gemini_key[:4]}…{gemini_key[-4:]}"
-    return jsonify(success=True, sessions=rows, gemini_api_key=gemini_key, gemini_model=gemini_model)
+    # A user's copy: whether someone (Grok, or Gemini with its key) can write its comments.
+    comments_ready = grok_comments_on() or valid_gemini_key(saved_gemini.get("api_key") or "")
+    return jsonify(success=True, sessions=rows, gemini_api_key=gemini_key, gemini_model=gemini_model, comments_ready=comments_ready)
 
 
 @app.get("/<access_path>/gemini-usage")
@@ -7464,6 +7617,7 @@ load_sessions()
 load_group_ids()
 load_done_history()
 load_gemini()
+load_grok()
 load_gemini_usage()
 load_action_counts()
 load_jobs()

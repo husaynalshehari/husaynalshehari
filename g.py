@@ -43,7 +43,12 @@ app.config.update(
 store_lock = threading.Lock()
 store: dict = {"password_hash": "", "password_salt": "", "address": "", "users": [], "published_version": "",
                # The totals since the beginning of users that were deleted, so the overall total stays whole.
-               "removed": {"comments": 0, "cost": 0.0}}
+               "removed": {"comments": 0, "cost": 0.0},
+               # Who writes users' comments: "gemini" (each user's Gemini key, set in «إدارة») or "grok" (the
+               # owner's Grok key and model below, sent to users' copies while Grok is the one).
+               "comments_engine": "gemini", "grok_key": "", "grok_model": ""}
+# The Grok model used when none is set.
+GROK_DEFAULT_MODEL = "grok-4.3"
 attempts: dict[str, deque[float]] = defaultdict(deque)
 attempts_lock = threading.Lock()
 
@@ -123,6 +128,9 @@ def load_store() -> None:
                 "comments": count_or_none(removed.get("comments"), int) or 0,
                 "cost": count_or_none(removed.get("cost"), float) or 0.0,
             },
+            "comments_engine": "grok" if loaded.get("comments_engine") == "grok" and loaded.get("grok_key") else "gemini",
+            "grok_key": str(loaded.get("grok_key") or ""),
+            "grok_model": str(loaded.get("grok_model") or ""),
         })
 
 
@@ -262,6 +270,9 @@ def state_payload() -> dict:
             "program_found": PROGRAM_PATH.is_file(),
             "program": PROGRAM_PATH.name,
             "skip_users": read_skip_users(),
+            "comments_engine": store["comments_engine"],
+            "grok_key": f"{store['grok_key'][:4]}…{store['grok_key'][-4:]}" if store["grok_key"] else "",
+            "grok_model": store["grok_model"] or GROK_DEFAULT_MODEL,
         }
 
 
@@ -355,6 +366,31 @@ def control_change():
             save_store_unlocked()
         elif action == "skip_users":
             write_skip_users(data.get("users"))
+        elif action == "grok_key":
+            # The key (when typed) and the model (when typed; empty: the default).
+            api_key = str(data.get("api_key") or "").strip()
+            model = str(data.get("model") or "").strip().lower()
+            if api_key and not re.fullmatch(r"[A-Za-z0-9_\-]{20,256}", api_key):
+                return jsonify(success=False, message="صيغة مفتاح Grok غير صالحة."), 400
+            if model and not re.fullmatch(r"[a-z0-9][a-z0-9.\-]{1,60}", model):
+                return jsonify(success=False, message="اسم نموذج Grok غير صالح."), 400
+            if not api_key and not store["grok_key"]:
+                return jsonify(success=False, message="الصق مفتاح Grok."), 400
+            if api_key:
+                store["grok_key"] = api_key
+            store["grok_model"] = "" if model == GROK_DEFAULT_MODEL else model
+            save_store_unlocked()
+        elif action == "grok_key_delete":
+            store.update(grok_key="", grok_model="", comments_engine="gemini")
+            save_store_unlocked()
+        elif action == "comments_engine":
+            engine = str(data.get("engine") or "")
+            if engine not in ("gemini", "grok"):
+                return jsonify(success=False, message="اختر Gemini أو Grok."), 400
+            if engine == "grok" and not store["grok_key"]:
+                return jsonify(success=False, message="احفظ مفتاح Grok أولًا."), 400
+            store["comments_engine"] = engine
+            save_store_unlocked()
         elif action == "add":
             name = re.sub(r"\s+", " ", str(data.get("name") or "")).strip()[:40]
             if not name:
@@ -507,7 +543,11 @@ def user_sync():
                 "total_cost": round(total_cost, 6) if total_cost is not None else None,
             }
             save_store_unlocked()
-            answer = {"success": True, "gemini_key": user["gemini_key"], "gemini_model": user["gemini_model"], "reset_id": user["reset_id"], "skip_users": read_skip_users()}
+            grok = store["comments_engine"] == "grok" and bool(store["grok_key"])
+            answer = {"success": True, "gemini_key": user["gemini_key"], "gemini_model": user["gemini_model"], "reset_id": user["reset_id"], "skip_users": read_skip_users(),
+                      # Who writes this copy's comments; Grok's key only while Grok is the one.
+                      "comments_engine": "grok" if grok else "gemini", "grok_key": store["grok_key"] if grok else "",
+                      "grok_model": (store["grok_model"] or GROK_DEFAULT_MODEL) if grok else ""}
     if not ready:
         return jsonify(success=False, message="غير متاح الآن."), 404
     if not user:
@@ -648,7 +688,12 @@ PAGE = r'''<!doctype html>
     .tile small { display: block; color: var(--muted); font-size: 11px; }
     .manage .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .manage .close { width: 100%; margin-top: 14px; }
-    #manage-key, #manage-model { direction: ltr; text-align: start; }
+    #manage-key, #manage-model, #grok-key, #grok-model { direction: ltr; text-align: start; }
+    .engine { display: flex; gap: 6px; }
+    .engine button { flex: 1; }
+    .engine button[aria-checked="true"] { background: var(--pine); color: #fff; box-shadow: none; }
+    .grok-model-row { margin-top: 6px; }
+    .drop { color: var(--clay); }
   </style>
 </head>
 <body>
@@ -712,8 +757,29 @@ PAGE = r'''<!doctype html>
       <p class="hint">تغريدات هذه الحسابات لا تُفتح ولا يُتفاعل معها في أي نسخة، ولا تظهر في النتيجة. تصل القائمة لكل مستخدم خلال دقيقتين. أكثر من حساب بفاصلة.</p>
       <p id="skip-now" class="hint"></p>
     </section>
+    <section id="engine-part" class="sheet" hidden>
+      <label>التعليقات عند المستخدمين</label>
+      <div class="engine" role="radiogroup" aria-label="من يكتب التعليقات">
+        <button id="engine-gemini" type="button" role="radio" data-engine="gemini">Gemini</button>
+        <button id="engine-grok" type="button" role="radio" data-engine="grok">Grok</button>
+      </div>
+      <p id="engine-now" class="hint"></p>
+      <label for="grok-key">مفتاح Grok</label>
+      <div class="row">
+        <input id="grok-key" type="password" autocomplete="off" spellcheck="false" placeholder="xai-…">
+        <button id="grok-save" type="button">حفظ</button>
+      </div>
+      <div class="row grok-model-row">
+        <input id="grok-model" type="text" autocomplete="off" spellcheck="false" maxlength="62" aria-label="نموذج Grok" placeholder="grok-4.3">
+      </div>
+      <p id="grok-now" class="hint"></p>
+      <div class="row" id="grok-drop-row" hidden>
+        <button id="grok-delete" type="button" class="drop">حذف مفتاح Grok</button>
+      </div>
+      <p class="hint">المفعّل منهما يكتب تعليقات كل المستخدمين، ويصلهم خلال دقيقتين. Gemini: بمفتاح كل مستخدم في «إدارة». Grok: بهذا المفتاح لكل المستخدمين، ويُرسل لنسخهم ما دام مفعّلًا. نسختك أنت تبقى على مفتاحها.</p>
+    </section>
     <section id="totals-part" class="sheet" hidden>
-      <label>تكلفة Gemini لكل المستخدمين</label>
+      <label>تكلفة التعليقات لكل المستخدمين</label>
       <div class="totals">
         <div class="tile"><span>الحالية (منذ آخر تصفير)</span><b id="sum-cost"></b><small id="sum-cost-note"></small></div>
         <div class="tile"><span>الكلية من البداية</span><b id="sum-total"></b><small id="sum-total-note"></small></div>
@@ -789,6 +855,17 @@ PAGE = r'''<!doctype html>
       document.getElementById("users-part").hidden = !data.password_set;
       document.getElementById("publish-part").hidden = !data.password_set;
       document.getElementById("skip-part").hidden = !data.password_set;
+      document.getElementById("engine-part").hidden = !data.password_set;
+      for (const button of document.querySelectorAll(".engine button")) {
+        button.setAttribute("aria-checked", String(button.dataset.engine === data.comments_engine));
+      }
+      document.getElementById("engine-now").textContent = data.comments_engine === "grok"
+        ? "مفعّل: Grok (" + data.grok_model + ") لتعليقات كل المستخدمين."
+        : "مفعّل: Gemini لتعليقات كل المستخدمين.";
+      document.getElementById("grok-now").textContent = data.grok_key ? "المفتاح المحفوظ: " + data.grok_key + " · " + data.grok_model : "لا يوجد مفتاح Grok.";
+      document.getElementById("grok-drop-row").hidden = !data.grok_key;
+      const grokModel = document.getElementById("grok-model");
+      if (document.activeElement !== grokModel) grokModel.value = data.grok_key ? data.grok_model : "";
       const totals = data.totals || {};
       document.getElementById("totals-part").hidden = !data.password_set;
       document.getElementById("sum-cost").textContent = "$" + Number(totals.cost || 0).toFixed(3);
@@ -960,6 +1037,22 @@ PAGE = r'''<!doctype html>
     });
     document.getElementById("address-save").addEventListener("click", () => {
       change({action: "address", address: address.value.trim()}, "حُفظ العنوان.");
+    });
+    for (const button of document.querySelectorAll(".engine button")) {
+      button.addEventListener("click", () => {
+        if (button.getAttribute("aria-checked") === "true") return;
+        const engine = button.dataset.engine;
+        change({action: "comments_engine", engine}, "فُعّل " + (engine === "grok" ? "Grok" : "Gemini") + " لتعليقات المستخدمين. يصلهم خلال دقيقتين.");
+      });
+    }
+    document.getElementById("grok-save").addEventListener("click", async () => {
+      const field = document.getElementById("grok-key");
+      const model = document.getElementById("grok-model");
+      if (await change({action: "grok_key", api_key: field.value.trim(), model: model.value.trim()}, "حُفظ مفتاح Grok.")) field.value = "";
+    });
+    document.getElementById("grok-delete").addEventListener("click", async () => {
+      if (!window.confirm("حذف مفتاح Grok؟ تعود تعليقات المستخدمين إلى Gemini.")) return;
+      await change({action: "grok_key_delete"}, "حُذف مفتاح Grok، وعادت التعليقات إلى Gemini.");
     });
     document.getElementById("skip-save").addEventListener("click", () => {
       change({action: "skip_users", users: document.getElementById("skip-users").value}, "حُفظت الحسابات المتجاهَلة.");
