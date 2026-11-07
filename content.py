@@ -87,6 +87,16 @@ GENERATE_DIFFERENT = (
 )
 # How many posts one «إرسال إلى Gemini» makes (offered on the page; the first is the default).
 GENERATE_COUNTS = (3, 2, 1)
+# The page on users' copies: one model, always «تفكير عميق», and no model named or to choose.
+USERS_MODEL = "gemini-nano-banana-2.1"
+# What that page says instead of the messages that name or offer another model ("" leaves a note out).
+USERS_WORDING = (
+    ("هذا النموذج غير متاح لمفتاح Gemini المحفوظ. اختر نموذجًا آخر.", "التوليد غير متاح الآن لمفتاح Gemini. أخبر صاحب البرنامج."),
+    (" أو اختر نموذجًا آخر", ""),
+    (" أو اختر نموذجًا أسرع", ""),
+    ("جرّب تغريدة أو نموذجًا آخر.", "جرّب تغريدة أخرى."),
+    ("هذا النموذج لا يقبل «تفكير عميق»، يكمل بدونه…", ""),
+)
 # The day a user's copy counts its posts in (see posts_per_day in attach): Saudi time, UTC+3.
 DAY_OFFSET_SECONDS = 3 * 3600
 # The pasted tweets are read through FxTwitter's free API, at most this many at once.
@@ -351,6 +361,16 @@ def attach(app, access_path: str, tools) -> dict:
     """
     # On a user's copy, the posts it may make in one day (Saudi time); None or 0 on the owner's: no limit.
     posts_per_day = getattr(tools, "posts_per_day", None)
+    # Users' copies (the only ones given posts_per_day) have the users' page: Nano Banana 2.1, always
+    # thinking deeply, no model named, «بصيغة أنا» the only choice.
+    users_page = bool(posts_per_day)
+
+    def worded(message: str) -> str:
+        """A message as this page says it (on the users' page: no model to name or to choose)."""
+        if users_page:
+            for old, new in USERS_WORDING:
+                message = message.replace(old, new)
+        return message
     tweets_part = getattr(tools, "tweets_part", None)
     # The generated posts' folder (kept where it was, so the posts made before stay listed), one
     # generation at a time (each is paid for), and how the last one is going.
@@ -421,7 +441,7 @@ def attach(app, access_path: str, tools) -> dict:
                 # The rest of the page still works without them.
                 app.logger.warning("content page: the collected tweets could not be shown", exc_info=True)
         return render_template_string(PAGE, csrf_token=csrf_token, api_root="/" + access_path, panel="/" + access_path, models=GENERATE_MODELS,
-                                      counts=GENERATE_COUNTS, tweets=tweets, limit=allowance())
+                                      counts=GENERATE_COUNTS, tweets=tweets, limit=allowance(), users_page=users_page)
 
     def link_parts(model: str, tweets: list[dict], first_person: bool = False) -> tuple[list[dict], dict]:
         """The request made of the pasted tweets: the prompt, then each tweet's text and photos."""
@@ -532,10 +552,13 @@ def attach(app, access_path: str, tools) -> dict:
                 step = f"المنشور {number} من {count}" if count > 1 else ""
 
                 def progress(message: str, step=step) -> None:
-                    link_job.update(status="running", message=f"{step}: {message}" if step else message)
+                    message = worded(message)
+                    if message:
+                        link_job.update(status="running", message=f"{step}: {message}" if step else message)
 
                 thought = " بتفكير عميق" if deep and model not in thinking_refused else ""
-                link_job.update(status="running", message=f"جارٍ توليد {step or 'المنشور'} بـ {label}{thought}… {sent}. قد يستغرق دقيقة أو أكثر.")
+                by = "" if users_page else f" بـ {label}{thought}"
+                link_job.update(status="running", message=f"جارٍ توليد {step or 'المنشور'}{by}… {sent}. قد يستغرق دقيقة أو أكثر.")
                 try:
                     text, pictures = generate_link_one(api_key, model, parts, made, progress, deep)
                 except GenerateError as exc:
@@ -550,14 +573,14 @@ def attach(app, access_path: str, tools) -> dict:
             if len(made) == count:
                 link_job.update(status="done", message="اكتمل التوليد: " + {1: "منشور واحد.", 2: "منشوران."}.get(count, f"{count} منشورات."))
             elif made:
-                link_job.update(status="done", message=f"اكتمل {len(made)} من {count}. لم يكتمل الباقي: {problem}")
+                link_job.update(status="done", message=worded(f"اكتمل {len(made)} من {count}. لم يكتمل الباقي: {problem}"))
             elif last is not None and last.fatal:
-                link_job.update(status="failed", message=str(last))
+                link_job.update(status="failed", message=worded(str(last)))
             else:
                 before = "لم يكتمل أي منشور. " if count > 1 else ""
-                link_job.update(status="failed", message=f"{before}{problem} جرّب تغريدة أو نموذجًا آخر.")
+                link_job.update(status="failed", message=worded(f"{before}{problem} جرّب تغريدة أو نموذجًا آخر."))
         except GenerateError as exc:
-            link_job.update(status="failed", message=str(exc))
+            link_job.update(status="failed", message=worded(str(exc)))
         except Exception:
             link_job.update(status="failed", message="تعذّر التوليد.")
         finally:
@@ -574,7 +597,7 @@ def attach(app, access_path: str, tools) -> dict:
             return jsonify(success=False, message="الصق رابط تغريدة، مثل https://x.com/user/status/123…"), 400
         if len(status_ids) > LINK_MAX_TWEETS:
             return jsonify(success=False, message=f"الحد الأقصى {LINK_MAX_TWEETS} تغريدات في المرة الواحدة."), 400
-        model = str(data.get("model") or "")
+        model = USERS_MODEL if users_page else str(data.get("model") or "")
         if model not in GENERATE_MODELS:
             return jsonify(success=False, message="اختر نموذج Gemini."), 400
         try:
@@ -599,7 +622,7 @@ def attach(app, access_path: str, tools) -> dict:
             count = min(count, quota["left"])
         link_job.clear()
         link_job.update(status="running", message="جارٍ قراءة التغريدة…")
-        deep = bool(data.get("deep"))
+        deep = users_page or bool(data.get("deep"))
         first_person = bool(data.get("first_person"))
         threading.Thread(target=run_link_generation, args=(api_key, status_ids, model, count, deep, first_person),
                          name="content-link-generate", daemon=True).start()
@@ -815,6 +838,7 @@ PAGE = r'''<!doctype html>
       <div class="row">
         <input id="link" type="text" maxlength="2000" autocomplete="off" spellcheck="false" placeholder="https://x.com/user/status/123…" aria-label="رابط التغريدة">
       </div>
+      {%- if not users_page %}
       <div class="gen-row">
         <select id="link-model" aria-label="نموذج Gemini">
           {%- for id, model in models.items() %}
@@ -823,6 +847,7 @@ PAGE = r'''<!doctype html>
         </select>
       </div>
       <label class="gen-option"><input id="link-deep" type="checkbox"><b>تفكير عميق</b><span>يفكر أطول قبل أن يكتب · أبطأ وأغلى قليلًا</span></label>
+      {%- endif %}
       <label class="gen-option"><input id="link-me" type="checkbox"><b>بصيغة أنا</b><span>النص بصيغة المتكلم: شفت، جربت، طلبت</span></label>
       <div class="gen-row">
         {%- if not limit %}
@@ -862,6 +887,8 @@ PAGE = r'''<!doctype html>
     const apiRoot = {{ api_root|tojson }};
     const csrf = {{ csrf_token|tojson }};
     const MODELS = {{ models|tojson }};
+    // The users' page: no model named (and «تفكير عميق» always on, so not said).
+    const USERS_PAGE = {{ users_page|tojson }};
     // A count in Arabic: one, two, 3 to 10, and 11 or more take different words.
     const plural = (n, one, two, few, many) => n === 1 ? one : n === 2 ? two : n + " " + (n % 100 >= 3 && n % 100 <= 10 ? few : many);
 
@@ -879,10 +906,13 @@ PAGE = r'''<!doctype html>
       }
       const meta = document.createElement("span");
       const made = (result.posts || []).length;
-      meta.textContent = ((MODELS[result.model] || {}).label || result.model)
-        + " · " + new Date(result.created_at * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"})
-        + " · من " + (result.links ? plural(made, "تغريدة واحدة", "تغريدتين", "تغريدات", "تغريدة") : plural(made, "منشور واحد", "منشورين", "منشورات", "منشورًا"))
-        + (result.deep ? " · تفكير عميق" : "") + (result.first_person ? " · بصيغة أنا" : "");
+      meta.textContent = [
+        USERS_PAGE ? "" : (MODELS[result.model] || {}).label || result.model,
+        new Date(result.created_at * 1000).toLocaleString("ar", {dateStyle: "medium", timeStyle: "short"}),
+        "من " + (result.links ? plural(made, "تغريدة واحدة", "تغريدتين", "تغريدات", "تغريدة") : plural(made, "منشور واحد", "منشورين", "منشورات", "منشورًا")),
+        result.deep && !USERS_PAGE ? "تفكير عميق" : "",
+        result.first_person ? "بصيغة أنا" : "",
+      ].filter(Boolean).join(" · ");
       head.append(meta);
       const text = document.createElement("p");
       text.className = "gen-text";
@@ -1027,7 +1057,8 @@ PAGE = r'''<!doctype html>
           method: "POST",
           headers: {"Content-Type": "application/json"},
           cache: "no-store",
-          body: JSON.stringify({csrf_token: csrf, links, model: linkModel.value, count: linkCount ? Number(linkCount.value) : 1, deep: linkDeep.checked,
+          body: JSON.stringify({csrf_token: csrf, links, model: linkModel ? linkModel.value : "", count: linkCount ? Number(linkCount.value) : 1,
+                               deep: Boolean(linkDeep && linkDeep.checked),
                                first_person: linkMe.checked})
         });
         data = await response.json();
@@ -1048,24 +1079,26 @@ PAGE = r'''<!doctype html>
     // The model, count, «تفكير عميق» and «بصيغة أنا» chosen last, remembered on this browser.
     try {
       const savedModel = localStorage.getItem("content-generate-model");
-      if (savedModel && MODELS[savedModel]) linkModel.value = savedModel;
+      if (linkModel && savedModel && MODELS[savedModel]) linkModel.value = savedModel;
       const savedCount = localStorage.getItem("content-generate-count");
       if (linkCount && savedCount && [...linkCount.options].some((option) => option.value === savedCount)) linkCount.value = savedCount;
-      linkDeep.checked = localStorage.getItem("content-generate-deep") === "1";
+      if (linkDeep) linkDeep.checked = localStorage.getItem("content-generate-deep") === "1";
       linkMe.checked = localStorage.getItem("content-generate-first-person") === "1";
     } catch (_) {}
-    for (const [box, key] of [[linkDeep, "content-generate-deep"], [linkMe, "content-generate-first-person"]]) {
+    for (const [box, key] of [[linkDeep, "content-generate-deep"], [linkMe, "content-generate-first-person"]].filter(([box]) => box)) {
       box.addEventListener("change", () => {
         try {
           localStorage.setItem(key, box.checked ? "1" : "0");
         } catch (_) {}
       });
     }
-    linkModel.addEventListener("change", () => {
-      try {
-        localStorage.setItem("content-generate-model", linkModel.value);
-      } catch (_) {}
-    });
+    if (linkModel) {
+      linkModel.addEventListener("change", () => {
+        try {
+          localStorage.setItem("content-generate-model", linkModel.value);
+        } catch (_) {}
+      });
+    }
     if (linkCount) {
       linkCount.addEventListener("change", () => {
         try {
