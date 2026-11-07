@@ -479,7 +479,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .voices .choice { min-height: 26px; padding: 0 7px; gap: 4px; border-radius: 7px; }
     .voices .choice input { width: 13px; height: 13px; }
     .voices .choice-title { font-size: 12px; }
-    #show-gemini { height: 26px; min-height: 26px; padding: 0 7px; }
+    #show-gemini, #show-grok { height: 26px; min-height: 26px; padding: 0 7px; }
+    .grok-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .grok-now { color: var(--muted); font-size: 12px; line-height: 1.5; }
     .gemini-fields .field-label { margin-top: 0; }
     .gemini-edit { height: 32px; min-height: 32px; padding: 0 8px; font-size: 12px; }
     .gemini-owner { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; }
@@ -845,7 +847,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
               <label class="choice"><input type="radio" name="reply-voice" value="neutral"><span class="choice-title">عام</span></label>
             </div>
             {% if owner_copy %}<button id="show-gemini" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Gemini</button>
-            <span id="comments-by-grok" class="engine-note" hidden>التعليقات بواسطة Grok، كما اخترت للمستخدمين في «توزيع البرنامج».</span>{% endif %}
+            {% if grok_here %}<button id="show-grok" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Grok</button>
+            <span id="comments-by-grok" class="engine-note" hidden>التعليقات بواسطة Grok، بالمفتاح المحفوظ في «مفتاح Grok».</span>
+            {% else %}<span id="comments-by-grok" class="engine-note" hidden>التعليقات بواسطة Grok، كما اخترت للمستخدمين في «توزيع البرنامج».</span>{% endif %}{% endif %}
           </div>
           <div id="gemini-fields" class="gemini-fields" hidden>
             {% if not owner_copy %}<p class="gemini-owner">يضبط صاحب البرنامج مفتاح التعليقات ونموذجها.</p>{% endif %}
@@ -864,6 +868,21 @@ EMBEDDED_PAGE = r'''<!doctype html>
             </div>
             <p class="hint">يُحفظ المفتاح واسم النموذج على هذا الخادم بعد أول إدخال، ويظهران تلقائيًا حتى بعد إغلاق الصفحة أو إعادة تشغيل السكربت.</p>
           </div>
+          {% if grok_here %}<div id="grok-fields" class="gemini-fields" hidden>
+            <div>
+              <label class="field-label" for="grok-key">مفتاح Grok</label>
+              <input id="grok-key" type="password" maxlength="256" autocomplete="off" spellcheck="false" placeholder="المفتاح" aria-label="مفتاح Grok API">
+            </div>
+            <div>
+              <label class="field-label" for="grok-model">النموذج</label>
+              <input id="grok-model" type="text" maxlength="60" autocomplete="off" spellcheck="false" value="grok-4.3" placeholder="grok-4.3" aria-label="نموذج Grok">
+            </div>
+            <div class="grok-actions">
+              <button id="save-grok" class="btn btn-ghost gemini-edit" type="button">حفظ</button>
+              <button id="delete-grok" class="btn btn-ghost gemini-edit" type="button" hidden>حذف</button>
+              <span id="grok-now" class="grok-now">بدون مفتاح Grok تُكتب التعليقات بواسطة Gemini.</span>
+            </div>
+          </div>{% endif %}
           <div id="gemini-usage" class="gemini-usage" aria-live="polite">
             <span id="gemini-usage-text">التعليقات (0)</span>
             <span id="gemini-cost" class="gemini-cost">التكلفة (<bdi id="gemini-cost-value" dir="ltr">$0.000</bdi>)</span>
@@ -1066,6 +1085,19 @@ EMBEDDED_PAGE = r'''<!doctype html>
   function showCommentsEngine(engine) {
     commentsByGrok = engine === "grok";
     if (engineNote) engineNote.hidden = !commentsByGrok;
+  }
+  // A copy with no «توزيع البرنامج»: its own «مفتاح Grok», typed here, writes its comments when saved.
+  const grokFields = document.getElementById("grok-fields");
+  const showGrok = document.getElementById("show-grok");
+  function showOwnGrok(data) {
+    if (!grokFields) return;
+    const saved = data.grok_key || "";
+    document.getElementById("grok-now").textContent = saved
+      ? "محفوظ: " + saved + " · " + (data.grok_model || "") + " — التعليقات بواسطة Grok."
+      : "بدون مفتاح Grok تُكتب التعليقات بواسطة Gemini.";
+    document.getElementById("delete-grok").hidden = !saved;
+    const grokModel = document.getElementById("grok-model");
+    if (data.grok_model && document.activeElement !== grokModel) grokModel.value = data.grok_model;
   }
   function lockGemini(locked) {
     geminiKey.readOnly = locked;
@@ -1458,6 +1490,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       sessionRows = data.sessions || [];
       renderSessions();
       showCommentsEngine(data.comments_engine);
+      showOwnGrok(data);
       if (geminiByOwner) {
         geminiKey.value = data.gemini_api_key || "";
         geminiModel.value = data.gemini_model || "";
@@ -1517,7 +1550,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
 
   function syncGemini() {
     replyVoice.hidden = !commentToggle.checked;
-    if (!commentToggle.checked) openGemini(false);
+    if (!commentToggle.checked) {
+      openGemini(false);
+      if (grokFields) { grokFields.hidden = true; showGrok.setAttribute("aria-expanded", "false"); }
+    }
   }
 
   function openGemini(open) {
@@ -1686,6 +1722,41 @@ EMBEDDED_PAGE = r'''<!doctype html>
 
   commentToggle.addEventListener("change", syncGemini);
   if (showGemini) showGemini.addEventListener("click", () => openGemini(geminiFields.hidden));
+  if (grokFields) {
+    const grokKey = document.getElementById("grok-key");
+    const grokModel = document.getElementById("grok-model");
+    showGrok.addEventListener("click", () => {
+      grokFields.hidden = !grokFields.hidden;
+      showGrok.setAttribute("aria-expanded", grokFields.hidden ? "false" : "true");
+      if (!grokFields.hidden) grokKey.focus();
+    });
+    document.getElementById("save-grok").addEventListener("click", async () => {
+      try {
+        const data = await postJson("/grok", {api_key: grokKey.value.trim(), model: grokModel.value.trim()});
+        showNotice(data.message || "تعذّر حفظ مفتاح Grok.", Boolean(data.success));
+        if (data.success) {
+          grokKey.value = "";
+          showOwnGrok(data);
+          showCommentsEngine(data.comments_engine);
+        }
+      } catch (_) {
+        showNotice("تعذّر حفظ مفتاح Grok.", false);
+      }
+    });
+    document.getElementById("delete-grok").addEventListener("click", async () => {
+      if (!window.confirm("حذف مفتاح Grok؟ تعود التعليقات إلى Gemini.")) return;
+      try {
+        const data = await postJson("/grok/delete", {});
+        showNotice(data.message || "تعذّر حذف مفتاح Grok.", Boolean(data.success));
+        if (data.success) {
+          showOwnGrok(data);
+          showCommentsEngine(data.comments_engine);
+        }
+      } catch (_) {
+        showNotice("تعذّر حذف مفتاح Grok.", false);
+      }
+    });
+  }
   // The reply's voice chosen last time, on this browser ("_v2": a choice made before «مذكر» became the
   // default is not restored).
   try {
@@ -3170,8 +3241,9 @@ def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
 
 # Comments by Grok (xAI), when the owner chooses it in «توزيع البرنامج»: for users' copies, its key and model
 # come with each check-in (kept in memory only); the owner's own copy follows the same choice, with the key
-# and model saved there. Each comment is asked with the same prompt as Gemini's, through xAI's Responses
-# API, with the tweet's picture.
+# and model saved there. A copy of the script with no «توزيع البرنامج» (no g.py beside it) has its own
+# «مفتاح Grok» in its panel instead, kept sealed in data/grok.json, and needs nothing else. Each comment is
+# asked with the same prompt as Gemini's, through xAI's Responses API, with the tweet's picture.
 GROK_URL = "https://api.x.ai/v1/responses"
 GROK_DEFAULT_MODEL = "grok-4.3"             # (as in g.py: the model when none is set there)
 GROK_PATH = DATA_DIR / "grok.json"
@@ -3193,14 +3265,51 @@ def valid_grok_model(value: str) -> bool:
 
 
 def load_grok() -> None:
-    """Grok's key is kept in memory only, from the copy's check-ins, never on its disk: a file from before
-    (data/grok.json, which held it) is removed, and the copy starts with Gemini until its first check-in."""
+    """A user's copy keeps Grok's key in memory only, from its check-ins, never on its disk: a file from before
+    (data/grok.json, which held it) is removed, and the copy starts with Gemini until its first check-in.
+    The owner's copy reads back the key typed in its own panel («مفتاح Grok»), kept there sealed; any other
+    file there (a user's copy's, from before) is removed too."""
+    if is_owner_copy():
+        loaded = read_private_json(GROK_PATH) or {}
+        key = open_key(loaded.get("api_key_sealed")).strip() if loaded.get("source") == "panel" else ""
+        model = str(loaded.get("model") or "").strip().lower() or GROK_DEFAULT_MODEL
+        if valid_grok_key(key) and valid_grok_model(model):
+            with grok_lock:
+                saved_grok.update(engine="grok", api_key=key, model=model)
+            return
     try:
         GROK_PATH.unlink()
     except OSError:
         pass
     with grok_lock:
         saved_grok.update(engine="gemini", api_key="", model="")
+
+
+def grok_typed_here() -> bool:
+    """The owner's copy with no «توزيع البرنامج» (no g.py beside it, nor what that page saved): its comments
+    are written with the Grok key typed in its own panel, when one is saved, and it needs nothing else."""
+    return (is_owner_copy() and distribution_page is None and not CONTROL_FILE.is_file()
+            and not (CONTROL_FILE.with_name("data") / "distribution.json").is_file())
+
+
+def remember_own_grok(key: str, model: str) -> None:
+    """The Grok key and model typed in this copy's panel (none: back to Gemini), kept sealed."""
+    with grok_lock:
+        saved_grok.update(engine="grok" if key else "gemini", api_key=key, model=model if key else "")
+        if key:
+            write_private_json(GROK_PATH, {"version": 3, "source": "panel", "api_key_sealed": seal_key(key), "model": model})
+        else:
+            try:
+                GROK_PATH.unlink()
+            except OSError:
+                pass
+
+
+def own_grok_shown() -> dict:
+    """What the panel shows of its own Grok key: only its first and last letters."""
+    with grok_lock:
+        key, model = saved_grok["api_key"], saved_grok["model"]
+    return {"grok_key": f"{key[:4]}…{key[-4:]}" if key else "", "grok_model": model or GROK_DEFAULT_MODEL}
 
 
 def apply_owner_comments(engine: str, key: str, model: str) -> None:
@@ -3239,9 +3348,10 @@ def owner_comments_choice() -> dict:
 def grok_settings() -> tuple[str, str]:
     """(key, model) when Grok writes this copy's comments, else ("", ""): the owner's choice in «توزيع البرنامج»,
     for users' copies (from their check-ins) and for the owner's own copy alike."""
-    if is_owner_copy():
+    if is_owner_copy() and not grok_typed_here():
         choice = owner_comments_choice()
     else:
+        # A user's copy (from its check-ins), or a copy with no «توزيع البرنامج» (the key typed in its panel).
         with grok_lock:
             choice = dict(saved_grok)
     key, model = str(choice.get("api_key") or ""), str(choice.get("model") or "")
@@ -5969,6 +6079,7 @@ def login_page(access_path: str):
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
         PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(), max_links=MAX_TWEET_LINKS,
+        grok_here=grok_typed_here(),
         content_ready=content_ready.is_set() or (CONTENT_FILE.is_file() if is_owner_copy() else bool(CONTENT_EMBEDDED)),
         tweets_in_content=content_shows_tweets,
     ))
@@ -7603,8 +7714,9 @@ def list_sessions_endpoint(access_path: str):
     engine = ("grok" if grok else "gemini") if is_owner_copy() else ""
     if not comments_ready and not is_owner_copy() and not owner_sync_state["ok"] and time.monotonic() - owner_sync_state["at"] > 5:
         threading.Thread(target=sync_with_owner, name="owner-sync", daemon=True).start()   # (no keys yet: ask now)
+    own = own_grok_shown() if grok_typed_here() else {"grok_key": "", "grok_model": ""}
     return jsonify(success=True, sessions=rows, gemini_api_key=gemini_key, gemini_model=gemini_model, comments_ready=comments_ready,
-                   comments_engine=engine)
+                   comments_engine=engine, **own)
 
 
 @app.get("/<access_path>/gemini-usage")
@@ -7674,6 +7786,43 @@ def save_gemini_endpoint(access_path: str):
         return jsonify(success=True, message="لا يوجد ما يُحفظ.")
     remember_gemini(api_key, model or "")
     return jsonify(success=True, message="حُفظ مفتاح Gemini.")
+
+
+@app.post("/<access_path>/grok")
+def save_grok_endpoint(access_path: str):
+    """«مفتاح Grok» in the panel of a copy with no «توزيع البرنامج»: saved, its comments are Grok's."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة."), 400
+    if not grok_typed_here():
+        return jsonify(success=False, message="مفتاح Grok هنا لنسخة تعمل بلا «توزيع البرنامج»."), 403
+    api_key = str(data.get("api_key") or "").strip()
+    model = str(data.get("model") or "").strip().lower() or GROK_DEFAULT_MODEL
+    with grok_lock:
+        current = saved_grok["api_key"]
+    if not api_key and not current:
+        return jsonify(success=False, message="الصق مفتاح Grok."), 400
+    if api_key and not valid_grok_key(api_key):
+        return jsonify(success=False, message="صيغة مفتاح Grok غير صالحة."), 400
+    if not valid_grok_model(model):
+        return jsonify(success=False, message="اسم نموذج Grok غير صالح."), 400
+    remember_own_grok(api_key or current, model)
+    return jsonify(success=True, message="حُفظ مفتاح Grok: التعليقات الآن بواسطة Grok.", comments_engine="grok", **own_grok_shown())
+
+
+@app.post("/<access_path>/grok/delete")
+def delete_grok_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة."), 400
+    if not grok_typed_here():
+        return jsonify(success=False, message="مفتاح Grok هنا لنسخة تعمل بلا «توزيع البرنامج»."), 403
+    remember_own_grok("", "")
+    return jsonify(success=True, message="حُذف مفتاح Grok: التعليقات بواسطة Gemini.", comments_engine="gemini", **own_grok_shown())
 
 
 @app.post("/<access_path>/sessions/pin")
