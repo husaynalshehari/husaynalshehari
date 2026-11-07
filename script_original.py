@@ -6023,15 +6023,16 @@ def collected_payload() -> list[dict]:
 # them (a test asked 140 at once, then 140 one after another, and none was refused). If the service
 # refuses (too many requests), or several tweets get no answer while none is answered, the fetching
 # waits a few minutes (longer each time), then goes on where it stopped, one tweet at a time, slowly.
-# The counts are kept with the saved tweets. Only the days from yesterday to 6 days ago can be checked
-# (today's views still grow), each once a day: after its check, its button waits for tomorrow.
+# The counts are kept with the saved tweets. Every day of the last 7 can be checked (today's too); once a
+# day is asked for, its button waits VIEWS_AGAIN_SECONDS, then it can be asked for again (all its tweets).
 FX_STATUS_URL = "https://api.fxtwitter.com/status/{}"
 FX_AT_ONCE = 10                      # tweets asked at the same time
 FX_SLOW_GAP_SECONDS = (5.0, 8.0)     # once the service has refused: one tweet at a time, this far apart
 FX_PAUSE_SECONDS = 180               # the first wait; the next ones wait 6, 9, 12 then 15 minutes
 FX_PAUSE_MAX_SECONDS = 900
 FX_MAX_PAUSES = 6                    # waits in a row with no answer between them: then it stops
-VIEWS_DAYS = (1, 6)                  # the days that can be checked: yesterday to 6 days ago (not today)
+VIEWS_DAYS = (0, 6)                  # the days that can be checked: today to 6 days ago
+VIEWS_AGAIN_SECONDS = 600            # a day asked for can be asked for again after 10 minutes
 # With its views, a tweet's content is kept: its text, its pictures (a photo, or the still of a video or
 # a GIF; from X's picture server only, at most 4) and the tweet it quotes, if any.
 TWEET_PICTURE = re.compile(r"https://pbs\.twimg\.com/[A-Za-z0-9_./-]{1,200}(?:\?[A-Za-z0-9_=&.-]{1,80})?")
@@ -6041,6 +6042,23 @@ QUOTE_BODY_MAX = 1000
 views_lock = threading.Lock()
 views_queue: deque = deque()
 views_state: dict = {"running": False, "paused_until": 0.0, "error": "", "removed": [], "slow": False}
+# The days asked for in the last VIEWS_AGAIN_SECONDS: the start of the day (in the asker's time zone) → when.
+views_asked: dict[int, float] = {}
+
+
+def recent_views_asks(now: float) -> dict[int, float]:
+    """The days still waiting after being asked for (the older ones are dropped). Call with views_lock held."""
+    for start in [start for start, at in views_asked.items() if now - at >= VIEWS_AGAIN_SECONDS]:
+        del views_asked[start]
+    return dict(views_asked)
+
+
+def minutes_text(seconds: float) -> str:
+    """«دقيقة»، «دقيقتين»، «3 دقائق»، «11 دقيقة»: the minutes, rounded up."""
+    minutes = max(1, math.ceil(seconds / 60))
+    if minutes <= 2:
+        return ("دقيقة", "دقيقتين")[minutes - 1]
+    return f"{minutes} {'دقائق' if 3 <= minutes % 100 <= 10 else 'دقيقة'}"
 
 
 def tweet_pictures(value) -> list[list[str]]:
@@ -7466,14 +7484,24 @@ TWEETS_PART_SCRIPT = r'''<script>
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
     const label = (key, when) => key === dayKey(now) ? "اليوم" : key === dayKey(yesterday) ? "أمس" : dayName.format(when);
-    // «عرض الأكثر مشاهدة» is for the days the script allows (yesterday to 6 days ago): today's views still grow.
+    // «عرض الأكثر مشاهدة» is for the days the script allows (today to 6 days ago). A day asked for waits
+    // VIEWS_AGAIN seconds (10 minutes) before it can be asked for again; VIEWS_ASKED: the days still waiting
+    // (the start of the day, in seconds → when it was asked for), in the server's time.
     const VIEWS_DAYS = {{ views_days|tojson }};
+    const VIEWS_AGAIN = {{ views_again|tojson }};
+    const VIEWS_ASKED = {{ views_asked|tojson }};
+    const skew = since - Date.now() / 1000;
+    const serverNow = () => Date.now() / 1000 + skew;
+    let lastState = null;            // how the fetching was going when the server last said
+    const minutesText = (seconds) => {
+      const minutes = Math.max(1, Math.ceil(seconds / 60));
+      return minutes === 1 ? "دقيقة" : minutes === 2 ? "دقيقتين" : minutes + (minutes % 100 >= 3 && minutes % 100 <= 10 ? " دقائق" : " دقيقة");
+    };
     const daysAgo = (key) => {
       const [year, month, date] = key.split("-").map(Number);
       return Math.round((todayStart - new Date(year, month - 1, date)) / 86400000);
     };
     const canCheck = (key) => daysAgo(key) >= VIEWS_DAYS[0] && daysAgo(key) <= VIEWS_DAYS[1];
-    const isToday = (seconds) => dayKey(new Date(seconds * 1000)) === dayKey(new Date());
     const safeLink = (url) => /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[^\s"'<>]+$/.test(url || "") ? url : "";
     const viewsText = (tweet) => !tweet.views_at ? "" : tweet.views == null ? "لا يوجد رقم" : number.format(tweet.views) + " مشاهدة";
     const showViews = (span, tweet) => {
@@ -7625,18 +7653,19 @@ TWEETS_PART_SCRIPT = r'''<script>
       }
       if (day.busy) order(day);      // just finished: sort it now (not while numbers arrive)
       day.busy = false;
-      // Once a day: when every tweet of the day has today's count, its button waits for tomorrow.
-      const today = day.items.filter((item) => item.tweet.views_at && isToday(item.tweet.views_at)).length;
-      const done = today > 0 && today === day.items.length;
-      if (day.button) day.button.disabled = done;
+      // Asked for less than 10 minutes ago: its button waits (and comes back by itself).
+      const wait = day.askedAt ? day.askedAt + VIEWS_AGAIN - serverNow() : 0;
+      if (day.button) day.button.disabled = wait > 0;
+      const counted = day.items.filter((item) => item.tweet.views_at).length;
       const last = Math.max(0, ...day.items.map((item) => item.tweet.views_at || 0));
-      if (done) {
-        status.textContent = "مرتّبة من الأكثر مشاهدة · فُحصت " + clock.format(new Date(last * 1000)) + " · يُتاح الفحص مجددًا غدًا";
-      } else if (state && state.error && day.asked) {
+      if (state && state.error && day.asked) {
         status.textContent = state.error;
         status.className = "vstatus is-bad";
-      } else if (today && day.button) {
-        status.textContent = "فُحصت " + today + " من " + day.items.length + " اليوم · اضغط «عرض الأكثر مشاهدة» ليكمل";
+      } else if (wait > 0) {
+        status.textContent = (last ? "مرتّبة من الأكثر مشاهدة · فُحصت " + clock.format(new Date(last * 1000)) + " · " : "")
+          + "يُتاح الفحص مجددًا بعد " + minutesText(wait);
+      } else if (counted && counted < day.items.length && day.button) {
+        status.textContent = "فُحصت " + counted + " من " + day.items.length + " · اضغط «عرض الأكثر مشاهدة» ليكمل";
       } else {
         status.textContent = last ? "مرتّبة من الأكثر مشاهدة · آخر فحص " + checkedAt(last) : "";
       }
@@ -7671,7 +7700,10 @@ TWEETS_PART_SCRIPT = r'''<script>
       status.className = "vstatus";
       status.hidden = true;
       const ol = document.createElement("ol");
-      Object.assign(day, {details, ol, status, button, count});
+      const [year, month, date] = day.key.split("-").map(Number);
+      // The day as the script knows it: its start, in seconds (and when it was last asked for, if lately).
+      const start = new Date(year, month - 1, date).getTime() / 1000;
+      Object.assign(day, {details, ol, status, button, count, start, askedAt: VIEWS_ASKED[String(start)] || 0});
       for (const item of day.items) {
         const li = document.createElement("li");
         const text = document.createElement("p");
@@ -7715,8 +7747,7 @@ TWEETS_PART_SCRIPT = r'''<script>
         status.className = "vstatus";
         status.textContent = "يبدأ جلب المشاهدات…";
         status.hidden = false;
-        const [year, month, date] = day.key.split("-").map(Number);
-        const range = [new Date(year, month - 1, date).getTime() / 1000, new Date(year, month - 1, date + 1).getTime() / 1000];
+        const range = [day.start, new Date(year, month - 1, date + 1).getTime() / 1000];
         let data;
         try {
           const response = await fetch(apiRoot + "/tweets/views", {
@@ -7729,11 +7760,13 @@ TWEETS_PART_SCRIPT = r'''<script>
           data = {success: false, message: "تعذّر الاتصال بالسكربت."};
         }
         if (!data.success) {
+          if (data.asked_at) day.askedAt = data.asked_at;     // asked for lately (from another page): it waits
           status.textContent = data.message || "تعذّر البدء.";
           status.className = data.done ? "vstatus" : "vstatus is-bad";
-          button.disabled = !!data.done;     // already checked today: the server refuses until tomorrow
+          button.disabled = !!data.done;
           return;
         }
+        day.askedAt = (data.asked || {})[String(day.start)] || serverNow();
         apply(data);
         follow();
       });
@@ -7767,9 +7800,15 @@ TWEETS_PART_SCRIPT = r'''<script>
         showTotal();
       }
       const state = {waiting: new Set(data.waiting || []), paused: data.paused || 0, error: data.error || "", slow: !!data.slow};
+      lastState = state;
       for (const day of list) showDay(day, state);
       return data.running || state.waiting.size > 0;
     }
+
+    // The days waiting after a check: their line counts down, and their button comes back after 10 minutes.
+    setInterval(() => {
+      for (const day of list) if (day.askedAt && !day.busy) showDay(day, lastState);
+    }, 15000);
 
     let following = false;
     async function follow() {
@@ -7837,8 +7876,11 @@ def tweets_part_values() -> dict:
     if not csrf_token:
         csrf_token = secrets.token_urlsafe(32)
         session["csrf_token"] = csrf_token
-    return {"tweets": collected_payload(), "api_root": "/" + ACCESS_PATH, "csrf_token": csrf_token, "server_now": time.time(),
-            "views_days": list(VIEWS_DAYS)}
+    now = time.time()
+    with views_lock:
+        asked = {str(start): at for start, at in recent_views_asks(now).items()}
+    return {"tweets": collected_payload(), "api_root": "/" + ACCESS_PATH, "csrf_token": csrf_token, "server_now": now,
+            "views_days": list(VIEWS_DAYS), "views_asked": asked, "views_again": VIEWS_AGAIN_SECONDS}
 
 
 def tweets_part() -> dict[str, str]:
@@ -7861,9 +7903,8 @@ def tweets_page(access_path: str):
 
 @app.post("/<access_path>/tweets/views")
 def tweets_views_start(access_path: str):
-    """«عرض الأكثر مشاهدة»: queue a day's tweets for their current view count. Only the days from yesterday
-    to 6 days ago (in the viewer's time zone), each once a day: a tweet already checked today is not asked
-    again, so a day whose tweets were all checked today waits for tomorrow."""
+    """«عرض الأكثر مشاهدة»: queue a day's tweets for their current view count. Any of the last 7 days (in
+    the viewer's time zone); a day asked for waits VIEWS_AGAIN_SECONDS before it can be asked for again."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
     data = request.get_json(silent=True) or {}
@@ -7879,21 +7920,27 @@ def tweets_views_start(access_path: str):
     now = time.time()
     today = local_day_number(now, offset)
     if any(not VIEWS_DAYS[0] <= today - local_day_number((start + end) / 2, offset) <= VIEWS_DAYS[1] for start, end in spans):
-        return jsonify(success=False, message="فحص المشاهدات متاح من أمس إلى قبل ٦ أيام فقط، وليس لتغريدات اليوم."), 400
+        return jsonify(success=False, message="فحص المشاهدات متاح لتغريدات آخر ٧ أيام فقط."), 400
+    with views_lock:
+        asked = recent_views_asks(now)
+    last = max((asked.get(int(start), 0) for start, end in spans), default=0)
+    if last:
+        return jsonify(success=False, done=True, asked_at=last,
+                       message=f"فُحص هذا اليوم قبل قليل. يُتاح الفحص مجددًا بعد {minutes_text(last + VIEWS_AGAIN_SECONDS - now)}."), 409
     with collected_lock:
         rows = [(row.get("views_at") or 0, -row["at"], status_id, row["url"]) for status_id, row in collected_tweets.items()
                 if any(start <= row["at"] < end for start, end in spans)]
     rows = [entry for entry in rows if not tweet_is_ignored(entry[3])]
     if not rows:
         return jsonify(success=False, message="لا توجد تغريدات في هذا اليوم."), 400
-    # The tweets not checked today: the never counted first (newest first), then the oldest counts.
-    # So pressing again after a stop goes on from where it stopped.
+    # All the day's tweets: the never counted first (newest first), then the oldest counts. So pressing
+    # again after a stop starts with the ones it had not reached.
     rows.sort()
-    ids = [status_id for checked, _, status_id, _ in rows if not checked or local_day_number(checked, offset) != today]
-    if not ids:
-        return jsonify(success=False, done=True, message="تم فحص هذا اليوم. يُتاح الفحص مجددًا غدًا."), 409
-    queued = queue_views(ids)
-    return jsonify(success=True, queued=queued, **views_status_payload(now))
+    queued = queue_views([status_id for checked, _, status_id, _ in rows])
+    with views_lock:
+        for start, end in spans:
+            views_asked[int(start)] = now
+    return jsonify(success=True, queued=queued, asked={str(int(start)): now for start, end in spans}, **views_status_payload(now))
 
 
 @app.get("/<access_path>/tweets/views")
