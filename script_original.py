@@ -3147,6 +3147,11 @@ def gemini_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
 # through xAI's Responses API, with the tweet's picture. The owner's own copy keeps Gemini.
 GROK_URL = "https://api.x.ai/v1/responses"
 GROK_PATH = DATA_DIR / "grok.json"
+# Comments are asked with no reasoning: much faster (and cheaper) than thinking first, and enough for a reply
+# this short. A model that does not take the setting is asked again without it (with its own default), and
+# is not sent it again.
+GROK_REASONING = {"effort": "none"}
+grok_reasoning_refused: set[str] = set()
 grok_lock = threading.Lock()
 saved_grok: dict = {"engine": "gemini", "api_key": "", "model": ""}
 
@@ -3202,8 +3207,9 @@ def grok_answer_text(answer: dict) -> str:
 
 def grok_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str = DEFAULT_REPLY_VOICE,
                  account: str = "", tweet_id: str = "") -> str:
-    """One reply to a tweet by Grok: the same prompt as Gemini's, the tweet's picture with it. A model that does
-    not take the reasoning setting is asked again without it; a busy Grok is asked again a few times."""
+    """One reply to a tweet by Grok: the same prompt as Gemini's, the tweet's picture with it, no reasoning. A
+    model that does not take the reasoning setting is asked again without it; a busy Grok is asked again a
+    few times."""
     prompt = reply_prompt(voice, account, tweet_id)
     if image:
         prompt = "Look at the tweet in the image. " + prompt
@@ -3212,7 +3218,7 @@ def grok_comment(api_key: str, model: str, image: bytes | None, tweet_text: str,
     content: list[dict] = [{"type": "input_text", "text": prompt}]
     if image:
         content.append({"type": "input_image", "image_url": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")})
-    reasoning = True
+    reasoning = model not in grok_reasoning_refused
     busy_waits = (5, 12, 20, 30)
     best = ""
     saw_busy = False
@@ -3221,7 +3227,7 @@ def grok_comment(api_key: str, model: str, image: bytes | None, tweet_text: str,
         for try_index in range(len(busy_waits) + 1):
             body: dict = {"model": model, "input": [{"role": "user", "content": content}]}
             if reasoning:
-                body["reasoning"] = {"effort": "low"}
+                body["reasoning"] = dict(GROK_REASONING)
             request = urllib.request.Request(GROK_URL, data=json.dumps(body).encode("utf-8"), method="POST",
                                              headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key})
             try:
@@ -3238,7 +3244,8 @@ def grok_comment(api_key: str, model: str, image: bytes | None, tweet_text: str,
                     detail = ""
                 detail = re.sub(r"\s+", " ", detail.replace(api_key, "…") if api_key else detail).strip()[:160]
                 if reasoning and exc.code == 400 and re.search(r"reasoning", detail, re.I):
-                    reasoning = False    # this model takes no reasoning setting: asked again without it
+                    reasoning = False    # this model takes no reasoning setting: asked again without it,
+                    grok_reasoning_refused.add(model)    # and not sent it again
                     continue
                 if exc.code in (401, 403):
                     raise RuntimeError("مفتاح Grok غير صالح أو بلا صلاحية. أخبر صاحب البرنامج.") from None
