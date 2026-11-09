@@ -33,13 +33,13 @@ import android.widget.Toast;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** One page: the settings (Claude's key, the model, the reply's voice), a box for the tweets' links, «إرسال»,
- * and a card for each tweet with its comment and «نسخ». */
+/** One page: the settings (the comments server's link and the reply's voice), a box for the tweets' links,
+ * «إرسال», and a card for each tweet with its comment and «نسخ». The Claude key is on the server: the phone keeps
+ * only the server's link. */
 public class MainActivity extends Activity {
     // The groups script's colors: light paper, pine green, brick red.
     static final int PAPER = 0xFFF3EFE6;
@@ -57,22 +57,22 @@ public class MainActivity extends Activity {
     // X's app: a tweet opens there directly (in the browser when it is not on the phone).
     static final String X_APP = "com.twitter.android";
     static final int REMEMBERED = 8;
+    // What the app kept before 2.0, Claude's key among them: removed from the phone when it opens.
+    static final String[] OLD_SETTINGS = {"key", "model", "proxy"};
 
     SharedPreferences prefs;
-    EditText keyField;
-    EditText modelField;
+    EditText linkField;
     EditText tweetsField;
-    EditText proxyField;
     RadioGroup voiceGroup;
     final int[] voiceIds = new int[3];
-    TextView keyNow;
-    TextView proxyNow;
+    TextView linkNow;
     TextView settingsNote;
     TextView settingsSummary;
     TextView notice;
     LinearLayout settingsBody;
     LinearLayout results;
     Button settingsToggle;
+    Button saveButton;
     Button sendButton;
     final List<Card> cards = new ArrayList<>();
     final Handler main = new Handler(Looper.getMainLooper());
@@ -80,26 +80,40 @@ public class MainActivity extends Activity {
     // This phone's last replies: the next one is told not to look like them.
     final List<String> lastReplies = new ArrayList<>();
     ExecutorService pool;
+    ExecutorService checker;
     int running;
+    int checking;                 // checks of the server's link under way
+    int lastCheck;                // the last one started: an older one's answer is not shown
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("settings", MODE_PRIVATE);
-        if (!prefs.contains("manner")) {
-            prefs.edit().putInt("manner", rng.nextInt(Engine.MANNERS.length)).apply();
+        SharedPreferences.Editor edit = prefs.edit();
+        for (String old : OLD_SETTINGS) {
+            edit.remove(old);
         }
+        if (!prefs.contains("manner")) {
+            edit.putInt("manner", rng.nextInt(Engine.MANNERS));
+        }
+        edit.commit();                           // (written at once: no key is left on the phone)
         pool = Executors.newFixedThreadPool(PARALLEL);
-        Engine.useProxy(Engine.parseProxy(prefs.getString("proxy", "")));
+        checker = Executors.newSingleThreadExecutor();
         setContentView(buildPage());
         refreshSettings();
-        showSettings(!Engine.validKey(prefs.getString("key", "")));
+        showSettings(link() == null);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         pool.shutdownNow();
+        checker.shutdownNow();
+    }
+
+    /** The server's link kept in the settings, or null. */
+    Engine.ServerLink link() {
+        return Engine.parseLink(prefs.getString("server", ""));
     }
 
     // ---------------------------------------------------------------- the page
@@ -129,18 +143,13 @@ public class MainActivity extends Activity {
         settings.addView(settingsSummary, margins(0, dp(2), 0, 0));
         settingsBody = column();
         settings.addView(settingsBody);
-        settingsBody.addView(label("مفتاح Claude"));
-        keyField = field("sk-ant-…");
-        keyField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        leftToRight(keyField);
-        settingsBody.addView(keyField);
-        keyNow = text("", 12, MUTED, false);
-        settingsBody.addView(keyNow, margins(0, dp(4), 0, 0));
-        settingsBody.addView(label("النموذج"));
-        modelField = field(Engine.DEFAULT_MODEL);
-        modelField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        leftToRight(modelField);
-        settingsBody.addView(modelField);
+        settingsBody.addView(label("رابط السيرفر"));
+        linkField = field("https://…:8443/…#…");
+        linkField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        leftToRight(linkField);
+        settingsBody.addView(linkField);
+        linkNow = text("", 12, MUTED, false);
+        settingsBody.addView(linkNow, margins(0, dp(4), 0, 0));
         settingsBody.addView(label("صيغة الرد"));
         voiceGroup = new RadioGroup(this);
         voiceGroup.setOrientation(LinearLayout.HORIZONTAL);
@@ -157,16 +166,9 @@ public class MainActivity extends Activity {
             voiceGroup.addView(choice, place);
         }
         settingsBody.addView(voiceGroup);
-        settingsBody.addView(label("البروكسي (لمن عنده VPN منزلي فقط)"));
-        proxyField = field("http://tg:…@1.2.3.4:8899");
-        proxyField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        leftToRight(proxyField);
-        settingsBody.addView(proxyField);
-        proxyNow = text("", 12, MUTED, false);
-        settingsBody.addView(proxyNow, margins(0, dp(4), 0, 0));
-        Button save = primaryButton("حفظ");
-        save.setOnClickListener(v -> saveSettings());
-        settingsBody.addView(save, margins(0, dp(12), 0, 0));
+        saveButton = primaryButton("حفظ");
+        saveButton.setOnClickListener(v -> saveSettings());
+        settingsBody.addView(saveButton, margins(0, dp(12), 0, 0));
         settingsNote = text("", 13, CLAY, false);
         settingsNote.setVisibility(View.GONE);
         settingsBody.addView(settingsNote, margins(0, dp(6), 0, 0));
@@ -210,18 +212,12 @@ public class MainActivity extends Activity {
     // ---------------------------------------------------------------- the settings
 
     void refreshSettings() {
-        String key = prefs.getString("key", "");
-        String model = prefs.getString("model", Engine.DEFAULT_MODEL);
+        Engine.ServerLink link = link();
         int voice = Math.floorMod(prefs.getInt("voice", 0), VOICE_LABELS.length);
-        boolean ready = Engine.validKey(key);
-        Engine.ProxyLink proxy = Engine.parseProxy(prefs.getString("proxy", ""));
-        keyNow.setText(ready ? "محفوظ: " + Engine.shown(key) : "لا يوجد مفتاح محفوظ.");
-        modelField.setText(model);
         voiceGroup.check(voiceIds[voice]);
-        proxyField.setText(proxy == null ? "" : prefs.getString("proxy", ""));
-        proxyNow.setText(proxy == null ? "بدون بروكسي: يتصل التطبيق بـ Claude مباشرة." : "يمر الاتصال بـ Claude عبر " + proxy.shown());
-        settingsSummary.setText(ready ? "مفتاح Claude محفوظ · " + model + " · " + VOICE_LABELS[voice] + (proxy == null ? "" : " · عبر البروكسي")
-            : "أدخل مفتاح Claude لتبدأ.");
+        linkNow.setText(link == null ? "لا يوجد رابط محفوظ. يعطيك إياه صاحب السيرفر، ولا يُحفظ في الهاتف أي مفتاح."
+            : "محفوظ: " + link.shown());
+        settingsSummary.setText(link == null ? "الصق رابط السيرفر لتبدأ." : "السيرفر " + link.shown() + " · " + VOICE_LABELS[voice]);
     }
 
     void showSettings(boolean open) {
@@ -230,33 +226,15 @@ public class MainActivity extends Activity {
         settingsNote.setVisibility(View.GONE);
     }
 
+    /** The link (a new one pasted, or the one kept) and the voice are kept, then the server is asked whether it
+     * answers with that link. */
     void saveSettings() {
-        String key = keyField.getText().toString().trim();
-        String model = modelField.getText().toString().trim().toLowerCase(Locale.ROOT);
-        String current = prefs.getString("key", "");
-        if (model.isEmpty()) {
-            model = Engine.DEFAULT_MODEL;
-        }
-        if (key.isEmpty() && !Engine.validKey(current)) {
-            settingsError("الصق مفتاح Claude.");
+        String pasted = linkField.getText().toString().trim();
+        Engine.ServerLink link = pasted.isEmpty() ? link() : Engine.parseLink(pasted);
+        if (link == null) {
+            settingsError(pasted.isEmpty() ? "الصق رابط السيرفر."
+                : "الرابط غير صالح. الصقه كاملًا كما طبعه السيرفر: يبدأ بـ https:// وفي آخره # ثم أرقام وحروف.");
             return;
-        }
-        if (!key.isEmpty() && !Engine.validKey(key)) {
-            settingsError("صيغة مفتاح Claude غير صالحة. يبدأ بـ sk-ant-");
-            return;
-        }
-        if (!Engine.validModel(model)) {
-            settingsError("اسم النموذج غير صالح.");
-            return;
-        }
-        String proxyText = proxyField.getText().toString().trim();
-        Engine.ProxyLink proxy = Engine.parseProxy(proxyText);
-        if (!proxyText.isEmpty() && proxy == null) {
-            settingsError("رابط البروكسي غير صالح. مثاله: http://tg:كلمة_المرور@1.2.3.4:8899");
-            return;
-        }
-        if (proxy != null && !proxyText.contains("://")) {
-            proxyText = "http://" + proxyText;
         }
         int voice = 0;
         for (int i = 0; i < voiceIds.length; i++) {
@@ -264,18 +242,57 @@ public class MainActivity extends Activity {
                 voice = i;
             }
         }
-        prefs.edit().putString("key", key.isEmpty() ? current : key).putString("model", model).putInt("voice", voice)
-            .putString("proxy", proxy == null ? "" : proxyText).apply();
-        Engine.useProxy(proxy);
-        keyField.setText("");
+        prefs.edit().putString("server", link.text()).putInt("voice", voice).apply();
+        linkField.setText("");
         hideKeyboard();
         refreshSettings();
+        check(link);
+    }
+
+    void check(Engine.ServerLink link) {
+        int number = ++lastCheck;
+        checking++;
+        saveButton.setEnabled(false);
+        saveButton.setAlpha(0.6f);
+        settingsNote.setText("حُفظت الإعدادات. يتحقق من الاتصال بالسيرفر…");
+        settingsNote.setTextColor(MUTED);
+        settingsNote.setVisibility(View.VISIBLE);
+        checker.execute(() -> {
+            String model = null;
+            String problem = null;
+            try {
+                model = Engine.ping(link);
+            } catch (Engine.CommentError e) {
+                problem = e.getMessage();
+            } catch (RuntimeException e) {
+                problem = "حدث خطأ غير متوقع (" + e.getClass().getSimpleName() + "). أعد المحاولة.";
+            }
+            String answered = model;
+            String failed = problem;
+            main.post(() -> checked(number, answered, failed));
+        });
+    }
+
+    void checked(int number, String model, String problem) {
+        checking--;
+        if (number != lastCheck) {
+            return;
+        }
+        saveButton.setEnabled(true);
+        saveButton.setAlpha(1f);
+        if (problem != null) {
+            showSettings(true);
+            settingsError("حُفظ الرابط، لكن: " + problem);
+            return;
+        }
         showSettings(false);
-        Toast.makeText(this, "حُفظت الإعدادات.", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "✓ متصل بالسيرفر" + (model == null || model.isEmpty() ? "" : " · النموذج " + model),
+            Toast.LENGTH_LONG).show();
     }
 
     void settingsError(String message) {
         settingsNote.setText(message);
+        settingsNote.setTextColor(CLAY);
         settingsNote.setVisibility(View.VISIBLE);
     }
 
@@ -283,11 +300,11 @@ public class MainActivity extends Activity {
 
     void send() {
         notice.setVisibility(View.GONE);
-        String key = prefs.getString("key", "");
-        if (!Engine.validKey(key)) {
+        Engine.ServerLink link = link();
+        if (link == null) {
             showSettings(true);
-            say("أدخل مفتاح Claude واضغط «حفظ» أولًا.");
-            keyField.requestFocus();
+            say("الصق رابط السيرفر واضغط «حفظ» أولًا.");
+            linkField.requestFocus();
             return;
         }
         List<String> ids = Engine.tweetIds(tweetsField.getText().toString());
@@ -303,7 +320,6 @@ public class MainActivity extends Activity {
         tweetsField.setText("");                 // the box is emptied, and the last comments give way to these
         results.removeAllViews();
         cards.clear();
-        String model = prefs.getString("model", Engine.DEFAULT_MODEL);
         int voice = prefs.getInt("voice", 0);
         int manner = prefs.getInt("manner", 0);
         running = ids.size();
@@ -314,21 +330,20 @@ public class MainActivity extends Activity {
             Card card = new Card(i + 1, ids.get(i));
             cards.add(card);
             results.addView(card.view, margins(0, 0, 0, dp(10)));
-            pool.execute(() -> work(card, key, model, voice, manner));
+            pool.execute(() -> work(card, link, voice, manner));
         }
     }
 
-    /** One tweet, in the background: read it, its photos, then its comment; the card shows each step. */
-    void work(Card card, String key, String model, int voice, int manner) {
+    /** One tweet, in the background: the server reads it, then writes its comment; the card shows each step. */
+    void work(Card card, Engine.ServerLink link, int voice, int manner) {
         try {
-            Engine.Tweet tweet = Engine.readTweet(card.id);
+            Engine.Tweet tweet = Engine.readTweet(link, card.id);
             main.post(() -> card.showTweet(tweet));
-            List<Engine.Photo> photos = Engine.downloadPhotos(tweet);
             List<String> before;
             synchronized (lastReplies) {
                 before = new ArrayList<>(lastReplies);
             }
-            String reply = Engine.comment(key, model, voice, manner, tweet, photos, before, rng);
+            String reply = Engine.comment(link, card.id, voice, manner, before);
             synchronized (lastReplies) {
                 lastReplies.add(reply);
                 while (lastReplies.size() > REMEMBERED) {
@@ -414,7 +429,7 @@ public class MainActivity extends Activity {
             url = tweet.url;
             // (\u200E: the account's name reads left to right, with its @ in front, inside the Arabic line)
             title.setText("تغريدة " + number + (tweet.author.isEmpty() ? "" : " · \u200E@" + tweet.author) + " ↗");
-            String line = tweet.text.isEmpty() ? (tweet.photos.isEmpty() ? "(بلا نص)" : "(صورة بلا نص)") : tweet.text;
+            String line = tweet.text.isEmpty() ? (tweet.photos == 0 ? "(بلا نص)" : "(صورة بلا نص)") : tweet.text;
             words.setText(line.replaceAll("\\s+", " "));
             reply.setText("يكتب التعليق…");
         }
@@ -520,8 +535,7 @@ public class MainActivity extends Activity {
         return view;
     }
 
-    /** A key or a model name is written left to right (its input type already keeps it on one line, and the
-     * key hidden). */
+    /** A link is written left to right (its input type already keeps it on one line). */
     void leftToRight(EditText view) {
         view.setTextDirection(View.TEXT_DIRECTION_LTR);
     }

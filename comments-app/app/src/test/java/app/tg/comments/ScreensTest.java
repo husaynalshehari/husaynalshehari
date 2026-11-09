@@ -8,7 +8,6 @@ import android.graphics.Canvas;
 import android.os.Looper;
 import android.view.View;
 
-import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -25,16 +24,21 @@ import java.io.FileOutputStream;
 @Config(sdk = 35, qualifiers = "ar-w411dp-h891dp-xxhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class ScreensTest {
+    ServerProcess server;
     Fakes fakes;
 
     @Before
     public void start() throws Exception {
-        fakes = new Fakes();
+        server = ServerProcess.shared();
+        fakes = ServerProcess.fakes();
     }
 
-    @After
-    public void stop() {
-        fakes.stop();
+    static void settle(MainActivity page, java.util.function.BooleanSupplier done) throws InterruptedException {
+        long end = System.currentTimeMillis() + 30_000;
+        do {
+            Thread.sleep(20);
+            shadowOf(Looper.getMainLooper()).idle();
+        } while (!done.getAsBoolean() && System.currentTimeMillis() < end);
     }
 
     static void picture(View view, String name) throws Exception {
@@ -61,23 +65,27 @@ public class ScreensTest {
         View scroll = ((android.view.ViewGroup) root).getChildAt(0);
         picture(scroll, "1-first-open");
 
-        page.keyField.setText(Fakes.CLAUDE_KEY);
+        page.linkField.setText("https://1.2.3.4:8443/nSyQFZnl2BSKnJaRVcmSRoZN14lT3AXl#d94a6a86f910969d852b12af1fc935");
+        page.saveSettings();
+        shadowOf(Looper.getMainLooper()).idle();
+        picture(scroll, "2-wrong-link");
+        page.linkField.setText(server.link);
         page.voiceGroup.check(page.voiceIds[0]);
         page.saveSettings();
+        settle(page, () -> page.checking == 0);
         page.tweetsField.setText("https://x.com/someone/status/1900000000000000001\n"
             + "https://x.com/other/status/1900000000000000002\nhttps://x.com/a/status/1900000000000000404");
         fakes.reply = "والله الزحمة صارت جزء من يومنا وما لها حل قريب أبدا";
         page.sendButton.performClick();
         shadowOf(Looper.getMainLooper()).idle();
-        picture(scroll, "2-working");
-        long end = System.currentTimeMillis() + 20_000;
-        do {
-            Thread.sleep(20);
-            shadowOf(Looper.getMainLooper()).idle();
-        } while (page.running > 0 && System.currentTimeMillis() < end);
+        picture(scroll, "3-working");
+        settle(page, () -> page.running == 0);
         page.cards.get(0).copyButton.performClick();
         shadowOf(Looper.getMainLooper()).idle();
-        picture(scroll, "3-comments");
-        assertTrue(new File("build/screens/3-comments.png").length() > 1000);
+        picture(scroll, "4-comments");
+        assertTrue(new File("build/screens/4-comments.png").length() > 1000);
+        page.settingsToggle.performClick();
+        shadowOf(Looper.getMainLooper()).idle();
+        picture(scroll, "5-settings-saved");
     }
 }

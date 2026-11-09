@@ -19,7 +19,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Stand-ins on this machine for FxTwitter, the tweets' photos and Claude: no real service is asked. */
+/** Stand-ins on this machine for FxTwitter, the tweets' photos and Claude, which the comments server is pointed at
+ * (see ServerProcess): no real service is asked. */
 final class Fakes {
     static final String CLAUDE_KEY = "sk-ant-api03-" + "Rq9w".repeat(20) + "Zx_w";
     static final byte[] JPEG = {(byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xE0, 1, 2, 3, 4, 5, 6, (byte) 0xFF, (byte) 0xD9};
@@ -56,7 +57,8 @@ final class Fakes {
     final List<Asked> asked = Collections.synchronizedList(new ArrayList<>());
     final List<String> photoPaths = Collections.synchronizedList(new ArrayList<>());
     final Deque<Object[]> answers = new ArrayDeque<>();      // {status, body} given before the default answer
-    volatile String reply = "والله الزحمةُ صارت جزء من يومنا، وما لها حل قريب أبداً";
+    static final String REPLY = "والله الزحمةُ صارت جزء من يومنا، وما لها حل قريب أبداً";
+    volatile String reply = REPLY;
 
     Fakes() throws IOException {
         server = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
@@ -73,112 +75,14 @@ final class Fakes {
         });
         accepting.setDaemon(true);
         accepting.start();
-        Engine.fxStatusUrl = "http://127.0.0.1:" + port + "/status/";
-        Engine.photoPrefix = "http://127.0.0.1:" + port + "/media/";
-        Engine.claudeUrl = "http://127.0.0.1:" + port + "/v1/messages";
-        Engine.busyWaitsMs = new long[] {1, 1, 1, 1};
-        Engine.useProxy(null);
     }
 
-    /** A proxy on this machine, like tinyproxy with a password: it asks for the password (407), then passes the
-     * request on to where it goes, and notes what came through it. */
-    static final class FakeProxy {
-        final ServerSocket server;
-        final int port;
-        final String password;
-        final List<String> passed = Collections.synchronizedList(new ArrayList<>());
-        final List<String> refused = Collections.synchronizedList(new ArrayList<>());
-
-        FakeProxy(String password) throws IOException {
-            this.password = password;
-            server = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
-            port = server.getLocalPort();
-            Thread accepting = new Thread(() -> {
-                while (!server.isClosed()) {
-                    try {
-                        Socket socket = server.accept();
-                        new Thread(() -> serve(socket)).start();
-                    } catch (IOException e) {
-                        return;
-                    }
-                }
-            });
-            accepting.setDaemon(true);
-            accepting.start();
-        }
-
-        String link(String user, String pass) {
-            return "http://" + user + ":" + pass + "@127.0.0.1:" + port;
-        }
-
-        void stop() {
-            try {
-                server.close();
-            } catch (IOException e) {
-                // (already closed)
-            }
-        }
-
-        private void serve(Socket socket) {
-            try (Socket s = socket) {
-                InputStream in = s.getInputStream();
-                String first = line(in);
-                List<String> headers = new ArrayList<>();
-                String auth = "";
-                int length = 0;
-                for (String header = line(in); !header.isEmpty(); header = line(in)) {
-                    String name = header.substring(0, Math.max(0, header.indexOf(':'))).trim().toLowerCase();
-                    String value = header.substring(header.indexOf(':') + 1).trim();
-                    if (name.equals("proxy-authorization")) {
-                        auth = value;
-                    } else if (name.equals("content-length")) {
-                        length = Integer.parseInt(value);
-                    } else if (!name.equals("proxy-connection") && !name.equals("connection")) {
-                        headers.add(header);
-                    }
-                }
-                byte[] body = new byte[length];
-                for (int read = 0; read < length; ) {
-                    int n = in.read(body, read, length - read);
-                    if (n < 0) {
-                        break;
-                    }
-                    read += n;
-                }
-                OutputStream out = s.getOutputStream();
-                String wanted = "Basic " + java.util.Base64.getEncoder().encodeToString(("tg:" + password).getBytes(StandardCharsets.UTF_8));
-                if (!auth.equals(wanted)) {
-                    refused.add(first + (auth.isEmpty() ? " (no password)" : " (wrong password)"));
-                    out.write(("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"tinyproxy\"\r\n"
-                        + "Content-Length: 0\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
-                    out.flush();
-                    return;
-                }
-                passed.add(first);
-                // "POST http://127.0.0.1:1234/v1/messages HTTP/1.1": passed on to that address, as a plain request.
-                String[] parts = first.split(" ");
-                java.net.URL target = new java.net.URL(parts[1]);
-                try (Socket onward = new Socket(target.getHost(), target.getPort())) {
-                    StringBuilder request = new StringBuilder(parts[0] + " " + target.getFile() + " HTTP/1.1\r\n");
-                    for (String header : headers) {
-                        request.append(header).append("\r\n");
-                    }
-                    request.append("Content-Length: ").append(length).append("\r\nConnection: close\r\n\r\n");
-                    OutputStream to = onward.getOutputStream();
-                    to.write(request.toString().getBytes(StandardCharsets.UTF_8));
-                    to.write(body);
-                    to.flush();
-                    InputStream from = onward.getInputStream();
-                    byte[] buffer = new byte[16384];
-                    for (int n = from.read(buffer); n > 0; n = from.read(buffer)) {
-                        out.write(buffer, 0, n);
-                    }
-                    out.flush();
-                }
-            } catch (IOException | RuntimeException e) {
-                // (the client went away)
-            }
-        }
+    /** As new, for the next test (the same stand-ins serve one server for many tests). */
+    synchronized void reset() {
+        asked.clear();
+        photoPaths.clear();
+        answers.clear();
+        reply = REPLY;
     }
 
     void stop() {
