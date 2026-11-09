@@ -3476,10 +3476,9 @@ CLAUDE_PATH = DATA_DIR / "claude.json"
 
 
 def key_typed_here() -> bool:
-    """The owner's copy with no «توزيع البرنامج» (no g.py beside it, nor what that page saved): its comments
-    are written with the Claude key typed in its own panel, when one is saved, and it needs nothing else."""
-    return (is_owner_copy() and distribution_page is None and not CONTROL_FILE.is_file()
-            and not (CONTROL_FILE.with_name("data") / "distribution.json").is_file())
+    """A copy on its own (see on_its_own): its comments are written with the Claude key typed in its own panel,
+    when one is saved, and it needs nothing else."""
+    return on_its_own()
 
 
 def load_panel_key() -> None:
@@ -4114,9 +4113,19 @@ if TERMUX_PREFIX:
     os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path.home() / ".cache" / "ms-playwright"))
 
 
+# A copy on its own (see on_its_own) opens the full Chromium in its new headless mode (the "chromium" channel),
+# not Playwright's lighter headless browser; the owner's main copy and users' copies keep the light one. It needs
+# Playwright 1.49 or newer and the browser installed with what it needs from the system (python -m playwright
+# install --with-deps chromium). Where it cannot be opened, the light browser is used as before, with one message on
+# how to install it, and it is not asked again.
+OWN_COPY_CHANNEL = "chromium"
+channel_unavailable: list[str] = []
+
+
 def browser_launch_options() -> dict:
-    """The browser's switches, and on Termux where its Chromium is. GG_CHROMIUM_ARGS adds switches
-    (e.g. "--single-process" if Android keeps stopping the browser's helper processes)."""
+    """The browser's switches, on Termux where its Chromium is, and on a copy on its own the full Chromium
+    (OWN_COPY_CHANNEL). GG_CHROMIUM_ARGS adds switches (e.g. "--single-process" if Android keeps stopping the
+    browser's helper processes)."""
     options: dict = {}
     args = ["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"]
     if TERMUX_PREFIX:
@@ -4125,17 +4134,27 @@ def browser_launch_options() -> dict:
                 options["executable_path"] = str(candidate)
                 break
         args.append("--disable-gpu")
+    elif OWN_COPY_CHANNEL and on_its_own() and not channel_unavailable:
+        options["channel"] = OWN_COPY_CHANNEL
     options["args"] = args + os.getenv("GG_CHROMIUM_ARGS", "").split()
     return options
+
+
+def channel_not_installed(exc: Exception) -> bool:
+    """Whether the full Chromium could not be opened only because it is not ready here: not installed, missing
+    something it needs from the system, or a Playwright too old for the channel."""
+    text = str(exc).lower()
+    return any(part in text for part in ("executable doesn't exist", "unsupported chromium channel", "is not found at",
+                                         "distribution 'chromium'", "missing dependencies",
+                                         "error while loading shared libraries"))
 
 
 def open_x_profile(playwright, auth_token: str, profile_dir: Path):
     """Open the account's permanent browser profile (created on first use)."""
     profile_dir.mkdir(parents=True, exist_ok=True)
-    context = playwright.chromium.launch_persistent_context(
-        str(profile_dir),
+    options = browser_launch_options()
+    settings = dict(
         headless=True,
-        **browser_launch_options(),
         viewport=screen_size(NORMAL_VIEWPORT_HEIGHT),
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -4143,6 +4162,20 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
         ),
         locale="en-US",
     )
+    try:
+        context = playwright.chromium.launch_persistent_context(str(profile_dir), **options, **settings)
+    except Exception as exc:
+        if "channel" not in options or not channel_not_installed(exc):
+            raise
+        first = not channel_unavailable
+        channel_unavailable.append((str(exc).strip().splitlines() or [type(exc).__name__])[0][:200])
+        if first:
+            print("⚠️ متصفح Chromium الكامل لا يعمل هنا (غير مثبّت، أو تنقصه مكتبات من النظام، أو Playwright أقدم من 1.49)، "
+                  "فيُفتح المتصفح الخفيف كما كان. للتثبيت: python -m pip install -U playwright "
+                  "ثم python -m playwright install --with-deps chromium", flush=True)
+            print(f"   ({channel_unavailable[0]})", flush=True)
+        options.pop("channel", None)
+        context = playwright.chromium.launch_persistent_context(str(profile_dir), **options, **settings)
     context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
@@ -6938,6 +6971,13 @@ update_check_cache: dict = {"at": 0.0, "answer": None}
 def is_owner_copy() -> bool:
     """The owner's own copy has «توزيع البرنامج»; a copy given to a user takes updates."""
     return not UPDATE_SOURCE
+
+
+def on_its_own() -> bool:
+    """A copy on its own: the owner's kind of copy with no «توزيع البرنامج» (no g.py beside it, nor what that
+    page saved), such as the script downloaded alone into a folder of its own."""
+    return (is_owner_copy() and distribution_page is None and not CONTROL_FILE.is_file()
+            and not (CONTROL_FILE.with_name("data") / "distribution.json").is_file())
 
 
 def shown_version() -> str:
