@@ -54,6 +54,8 @@ public class MainActivity extends Activity {
     static final int CLAY = 0xFF8D3A32;
     static final String[] VOICE_LABELS = {"مذكر", "مؤنث", "عام"};
     static final int PARALLEL = 3;
+    // X's app: a tweet opens there directly (in the browser when it is not on the phone).
+    static final String X_APP = "com.twitter.android";
     static final int REMEMBERED = 8;
 
     SharedPreferences prefs;
@@ -273,6 +275,7 @@ public class MainActivity extends Activity {
             say("تُكتب تعليقات لأول " + Engine.MAX_TWEETS + " تغريدة فقط.");
         }
         hideKeyboard();
+        tweetsField.setText("");                 // the box is emptied, and the last comments give way to these
         results.removeAllViews();
         cards.clear();
         String model = prefs.getString("model", Engine.DEFAULT_MODEL);
@@ -372,8 +375,9 @@ public class MainActivity extends Activity {
             copyButton.setAlpha(0.5f);
             copyButton.setOnClickListener(v -> {
                 if (!comment.isEmpty()) {
-                    copy(comment);
+                    copy(comment);                       // copied, then the tweet opened to paste it there
                     copyButton.setText("نُسخ ✓");
+                    open();
                 }
             });
             LinearLayout actions = new LinearLayout(MainActivity.this);
@@ -408,7 +412,16 @@ public class MainActivity extends Activity {
             reply.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         }
 
+        /** The tweet, in X's app when it is on the phone, else wherever links open (the browser). */
         void open() {
+            Intent inX = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            inX.setPackage(X_APP);
+            try {
+                startActivity(inX);
+                return;
+            } catch (ActivityNotFoundException e) {
+                // (X's app is not here)
+            }
             try {
                 startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
             } catch (ActivityNotFoundException e) {

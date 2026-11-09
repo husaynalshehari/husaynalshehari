@@ -6,8 +6,10 @@ import static org.junit.Assert.assertTrue;
 import static org.robolectric.Shadows.shadowOf;
 
 import android.content.ClipboardManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Looper;
 import android.view.View;
 import android.widget.RadioButton;
@@ -18,6 +20,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowToast;
 
@@ -127,6 +130,7 @@ public class MainActivityTest {
         page.sendButton.performClick();
         assertFalse(page.sendButton.isEnabled());
         assertEquals("يكتب التعليقات…", page.sendButton.getText().toString());
+        assertEquals("", page.tweetsField.getText().toString());        // the box is emptied
         assertEquals(3, page.cards.size());
         assertEquals(3, page.results.getChildCount());
         waitForCards();
@@ -152,23 +156,59 @@ public class MainActivityTest {
             assertTrue(asked.text().contains("Your manner (always the same): " + Engine.MANNERS[page.prefs.getInt("manner", -1)] + "."));
         }
 
+        // «نسخ»: the comment copied, then its tweet opened in X's app, to paste it there.
         one.copyButton.performClick();
         ClipboardManager clipboard = (ClipboardManager) page.getSystemService(Context.CLIPBOARD_SERVICE);
         assertEquals("والله الزحمة صارت جزء من يومنا وما لها حل قريب أبدا", clipboard.getPrimaryClip().getItemAt(0).getText().toString());
         assertEquals("نُسخ التعليق.", ShadowToast.getTextOfLatestToast());
         assertEquals("نُسخ ✓", one.copyButton.getText().toString());
-
-        one.title.performClick();
         Intent opened = shadowOf(page).getNextStartedActivity();
         assertEquals(Intent.ACTION_VIEW, opened.getAction());
+        assertEquals("com.twitter.android", opened.getPackage());
+        assertEquals("https://x.com/someone/status/1900000000000000001", opened.getData().toString());
+        two.copyButton.performClick();
+        assertEquals("والله الزحمة صارت جزء من يومنا وما لها حل قريب أبدا", clipboard.getPrimaryClip().getItemAt(0).getText().toString());
+        assertEquals("https://x.com/other/status/1900000000000000002", shadowOf(page).getNextStartedActivity().getData().toString());
+
+        one.title.performClick();
+        opened = shadowOf(page).getNextStartedActivity();
+        assertEquals("com.twitter.android", opened.getPackage());
         assertEquals("https://x.com/someone/status/1900000000000000001", opened.getData().toString());
 
-        // Sent again: the cards start over, and the next replies are told not to look like these.
+        // Sent again: the last comments give way to the new ones, and the new replies are told not to look like
+        // the last ones.
         page.tweetsField.setText("https://x.com/other/status/1900000000000000002");
         page.sendButton.performClick();
+        assertEquals("", page.tweetsField.getText().toString());
+        assertEquals(1, page.results.getChildCount());
         waitForCards();
         assertEquals(1, page.cards.size());
+        assertEquals(1, page.results.getChildCount());
+        assertEquals("تغريدة 1 · \u200E@other ↗", page.cards.get(0).title.getText().toString());
         assertTrue(fakes.asked.get(2).text().contains("Your own last replies to other tweets."));
+    }
+
+    @Test
+    public void withoutXsAppTheTweetOpensInTheBrowser() throws Exception {
+        saveKey();
+        page.tweetsField.setText("https://x.com/someone/status/1900000000000000001");
+        page.sendButton.performClick();
+        waitForCards();
+        shadowOf(RuntimeEnvironment.getApplication()).checkActivities(true);   // (only what is on this phone opens)
+        page.cards.get(0).copyButton.performClick();
+        assertEquals("لا يوجد تطبيق يفتح الرابط.", ShadowToast.getTextOfLatestToast());
+        ComponentName browser = new ComponentName("com.example.browser", "com.example.browser.Main");
+        shadowOf(page.getPackageManager()).addActivityIfNotPresent(browser);
+        IntentFilter links = new IntentFilter(Intent.ACTION_VIEW);
+        links.addCategory(Intent.CATEGORY_DEFAULT);
+        links.addDataScheme("https");
+        shadowOf(page.getPackageManager()).addIntentFilterForActivity(browser, links);
+        page.cards.get(0).copyButton.performClick();
+        Intent opened = shadowOf(page).getNextStartedActivity();
+        assertEquals(null, opened.getPackage());
+        assertEquals("https://x.com/someone/status/1900000000000000001", opened.getData().toString());
+        ClipboardManager clipboard = (ClipboardManager) page.getSystemService(Context.CLIPBOARD_SERVICE);
+        assertEquals("والله الزحمة صارت جزء من يومنا وما لها حل قريب أبدا", clipboard.getPrimaryClip().getItemAt(0).getText().toString());
     }
 
     @Test
@@ -177,6 +217,7 @@ public class MainActivityTest {
         page.tweetsField.setText("مرحبا 12345 https://x.com/someone");
         page.sendButton.performClick();
         assertEquals("لم أجد روابط تغريدات. الصق رابطًا في كل سطر.", page.notice.getText().toString());
+        assertEquals("مرحبا 12345 https://x.com/someone", page.tweetsField.getText().toString());   // kept, to be put right
         assertEquals(View.VISIBLE, page.notice.getVisibility());
         assertTrue(page.cards.isEmpty());
         assertTrue(page.sendButton.isEnabled());

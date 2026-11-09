@@ -3,6 +3,11 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- «نسخ» opens the tweet in X's app: it is named here, so that Android 11 and later let this app reach it. -->
+    <queries>
+        <package android:name="com.twitter.android" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
