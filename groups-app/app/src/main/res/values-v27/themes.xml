@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Groups" parent="Groups.Base">
+        <item name="android:navigationBarColor">@color/paper</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

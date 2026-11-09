@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Two speech bubbles, one behind the other (a group's chat), inside the icon's safe middle (66 of 108). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#9FD3BF"
+        android:pathData="M47,30 L75,30 A7,7 0 0 1 82,37 L82,53 A7,7 0 0 1 75,60 L47,60 A7,7 0 0 1 40,53 L40,37 A7,7 0 0 1 47,30 Z" />
+    <path
+        android:fillColor="#F4FBF7"
+        android:pathData="M33,42 L63,42 A7,7 0 0 1 70,49 L70,65 A7,7 0 0 1 63,72 L47,72 L37,80 L38,72 L33,72 A7,7 0 0 1 26,65 L26,49 A7,7 0 0 1 33,42 Z" />
+    <path
+        android:fillColor="#0F6B50"
+        android:pathData="M35,57 A3,3 0 1 0 41,57 A3,3 0 1 0 35,57 Z M45,57 A3,3 0 1 0 51,57 A3,3 0 1 0 45,57 Z M55,57 A3,3 0 1 0 61,57 A3,3 0 1 0 55,57 Z" />
+</vector>

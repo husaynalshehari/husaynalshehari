@@ -1,0 +1,95 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+// The script the app runs: the repository's own files, packed into the app as they are when it is built.
+def scriptAssets = tasks.register('scriptAssets', Copy) {
+    from(rootProject.file('../script_original.py')) { rename { 'gg.py' } }
+    from(rootProject.file('../content.py'))
+    into(layout.buildDirectory.dir('script-assets/gg'))
+}
+
+android {
+    namespace 'app.tg.groups'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'app.tg.groups'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+        ndk {
+            // Phones of the last years (64-bit ARM). Python 3.12 for Android has no 32-bit build.
+            // (-PggAbis=arm64-v8a,x86_64 adds the emulator's, for trying the app on a computer.)
+            abiFilters(*((project.findProperty('ggAbis') ?: 'arm64-v8a').toString().split(',')))
+        }
+    }
+
+    signingConfigs {
+        release {
+            def keystore = System.getenv('COMMENTS_KEYSTORE')
+            if (keystore) {
+                storeFile file(keystore)
+                storePassword System.getenv('COMMENTS_KEYSTORE_PASSWORD')
+                keyAlias 'comments'
+                keyPassword System.getenv('COMMENTS_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (System.getenv('COMMENTS_KEYSTORE')) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs += [layout.buildDirectory.dir('script-assets').get().asFile]
+        }
+    }
+
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            all {
+                maxHeapSize = '2g'
+                systemProperty 'robolectric.dependency.repo.url', 'https://maven-central.storage-download.googleapis.com/maven2'
+            }
+        }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+tasks.named('preBuild') { dependsOn scriptAssets }
+
+chaquopy {
+    defaultConfig {
+        version = "3.12"
+        buildPython(System.getenv('GG_BUILD_PYTHON') ?: "python3.12")
+        pip {
+            install "flask"
+        }
+    }
+}
+
+dependencies {
+    // Each account's own browser profile, and what a WebView says about itself (androidx's doors to newer WebViews).
+    implementation 'androidx.webkit:webkit:1.12.1'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.17'
+}

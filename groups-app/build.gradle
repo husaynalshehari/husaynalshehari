@@ -1,0 +1,9 @@
+// The groups app («قروبات»): the groups script (../script_original.py) inside an Android app, with Python in the
+// app (Chaquopy) and the app's own browser (WebView) in place of Chromium. Built with Gradle 8.14, the Android SDK
+// (platform 35) and Python 3.12 on the building machine:
+//   ANDROID_HOME=<sdk> gradle :app:assembleRelease
+// A release signed for installing needs COMMENTS_KEYSTORE and COMMENTS_KEYSTORE_PASSWORD (key alias "comments").
+plugins {
+    id 'com.android.application' version '8.13.2' apply false
+    id 'com.chaquo.python' version '17.2.0' apply false
+}
