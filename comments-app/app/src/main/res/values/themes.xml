@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="pine">#0F6B50</color>
+    <color name="paper">#F3EFE6</color>
+    <!-- The groups script's colors: light paper, pine green. -->
+    <style name="Comments" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">@color/pine</item>
+        <item name="android:colorAccent">@color/pine</item>
+        <item name="android:colorPrimaryDark">@color/paper</item>
+        <item name="android:windowBackground">@color/paper</item>
+        <item name="android:statusBarColor">@color/paper</item>
+        <item name="android:navigationBarColor">@color/paper</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

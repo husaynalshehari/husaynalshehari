@@ -1,0 +1,6 @@
+// The comments app («تعليقات»). Built with Gradle 8.14 and the Android SDK (platform 35):
+//   ANDROID_HOME=<sdk> gradle :app:testDebugUnitTest :app:assembleRelease
+// A release signed for installing needs COMMENTS_KEYSTORE and COMMENTS_KEYSTORE_PASSWORD (key alias "comments").
+plugins {
+    id 'com.android.application' version '8.13.2' apply false
+}
