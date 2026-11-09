@@ -77,6 +77,108 @@ final class Fakes {
         Engine.photoPrefix = "http://127.0.0.1:" + port + "/media/";
         Engine.claudeUrl = "http://127.0.0.1:" + port + "/v1/messages";
         Engine.busyWaitsMs = new long[] {1, 1, 1, 1};
+        Engine.useProxy(null);
+    }
+
+    /** A proxy on this machine, like tinyproxy with a password: it asks for the password (407), then passes the
+     * request on to where it goes, and notes what came through it. */
+    static final class FakeProxy {
+        final ServerSocket server;
+        final int port;
+        final String password;
+        final List<String> passed = Collections.synchronizedList(new ArrayList<>());
+        final List<String> refused = Collections.synchronizedList(new ArrayList<>());
+
+        FakeProxy(String password) throws IOException {
+            this.password = password;
+            server = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
+            port = server.getLocalPort();
+            Thread accepting = new Thread(() -> {
+                while (!server.isClosed()) {
+                    try {
+                        Socket socket = server.accept();
+                        new Thread(() -> serve(socket)).start();
+                    } catch (IOException e) {
+                        return;
+                    }
+                }
+            });
+            accepting.setDaemon(true);
+            accepting.start();
+        }
+
+        String link(String user, String pass) {
+            return "http://" + user + ":" + pass + "@127.0.0.1:" + port;
+        }
+
+        void stop() {
+            try {
+                server.close();
+            } catch (IOException e) {
+                // (already closed)
+            }
+        }
+
+        private void serve(Socket socket) {
+            try (Socket s = socket) {
+                InputStream in = s.getInputStream();
+                String first = line(in);
+                List<String> headers = new ArrayList<>();
+                String auth = "";
+                int length = 0;
+                for (String header = line(in); !header.isEmpty(); header = line(in)) {
+                    String name = header.substring(0, Math.max(0, header.indexOf(':'))).trim().toLowerCase();
+                    String value = header.substring(header.indexOf(':') + 1).trim();
+                    if (name.equals("proxy-authorization")) {
+                        auth = value;
+                    } else if (name.equals("content-length")) {
+                        length = Integer.parseInt(value);
+                    } else if (!name.equals("proxy-connection") && !name.equals("connection")) {
+                        headers.add(header);
+                    }
+                }
+                byte[] body = new byte[length];
+                for (int read = 0; read < length; ) {
+                    int n = in.read(body, read, length - read);
+                    if (n < 0) {
+                        break;
+                    }
+                    read += n;
+                }
+                OutputStream out = s.getOutputStream();
+                String wanted = "Basic " + java.util.Base64.getEncoder().encodeToString(("tg:" + password).getBytes(StandardCharsets.UTF_8));
+                if (!auth.equals(wanted)) {
+                    refused.add(first + (auth.isEmpty() ? " (no password)" : " (wrong password)"));
+                    out.write(("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"tinyproxy\"\r\n"
+                        + "Content-Length: 0\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                    return;
+                }
+                passed.add(first);
+                // "POST http://127.0.0.1:1234/v1/messages HTTP/1.1": passed on to that address, as a plain request.
+                String[] parts = first.split(" ");
+                java.net.URL target = new java.net.URL(parts[1]);
+                try (Socket onward = new Socket(target.getHost(), target.getPort())) {
+                    StringBuilder request = new StringBuilder(parts[0] + " " + target.getFile() + " HTTP/1.1\r\n");
+                    for (String header : headers) {
+                        request.append(header).append("\r\n");
+                    }
+                    request.append("Content-Length: ").append(length).append("\r\nConnection: close\r\n\r\n");
+                    OutputStream to = onward.getOutputStream();
+                    to.write(request.toString().getBytes(StandardCharsets.UTF_8));
+                    to.write(body);
+                    to.flush();
+                    InputStream from = onward.getInputStream();
+                    byte[] buffer = new byte[16384];
+                    for (int n = from.read(buffer); n > 0; n = from.read(buffer)) {
+                        out.write(buffer, 0, n);
+                    }
+                    out.flush();
+                }
+            } catch (IOException | RuntimeException e) {
+                // (the client went away)
+            }
+        }
     }
 
     void stop() {
@@ -103,7 +205,7 @@ final class Fakes {
         }
     }
 
-    private static String line(InputStream in) throws IOException {
+    static String line(InputStream in) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         int b;
         while ((b = in.read()) >= 0 && b != '\n') {

@@ -8,7 +8,13 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.Authenticator;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.PasswordAuthentication;
+import java.net.Proxy;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -124,6 +130,88 @@ public final class Engine {
             this.mime = mime;
             this.data = data;
         }
+    }
+
+    /** The proxy Claude is reached through, when a home VPN is what Claude refuses: the groups server, from the link
+     * in the settings (http://user:password@host:port). Only Claude's requests go through it; the tweets and their
+     * photos are read directly. The connection stays encrypted from the phone to Claude (the proxy only passes it on). */
+    public static final class ProxyLink {
+        final String host;
+        final int port;
+        final String user;
+        final String password;
+
+        ProxyLink(String host, int port, String user, String password) {
+            this.host = host;
+            this.port = port;
+            this.user = user;
+            this.password = password;
+        }
+
+        /** Where it is, without its password. */
+        public String shown() {
+            return host + ":" + port;
+        }
+    }
+
+    static volatile ProxyLink proxy;
+
+    /** A proxy's link as pasted (http://user:password@host:port, or without http://), or null when it is not one. */
+    public static ProxyLink parseProxy(String text) {
+        String link = text == null ? "" : text.trim();
+        if (link.isEmpty()) {
+            return null;
+        }
+        if (!link.contains("://")) {
+            link = "http://" + link;
+        }
+        try {
+            URI uri = new URI(link);
+            String path = uri.getRawPath();
+            if (!"http".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || uri.getPort() < 1 || uri.getPort() > 65535
+                    || (path != null && !path.isEmpty() && !path.equals("/")) || uri.getRawQuery() != null) {
+                return null;
+            }
+            String info = uri.getUserInfo() == null ? "" : uri.getUserInfo();
+            int colon = info.indexOf(':');
+            return new ProxyLink(uri.getHost(), uri.getPort(), colon < 0 ? info : info.substring(0, colon),
+                colon < 0 ? "" : info.substring(colon + 1));
+        } catch (URISyntaxException e) {
+            return null;
+        }
+    }
+
+    /** Claude is reached through this proxy from now on (null: directly). Its username and password are given when
+     * the proxy asks for them (and to nobody else). */
+    public static void useProxy(ProxyLink link) {
+        proxy = link;
+        Authenticator.setDefault(link == null || link.user.isEmpty() ? null : new Authenticator() {
+            @Override
+            protected PasswordAuthentication getPasswordAuthentication() {
+                ProxyLink now = proxy;
+                if (now == null || getRequestorType() != RequestorType.PROXY) {
+                    return null;
+                }
+                return new PasswordAuthentication(now.user, now.password.toCharArray());
+            }
+        });
+    }
+
+    /** Why the proxy itself turned the request away (its password, or an address it does not let through), or
+     * null when it did not. */
+    static String proxyRefusal(ProxyLink through, String message) {
+        if (through == null) {
+            return null;
+        }
+        // (A status, as a word of its own: a port like 44071 in the message is not one.)
+        String m = String.valueOf(message).toLowerCase(Locale.ROOT);
+        if (m.contains("authenticate") || Pattern.compile("\\b40[17]\\b").matcher(m).find()) {
+            return "البروكسي رفض اسم المستخدم أو كلمة المرور. راجع رابطه في «الإعدادات».";
+        }
+        if (Pattern.compile("\\b403\\b").matcher(m).find()) {
+            return "البروكسي لا يسمح بالوصول إلى Claude. أعد تشغيل أمر إعداده على سيرفرك.";
+        }
+        return null;
     }
 
     public static boolean validKey(String key) {
@@ -287,6 +375,7 @@ public final class Engine {
      * out. */
     static String askClaude(String key, String model, List<Photo> photos, String text) throws CommentError {
         List<Photo> sent = new ArrayList<>(photos);
+        ProxyLink through = proxy;
         boolean effort = !effortRefused.contains(model);
         int busy = 0;
         int lost = 0;
@@ -308,7 +397,7 @@ public final class Engine {
                 if (effort) {
                     body.put("output_config", new JSONObject().put("effort", EFFORT));
                 }
-                HttpURLConnection c = open(claudeUrl, 90_000);
+                HttpURLConnection c = open(claudeUrl, 90_000, through);
                 c.setRequestMethod("POST");
                 c.setDoOutput(true);
                 c.setRequestProperty("Content-Type", "application/json");
@@ -346,11 +435,16 @@ public final class Engine {
                     detail = "";
                 }
             } catch (IOException | JSONException e) {
+                String refused = e instanceof IOException ? proxyRefusal(through, e.getMessage()) : null;
+                if (refused != null) {
+                    throw new CommentError(refused);
+                }
                 if (lost < 2) {
                     sleep(busyWaitsMs[lost++]);
                     continue;
                 }
-                throw new CommentError("تعذّر الاتصال بـ Claude. تأكد من الاتصال بالإنترنت.");
+                throw new CommentError(through == null ? "تعذّر الاتصال بـ Claude. تأكد من الاتصال بالإنترنت."
+                    : "تعذّر الاتصال بـ Claude عبر البروكسي. تأكد من رابطه في «الإعدادات» ومن أن سيرفرك يعمل.");
             }
             detail = detail.replace(key, "…").replaceAll("\\s+", " ").trim();
             if (detail.length() > 160) {
@@ -366,8 +460,21 @@ public final class Engine {
                 sent.clear();                // a photo it cannot read: asked again from the text alone
                 continue;
             }
-            if (status == 401 || status == 403) {
-                throw new CommentError("مفتاح Claude غير صالح أو بلا صلاحية. راجعه في «الإعدادات».");
+            if (status == 407) {
+                throw new CommentError(proxyRefusal(through, "407"));
+            }
+            if (status == 401) {
+                throw new CommentError("مفتاح Claude غير صالح. راجعه في «الإعدادات».");
+            }
+            if (status == 403) {
+                if (lower.contains("not allowed") || lower.contains("forbidden") || lower.contains("region")
+                        || lower.contains("country")) {
+                    // Claude does not take requests from where this one comes: a home VPN, most often.
+                    throw new CommentError(through == null
+                        ? "Claude لا يقبل الطلب من هذه الشبكة. إذا كان عندك VPN منزلي فضع رابط «البروكسي» في «الإعدادات»."
+                        : "Claude لا يقبل الطلب حتى عبر البروكسي.");
+                }
+                throw new CommentError("مفتاح Claude بلا صلاحية لهذا الطلب" + (detail.isEmpty() ? "." : ": " + detail));
             }
             if ("enforced_spend_limit_reached".equals(errorCode) || lower.contains("usage limits")
                     || lower.contains("credit balance") || lower.contains("billing")) {
@@ -502,7 +609,13 @@ public final class Engine {
     }
 
     private static HttpURLConnection open(String address, int readTimeout) throws IOException {
-        HttpURLConnection c = (HttpURLConnection) new URL(address).openConnection();
+        return open(address, readTimeout, null);
+    }
+
+    private static HttpURLConnection open(String address, int readTimeout, ProxyLink through) throws IOException {
+        URL url = new URL(address);
+        HttpURLConnection c = (HttpURLConnection) (through == null ? url.openConnection()
+            : url.openConnection(new Proxy(Proxy.Type.HTTP, new InetSocketAddress(through.host, through.port))));
         c.setConnectTimeout(20_000);
         c.setReadTimeout(readTimeout);
         c.setUseCaches(false);

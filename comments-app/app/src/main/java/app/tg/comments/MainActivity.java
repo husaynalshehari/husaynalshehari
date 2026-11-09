@@ -62,9 +62,11 @@ public class MainActivity extends Activity {
     EditText keyField;
     EditText modelField;
     EditText tweetsField;
+    EditText proxyField;
     RadioGroup voiceGroup;
     final int[] voiceIds = new int[3];
     TextView keyNow;
+    TextView proxyNow;
     TextView settingsNote;
     TextView settingsSummary;
     TextView notice;
@@ -88,6 +90,7 @@ public class MainActivity extends Activity {
             prefs.edit().putInt("manner", rng.nextInt(Engine.MANNERS.length)).apply();
         }
         pool = Executors.newFixedThreadPool(PARALLEL);
+        Engine.useProxy(Engine.parseProxy(prefs.getString("proxy", "")));
         setContentView(buildPage());
         refreshSettings();
         showSettings(!Engine.validKey(prefs.getString("key", "")));
@@ -154,6 +157,13 @@ public class MainActivity extends Activity {
             voiceGroup.addView(choice, place);
         }
         settingsBody.addView(voiceGroup);
+        settingsBody.addView(label("البروكسي (لمن عنده VPN منزلي فقط)"));
+        proxyField = field("http://tg:…@1.2.3.4:8899");
+        proxyField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        leftToRight(proxyField);
+        settingsBody.addView(proxyField);
+        proxyNow = text("", 12, MUTED, false);
+        settingsBody.addView(proxyNow, margins(0, dp(4), 0, 0));
         Button save = primaryButton("حفظ");
         save.setOnClickListener(v -> saveSettings());
         settingsBody.addView(save, margins(0, dp(12), 0, 0));
@@ -204,10 +214,14 @@ public class MainActivity extends Activity {
         String model = prefs.getString("model", Engine.DEFAULT_MODEL);
         int voice = Math.floorMod(prefs.getInt("voice", 0), VOICE_LABELS.length);
         boolean ready = Engine.validKey(key);
+        Engine.ProxyLink proxy = Engine.parseProxy(prefs.getString("proxy", ""));
         keyNow.setText(ready ? "محفوظ: " + Engine.shown(key) : "لا يوجد مفتاح محفوظ.");
         modelField.setText(model);
         voiceGroup.check(voiceIds[voice]);
-        settingsSummary.setText(ready ? "مفتاح Claude محفوظ · " + model + " · " + VOICE_LABELS[voice] : "أدخل مفتاح Claude لتبدأ.");
+        proxyField.setText(proxy == null ? "" : prefs.getString("proxy", ""));
+        proxyNow.setText(proxy == null ? "بدون بروكسي: يتصل التطبيق بـ Claude مباشرة." : "يمر الاتصال بـ Claude عبر " + proxy.shown());
+        settingsSummary.setText(ready ? "مفتاح Claude محفوظ · " + model + " · " + VOICE_LABELS[voice] + (proxy == null ? "" : " · عبر البروكسي")
+            : "أدخل مفتاح Claude لتبدأ.");
     }
 
     void showSettings(boolean open) {
@@ -235,13 +249,24 @@ public class MainActivity extends Activity {
             settingsError("اسم النموذج غير صالح.");
             return;
         }
+        String proxyText = proxyField.getText().toString().trim();
+        Engine.ProxyLink proxy = Engine.parseProxy(proxyText);
+        if (!proxyText.isEmpty() && proxy == null) {
+            settingsError("رابط البروكسي غير صالح. مثاله: http://tg:كلمة_المرور@1.2.3.4:8899");
+            return;
+        }
+        if (proxy != null && !proxyText.contains("://")) {
+            proxyText = "http://" + proxyText;
+        }
         int voice = 0;
         for (int i = 0; i < voiceIds.length; i++) {
             if (voiceGroup.getCheckedRadioButtonId() == voiceIds[i]) {
                 voice = i;
             }
         }
-        prefs.edit().putString("key", key.isEmpty() ? current : key).putString("model", model).putInt("voice", voice).apply();
+        prefs.edit().putString("key", key.isEmpty() ? current : key).putString("model", model).putInt("voice", voice)
+            .putString("proxy", proxy == null ? "" : proxyText).apply();
+        Engine.useProxy(proxy);
         keyField.setText("");
         hideKeyboard();
         refreshSettings();

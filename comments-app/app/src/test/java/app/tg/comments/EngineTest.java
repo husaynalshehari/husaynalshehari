@@ -181,7 +181,11 @@ public class EngineTest {
     @Test
     public void whatStopsAComment() throws Exception {
         Object[][] cases = {
-            {401, Fakes.claudeError("authentication_error", "invalid x-api-key"), "مفتاح Claude غير صالح أو بلا صلاحية. راجعه في «الإعدادات»."},
+            {401, Fakes.claudeError("authentication_error", "invalid x-api-key"), "مفتاح Claude غير صالح. راجعه في «الإعدادات»."},
+            {403, Fakes.claudeError("forbidden", "Request not allowed"),
+                "Claude لا يقبل الطلب من هذه الشبكة. إذا كان عندك VPN منزلي فضع رابط «البروكسي» في «الإعدادات»."},
+            {403, Fakes.claudeError("permission_error", "Your API key does not have permission to use the specified resource."),
+                "مفتاح Claude بلا صلاحية لهذا الطلب: Your API key does not have permission to use the specified resource."},
             {400, Fakes.claudeError("invalid_request_error", "Your credit balance is too low to access the Anthropic API."),
                 "بلغ حساب Claude حد الصرف أو نفد رصيده."},
             {404, Fakes.claudeError("not_found_error", "model: claude-nope"), "النموذج غير موجود. راجع اسمه في «الإعدادات»."},
@@ -210,6 +214,94 @@ public class EngineTest {
             fail("no error");
         } catch (Engine.CommentError e) {
             assertEquals("تعذّر الاتصال بـ Claude. تأكد من الاتصال بالإنترنت.", e.getMessage());
+        }
+    }
+
+    @Test
+    public void proxyLinks() {
+        Engine.ProxyLink link = Engine.parseProxy(" http://tg:Pass123abc@1.2.3.4:8899 ");
+        assertEquals("1.2.3.4", link.host);
+        assertEquals(8899, link.port);
+        assertEquals("tg", link.user);
+        assertEquals("Pass123abc", link.password);
+        assertEquals("1.2.3.4:8899", link.shown());
+        assertEquals("Pass123abc", Engine.parseProxy("tg:Pass123abc@1.2.3.4:8899").password);      // (without http://)
+        assertEquals("", Engine.parseProxy("server.example.com:3128").user);
+        for (String bad : new String[] {"", "hello", "http://1.2.3.4", "http://1.2.3.4:99999", "https://tg:p@1.2.3.4:8899",
+                "socks5://1.2.3.4:1080", "http://tg:p@1.2.3.4:8899/path", "http://tg:p@1.2.3.4:8899?x=1"}) {
+            assertEquals(bad, null, Engine.parseProxy(bad));
+        }
+    }
+
+    @Test
+    public void claudeThroughTheProxy() throws Exception {
+        Fakes.FakeProxy server = new Fakes.FakeProxy("Secret123abc");
+        try {
+            Engine.useProxy(Engine.parseProxy(server.link("tg", "Secret123abc")));
+            Engine.Tweet tweet = first();
+            String reply = comment(tweet, Engine.downloadPhotos(tweet));
+            assertEquals("والله الزحمة صارت جزء من يومنا وما لها حل قريب أبدا", reply);
+            // Asked for the password first, then given it; only Claude's request went through it.
+            assertEquals(Collections.singletonList("POST http://127.0.0.1:" + fakes.port + "/v1/messages HTTP/1.1"), server.passed);
+            assertTrue(server.refused.size() >= 1 && server.refused.get(0).endsWith("(no password)"));
+            assertEquals(1, fakes.asked.size());
+            assertEquals(null, fakes.asked.get(0).headers.get("proxy-authorization"));     // (not passed on to Claude)
+            assertEquals(Fakes.CLAUDE_KEY, fakes.asked.get(0).headers.get("x-api-key"));
+            assertEquals(Collections.singletonList("/media/a.jpg?name=medium"), fakes.photoPaths);
+        } finally {
+            Engine.useProxy(null);
+            server.stop();
+        }
+    }
+
+    @Test
+    public void aWrongProxyPasswordOrAProxyThatIsDown() throws Exception {
+        Fakes.FakeProxy server = new Fakes.FakeProxy("Secret123abc");
+        Engine.Tweet tweet = first();
+        try {
+            Engine.useProxy(Engine.parseProxy(server.link("tg", "Wrong123abc")));
+            try {
+                comment(tweet, Collections.emptyList());
+                fail("went through with a wrong password");
+            } catch (Engine.CommentError e) {
+                assertEquals("البروكسي رفض اسم المستخدم أو كلمة المرور. راجع رابطه في «الإعدادات».", e.getMessage());
+            }
+            assertTrue(server.passed.isEmpty() && fakes.asked.isEmpty());
+            // A proxy that is down: a port nothing listens on (taken, then let go at once).
+            int closedPort;
+            try (java.net.ServerSocket probe = new java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))) {
+                closedPort = probe.getLocalPort();
+            }
+            Engine.useProxy(Engine.parseProxy("http://tg:Secret123abc@127.0.0.1:" + closedPort));
+            try {
+                comment(tweet, Collections.emptyList());
+                fail("went through a proxy that is down");
+            } catch (Engine.CommentError e) {
+                assertEquals("تعذّر الاتصال بـ Claude عبر البروكسي. تأكد من رابطه في «الإعدادات» ومن أن سيرفرك يعمل.", e.getMessage());
+            }
+            fakes.answer(403, Fakes.claudeError("forbidden", "Request not allowed"));
+            Fakes.FakeProxy again = new Fakes.FakeProxy("Secret123abc");
+            Engine.useProxy(Engine.parseProxy(again.link("tg", "Secret123abc")));
+            try {
+                comment(tweet, Collections.emptyList());
+                fail("no error");
+            } catch (Engine.CommentError e) {
+                assertEquals("Claude لا يقبل الطلب حتى عبر البروكسي.", e.getMessage());
+            } finally {
+                again.stop();
+            }
+            assertEquals("البروكسي لا يسمح بالوصول إلى Claude. أعد تشغيل أمر إعداده على سيرفرك.",
+                Engine.proxyRefusal(Engine.parseProxy("1.2.3.4:8899"), "Unexpected response code for CONNECT: 403"));
+            assertEquals("البروكسي رفض اسم المستخدم أو كلمة المرور. راجع رابطه في «الإعدادات».",
+                Engine.proxyRefusal(Engine.parseProxy("1.2.3.4:8899"), "Failed to authenticate with proxy"));
+            assertEquals(null, Engine.proxyRefusal(null, "Unexpected response code for CONNECT: 403"));
+            assertEquals("البروكسي رفض اسم المستخدم أو كلمة المرور. راجع رابطه في «الإعدادات».", Engine.proxyRefusal(
+                Engine.parseProxy("1.2.3.4:8899"), "Unable to tunnel through proxy. Proxy returns \"HTTP/1.1 401 Unauthorized\""));
+            assertEquals(null, Engine.proxyRefusal(Engine.parseProxy("1.2.3.4:8899"), "Failed to connect to /127.0.0.1:44071"));
+            assertEquals(null, Engine.proxyRefusal(Engine.parseProxy("1.2.3.4:8899"), "connect to 127.0.0.1:34030 failed: refused"));
+        } finally {
+            Engine.useProxy(null);
+            server.stop();
         }
     }
 

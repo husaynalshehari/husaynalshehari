@@ -119,6 +119,30 @@ public class MainActivityTest {
         }
         assertEquals(Fakes.CLAUDE_KEY, again.prefs.getString("key", ""));
         assertEquals("claude-haiku-5-5", again.prefs.getString("model", ""));
+
+        // The proxy: a link that is not one is refused; one is kept (http:// added), shown without its password,
+        // and used; an empty box goes back to no proxy.
+        assertEquals("بدون بروكسي: يتصل التطبيق بـ Claude مباشرة.", again.proxyNow.getText().toString());
+        again.settingsToggle.performClick();
+        again.proxyField.setText("http://tg:pass@1.2.3.4");
+        again.saveSettings();
+        assertEquals("رابط البروكسي غير صالح. مثاله: http://tg:كلمة_المرور@1.2.3.4:8899", again.settingsNote.getText().toString());
+        assertEquals("", again.prefs.getString("proxy", ""));
+        again.proxyField.setText("tg:Secret123abc@1.2.3.4:8899");
+        again.saveSettings();
+        assertEquals("http://tg:Secret123abc@1.2.3.4:8899", again.prefs.getString("proxy", ""));
+        assertEquals("يمر الاتصال بـ Claude عبر 1.2.3.4:8899", again.proxyNow.getText().toString());
+        assertEquals("مفتاح Claude محفوظ · claude-haiku-5-5 · مؤنث · عبر البروكسي", again.settingsSummary.getText().toString());
+        assertEquals("1.2.3.4:8899", Engine.proxy.shown());
+        MainActivity third = Robolectric.buildActivity(MainActivity.class).setup().get();       // (opened again: still used)
+        assertEquals("http://tg:Secret123abc@1.2.3.4:8899", third.proxyField.getText().toString());
+        assertEquals("Secret123abc", Engine.proxy.password);
+        third.settingsToggle.performClick();
+        third.proxyField.setText("");
+        third.saveSettings();
+        assertEquals("", third.prefs.getString("proxy", "x"));
+        assertEquals(null, Engine.proxy);
+        assertEquals("مفتاح Claude محفوظ · claude-haiku-5-5 · مؤنث", third.settingsSummary.getText().toString());
     }
 
     @Test
@@ -232,7 +256,7 @@ public class MainActivityTest {
         waitForCards();
         MainActivity.Card card = page.cards.get(0);
         assertEquals("الزحمة اليوم في طريق الملك فهد ما لها حل", card.words.getText().toString());
-        assertEquals("مفتاح Claude غير صالح أو بلا صلاحية. راجعه في «الإعدادات».", card.reply.getText().toString());
+        assertEquals("مفتاح Claude غير صالح. راجعه في «الإعدادات».", card.reply.getText().toString());
         assertFalse(card.copyButton.isEnabled());
     }
 }
