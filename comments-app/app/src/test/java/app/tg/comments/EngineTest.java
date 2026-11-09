@@ -213,6 +213,21 @@ public class EngineTest {
         }
     }
 
+    /** The tests run on the computer's Java, whose regex takes more than Android's (ICU): what Android refuses
+     * (it throws IllegalArgumentException on a phone) is kept out of the app's code. */
+    @Test
+    public void noRegexFlagAndroidRefuses() throws Exception {
+        for (String name : new String[] {"Engine.java", "MainActivity.java"}) {
+            String source = new String(java.nio.file.Files.readAllBytes(
+                java.nio.file.Paths.get("src/main/java/app/tg/comments/" + name)), java.nio.charset.StandardCharsets.UTF_8);
+            for (String refused : new String[] {"UNICODE_CHARACTER_CLASS", "CANON_EQ", "(?U)"}) {
+                assertFalse(name + " uses " + refused, source.contains(refused));
+            }
+        }
+        assertEquals("ما أتوقع إنها بتخلص قريب", Engine.clean("Reply: ما أتوقع إنها بتخلص قريب"));
+        assertEquals("ما أتوقع إنها بتخلص قريب", Engine.clean("تعليقي: ما أتوقع إنها بتخلص قريب"));
+    }
+
     @Test
     public void theReplyAsItIsPosted() {
         assertEquals("الزحمة حلوة بس مو للكل", Engine.polish("الزحمةُ حلوةٌ، بس مو للكل"));

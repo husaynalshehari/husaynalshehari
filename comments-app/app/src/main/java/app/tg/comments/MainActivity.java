@@ -312,7 +312,8 @@ public class MainActivity extends Activity {
             String message = e.getMessage();
             main.post(() -> card.showError(message));
         } catch (RuntimeException e) {
-            main.post(() -> card.showError("حدث خطأ غير متوقع. أعد المحاولة."));
+            String kind = e.getClass().getSimpleName();      // (named, so that it can be found and fixed)
+            main.post(() -> card.showError("حدث خطأ غير متوقع (" + kind + "). أعد المحاولة."));
         } finally {
             main.post(this::oneDone);
         }

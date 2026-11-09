@@ -432,8 +432,8 @@ public final class Engine {
         String text = (raw == null ? "" : raw).replaceAll("\\s+", " ").trim().replace("**", "");
         text = Pattern.compile("^(?:reply|comment|التعليق|الرد|الدعاء)\\s*[:：\\-]\\s*", Pattern.CASE_INSENSITIVE)
             .matcher(text).replaceFirst("");
-        text = Pattern.compile("^[\\w\\u0600-\\u06FF]{2,24}\\s*[:：]\\s*", Pattern.UNICODE_CHARACTER_CLASS)
-            .matcher(text).replaceFirst("");
+        // (Arabic letters named by their range: Android's regex refuses the flag for Unicode word letters.)
+        text = Pattern.compile("^[\\w\\u0600-\\u06FF]{2,24}\\s*[:：]\\s*").matcher(text).replaceFirst("");
         text = stripChars(text, "\"'«»“” ");
         if (text.length() > 280) {
             String cut = text.substring(0, 280);
