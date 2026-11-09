@@ -3077,15 +3077,14 @@ DEFAULT_REPLY_VOICE = "male"
 # How a reply takes the tweet: one is drawn at random for each reply, so the group's accounts do not all answer
 # one tweet the same way (and one account does not answer every tweet the same way).
 REPLY_ANGLES = (
-    "your own take on it, the way you would say it to a friend",
+    "a frank remark on its point, the way people talk among friends",
     "you disagree with one point in it, and say why",
-    "a short experience of yours that it reminds you of",
     "a detail in it that most people will miss",
     "a light, dry joke about the situation",
-    "you doubt one part of it, as someone who has seen otherwise",
+    "you doubt one part of it, and say what does not add up",
     "a comparison with something from everyday life",
-    "what you would do in that situation",
-    "one honest feeling it gives you, and why",
+    "what it will lead to, or what comes next",
+    "a short question about one point in it",
 )
 # How long, in words: drawn at random too, all within REPLY_MAX_CHARS.
 REPLY_LENGTHS = ((6, 10), (8, 13), (10, 16))
@@ -3103,7 +3102,7 @@ REPLY_MANNERS = (
     "blunt and critical, but not rude",
     "easygoing; now and then one emoji at the end",
     "curious; sometimes ends with a short question",
-    "practical; speaks from experience",
+    "matter-of-fact; sticks to what the tweet says",
     "playful, with everyday slang",
 )
 # The last replies written on this copy, by account and by tweet: the next reply is told not to look like them.
@@ -3133,13 +3132,17 @@ def remember_reply(account: str, tweet_id: str, text: str) -> None:
 
 
 def reply_prompt(voice: str, account: str = "", tweet_id: str = "") -> str:
-    """What the model is asked for one reply: a personal opinion (not a compliment), in the account's manner, with
-    an angle and a length drawn for this reply, and the replies it must not look like."""
+    """What the model is asked for one reply: a remark on the tweet's topic, not about the writer (no stories or
+    experiences of theirs) and not a compliment, in the account's manner, with an angle and a length drawn for
+    this reply, and the replies it must not look like."""
     low, high = random.choice(REPLY_LENGTHS)
     prompt = (
-        "Write one public reply to this tweet, as one ordinary person scrolling X who gives your own personal opinion. "
+        "Write one public reply to this tweet, as an ordinary person scrolling X who comments on what it says. "
         "Read the whole tweet first and answer what it really says (its point, and its ending when it tells a story); "
         "do not guess beyond it. "
+        "Not personal: the reply is about the tweet's topic, not about you. No stories or experiences of yours, "
+        "nothing that happened to you, your family or your friends, and nothing about your own life (nothing like: "
+        "صار معي، جربت، شفت بنفسي، أخوي، عندنا في البيت، أتذكر لما، لو كنت مكانه). "
         "Speak about its topic, not to please its author: do not compliment, thank or flatter the author, do not "
         "praise the tweet (nothing like: well said, you're right, great post, صدقت، كفو، أبدعت، كلامك ذهب), and do "
         "not just agree. Honest, never rude: no insults, and do not mock the author. "
@@ -3155,7 +3158,7 @@ def reply_prompt(voice: str, account: str = "", tweet_id: str = "") -> str:
         "commas (، or ,). " + REPLY_VOICES.get(voice, REPLY_VOICES[DEFAULT_REPLY_VOICE]) + " "
         "Sound like a real person, specific and casual, not a teacher, a preacher, a brand or an assistant: no "
         "advice or lessons to the author or to people (nothing like: الأولى أن، يجب، الأفضل أن، تذكّر، نصيحتي), no "
-        "general wisdom or sayings, no neat conclusion; say what you think or feel, from your own side. "
+        "general wisdom or sayings, no neat conclusion; just make your point about the topic itself. "
         "The image is only a screenshot to read the tweet: never mention it, the picture, the post or the tweet "
         "(no الصورة، المنشور، التغريدة); react to what is in them. "
         "Do not open with filler (like صراحة، فعلاً، والله) or by repeating the tweet. "
