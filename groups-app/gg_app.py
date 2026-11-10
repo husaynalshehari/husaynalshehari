@@ -4765,19 +4765,26 @@ def channel_not_installed(exc: Exception) -> bool:
                                          "error while loading shared libraries"))
 
 
-def open_x_profile(playwright, auth_token: str, profile_dir: Path, user_agent: str = "", viewport: dict | None = None):
-    """Open the account's permanent browser profile (created on first use)."""
+def open_x_profile(playwright, auth_token: str, profile_dir: Path, viewport: dict | None = None):
+    """Open the account's permanent browser profile (created on first use).
+
+    In the app the browser is the phone's own, as it is: no user agent, language or other mark of another
+    browser is given to it, and its page is as wide as the phone's screen. Only the page's height is set here
+    (the width in the size below is not used by the app's browser)."""
     profile_dir.mkdir(parents=True, exist_ok=True)
     options = browser_launch_options()
     settings = dict(
         headless=True,
         viewport=viewport or screen_size(NORMAL_VIEWPORT_HEIGHT),
-        user_agent=user_agent or (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ),
-        locale="en-US",
     )
+    if not IN_APP:
+        settings.update(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+        )
     try:
         context = playwright.chromium.launch_persistent_context(str(profile_dir), **options, **settings)
     except Exception as exc:
@@ -4792,9 +4799,10 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path, user_agent: s
             print(f"   ({channel_unavailable[0]})", flush=True)
         options.pop("channel", None)
         context = playwright.chromium.launch_persistent_context(str(profile_dir), **options, **settings)
-    context.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
+    if not IN_APP:
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
     block_media(context)
     if auth_token:
         context.add_cookies([{
@@ -4821,10 +4829,8 @@ _login_jobs: queue.Queue = queue.Queue()
 _login_state: dict = {}
 _login_worker_started = False
 _login_worker_guard = threading.Lock()
-_MANUAL_LOGIN_AGENT = (
-    "Mozilla/5.0 (Linux; Android 14; SM-G998U) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-)
+# The height of the page where the user signs in by hand, and of a task that runs in that same browser.
+MANUAL_LOGIN_SCREEN = {"width": 412, "height": 820}
 
 
 def _login_worker() -> None:
@@ -4879,10 +4885,7 @@ def _open_login_browser() -> None:
     """One browser the user types into. Kept open so «تحقق» can read its session."""
     if not _login_page_open():
         playwright = sync_playwright().start()
-        context, page = open_x_profile(
-            playwright, "", PROFILES_DIR / "manual-login",
-            user_agent=_MANUAL_LOGIN_AGENT, viewport={"width": 412, "height": 820},
-        )
+        context, page = open_x_profile(playwright, "", PROFILES_DIR / "manual-login", viewport=dict(MANUAL_LOGIN_SCREEN))
         allow_media(page)
         _login_state.update(playwright=playwright, context=context, page=page)
     page = _login_state["page"]
@@ -5089,10 +5092,7 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
         def open_saved(target):
             if same_browser:
                 trace_click("التنفيذ على المتصفح الذي سُجّل الدخول إليه يدوياً")
-                return open_x_profile(
-                    target, auth_token, PROFILES_DIR / slot_name,
-                    user_agent=_MANUAL_LOGIN_AGENT, viewport={"width": 412, "height": 820},
-                )
+                return open_x_profile(target, auth_token, PROFILES_DIR / slot_name, viewport=dict(MANUAL_LOGIN_SCREEN))
             return open_x_profile(target, auth_token, PROFILES_DIR / slot_name)
 
         def restart(while_closed=None):

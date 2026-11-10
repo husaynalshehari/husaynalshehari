@@ -176,8 +176,9 @@ class DesktopBackend(Backend):
         self.resize(page, int(viewport["width"]), int(viewport["height"]))
         _apply_identity(page, options)
 
-    def resize(self, page, width: int, height: int) -> None:
+    def resize(self, page, width: int, height: int):
         page._call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, 20)
+        return width, height
 
     def set_cookies(self, page, cookies: list) -> None:
         rows = []
@@ -243,7 +244,11 @@ class DesktopBackend(Backend):
 
 
 class AndroidBackend(Backend):
-    """A WebView of the app, with the profile's own cookies and storage. The app shows it in «المتصفح»."""
+    """A WebView of the app, with the profile's own cookies and storage. The app shows it in «المتصفح».
+
+    It is the phone's own browser as it is: the user agent, the language and the page's width that the script
+    asks for are not applied, and nothing else about the browser is made to look different. Only the page's height
+    is the script's (it needs a tall page while it collects from a group)."""
     kind = "android"
     _open_lock = threading.Lock()
     _slots = None
@@ -255,6 +260,7 @@ class AndroidBackend(Backend):
         self.session = None
         self._router = None
         self._emulated = False
+        self._width = 0
         viewport = options.get("viewport") or DEFAULT_VIEWPORT
         with AndroidBackend._open_lock:
             if AndroidBackend._slots is None:
@@ -265,8 +271,7 @@ class AndroidBackend(Backend):
         AndroidBackend._slots.acquire()
         self._held = True
         try:
-            self.id = int(self._host.open(Path(profile_dir).name, str(options.get("user_agent") or ""),
-                                          int(viewport["width"]), int(viewport["height"])))
+            self.id = int(self._host.open(Path(profile_dir).name, int(viewport["height"])))
             if self.id <= 0:
                 raise Error("BrowserType.launch_persistent_context: " + (str(self._host.lastError() or "") or "تعذّر فتح متصفح التطبيق."))
             self._endpoint = _cdp.AbstractEndpoint(f"webview_devtools_remote_{os.getpid()}")
@@ -291,10 +296,12 @@ class AndroidBackend(Backend):
             raise
 
     def started(self, page, options: dict) -> None:
-        _apply_identity(page, options)
-        viewport = options.get("viewport")
-        if viewport:
-            self._settle(page, int(viewport["width"]), int(viewport["height"]))
+        # As Playwright does for every page, the page behaves as the one in front (it takes typing while another
+        # view is on top). Nothing of the browser's identity is touched.
+        _quietly(page, "Emulation.setFocusEmulationEnabled", {"enabled": True})
+        viewport = options.get("viewport") or DEFAULT_VIEWPORT
+        width, height = self._fit(page, int(viewport["height"]))
+        page._viewport = {"width": width, "height": height}
 
     def wait_ready(self) -> None:
         # While the app is not on the screen its browser draws nothing and takes no clicks: the task rests here
@@ -308,35 +315,48 @@ class AndroidBackend(Backend):
             if self.session is None or self.session.closed:
                 return
 
-    def _settle(self, page, width: int, height: int) -> bool:
-        """Whether the page became this size (the WebView is laid out a moment after it is asked to)."""
+    def _seen(self, page) -> list:
+        try:
+            seen = page._run("[window.innerWidth, window.innerHeight]", 10) or [0, 0]
+        except Error as exc:
+            if CLOSED_MESSAGE in str(exc):
+                raise
+            seen = [0, 0]
+        return [int(seen[0] or 0), int(seen[1] or 0)]
+
+    def _settle(self, page, height: int) -> bool:
+        """Whether the page became this tall (the WebView is laid out a moment after it is asked to)."""
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:
-            try:
-                seen = page._run("[window.innerWidth, window.innerHeight]", 10) or [0, 0]
-            except Error as exc:
-                if CLOSED_MESSAGE in str(exc):
-                    raise
-                seen = [0, 0]
-            if abs(seen[0] - width) <= 2 and abs(seen[1] - height) <= 2:
+            seen = self._seen(page)
+            if seen[0] > 0 and abs(seen[1] - height) <= 2:
+                self._width = seen[0]
                 return True
             time.sleep(0.1)
         return False
 
-    def resize(self, page, width: int, height: int) -> None:
-        self._host.resize(self.id, width, height)
+    def _fit(self, page, height: int) -> tuple:
+        """Wait until the page is this tall. The page's size as it is then: the phone's own width, and the height."""
+        if not self._emulated and not self._settle(page, height):
+            # The WebView did not take the height as its own: the page is told the height instead (its width is
+            # still left alone: a width of 0 there means "as it is").
+            print(f"المتصفح لم يأخذ الطول {height} من الشاشة، فيُعطى للصفحة مباشرة.", flush=True)
+            self._emulated = True
         if self._emulated:
-            page._call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height, "deviceScaleFactor": 0, "mobile": False}, 20)
-            return
-        if not self._settle(page, width, height):
-            # The WebView did not take the size as its own: the page is told the size instead.
-            print(f"المتصفح لم يأخذ المقاس {width}×{height} من الشاشة، فيُعطى للصفحة مباشرة.", flush=True)
             try:
-                page._call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height, "deviceScaleFactor": 0, "mobile": False}, 20)
-                self._emulated = True
+                page._call("Emulation.setDeviceMetricsOverride", {"width": 0, "height": height, "deviceScaleFactor": 0, "mobile": False}, 20)
             except Error as exc:
                 if CLOSED_MESSAGE in str(exc):
                     raise
+        width = self._seen(page)[0] or self._width
+        if width > 0:
+            self._width = width
+        return (self._width or DEFAULT_VIEWPORT["width"]), height
+
+    def resize(self, page, width: int, height: int):
+        """Only the height is taken: the width stays the phone's. The size the page has after."""
+        self._host.resize(self.id, int(height))
+        return self._fit(page, int(height))
 
     def set_cookies(self, page, cookies: list) -> None:
         for cookie in cookies:

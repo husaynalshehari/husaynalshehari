@@ -12,7 +12,6 @@ import android.view.View;
 import android.view.WindowManager;
 import android.webkit.WebView;
 
-import androidx.webkit.UserAgentMetadata;
 
 import org.junit.After;
 import org.junit.Before;
@@ -35,7 +34,6 @@ import java.util.concurrent.Future;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 35, qualifiers = "ar-w411dp-h891dp-xxhdpi")
 public class AppTest {
-    static final String UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
     ActivityController<MainActivity> controller;
     MainActivity page;
     ExecutorService script;
@@ -96,7 +94,8 @@ public class AppTest {
 
     @Test
     public void aBrowserAsTheScriptAsksForIt() throws Exception {
-        int id = fromScript(() -> BrowserHost.open("0a1b2c3d4e5f6a7b8c9d0e1f", UA, 600, 1800));
+        String ownAgent = new WebView(page).getSettings().getUserAgentString();
+        int id = fromScript(() -> BrowserHost.open("0a1b2c3d4e5f6a7b8c9d0e1f", 1800));
         assertTrue("opened: " + BrowserHost.lastError(), id > 0);
         assertEquals(1, BrowserHost.count());
         assertEquals("المتصفح ●", page.tabBrowser.getText().toString());
@@ -104,30 +103,25 @@ public class AppTest {
         BrowserHost.Browser browser = BrowserHost.browsers.get(id);
         WebView view = browser.view;
         assertEquals("gg-0a1b2c3d4e5f6a7b8c9d0e1f", browser.profile);
-        assertEquals(UA, view.getSettings().getUserAgentString());
+        assertEquals(ownAgent, view.getSettings().getUserAgentString());      // (the phone's own: nothing is put in its place)
         assertTrue(view.getSettings().getJavaScriptEnabled());
         assertEquals(100, view.getSettings().getTextZoom());
         assertTrue(shadowOf(view).getLastLoadDataWithBaseURL().data.contains("<title>gg-" + id + "</title>"));
 
-        // The WebView is exactly the page's size (600×1800 CSS pixels at this screen's 3 pixels each), and is shown
-        // scaled so that its whole width fits the screen; the tab is as long as the scaled page.
+        // The WebView is as wide as the phone's screen, never scaled; only its height is the script's (1800 CSS
+        // pixels at this screen's 3 pixels each), and the tab is as long as the page.
         layout();
-        assertEquals(1800, view.getMeasuredWidth());
-        assertEquals(5400, view.getMeasuredHeight());
-        assertEquals(1233f / 1800f, view.getScaleX(), 0.001f);
-        assertEquals(view.getScaleX(), view.getScaleY(), 0.0001f);
         assertEquals(1233, page.stage.getMeasuredWidth());
-        assertEquals(Math.round(5400 * 1233f / 1800f), page.stage.getMeasuredHeight());
+        assertEquals(1233, view.getMeasuredWidth());
+        assertEquals(5400, view.getMeasuredHeight());
+        assertEquals(1f, view.getScaleX(), 0.0001f);
+        assertEquals(5400, page.stage.getMeasuredHeight());
 
-        // The script makes the page taller while it collects from a group, then a phone's width.
-        fromScript(() -> { BrowserHost.resize(id, 600, 25000); return true; });
+        // The script makes the page taller while it collects from a group: the width stays the phone's.
+        fromScript(() -> { BrowserHost.resize(id, 25000); return true; });
         layout();
-        assertEquals(1800, view.getMeasuredWidth());
+        assertEquals(1233, view.getMeasuredWidth());
         assertEquals(75000, view.getMeasuredHeight());
-        fromScript(() -> { BrowserHost.resize(id, 384, 854); return true; });
-        layout();
-        assertEquals(1152, view.getMeasuredWidth());
-        assertEquals(1f, view.getScaleX(), 0.0001f);                         // (narrower than the screen: not enlarged)
 
         // What else the script's side calls.
         fromScript(() -> { BrowserHost.setCookie(id, "https://x.com/", "auth_token=abc; Domain=.x.com; Path=/; Secure; HttpOnly; SameSite=Lax"); return true; });
@@ -139,7 +133,7 @@ public class AppTest {
         fromScript(() -> { BrowserHost.show(id); return true; });
 
         // A second browser, for another account at the same time.
-        int other = fromScript(() -> BrowserHost.open("ffffffffffffffffffffffff", UA, 600, 1800));
+        int other = fromScript(() -> BrowserHost.open("ffffffffffffffffffffffff", 1800));
         assertTrue(other > id);
         assertEquals(2, page.stage.getChildCount());
 
@@ -159,7 +153,7 @@ public class AppTest {
         assertEquals(0, BrowserHost.count());
         assertEquals("المتصفح", page.tabBrowser.getText().toString());
         assertEquals(0, page.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        assertTrue(fromScript(() -> BrowserHost.open("x", UA, 600, 1800)) > other);    // (numbers are not used twice)
+        assertTrue(fromScript(() -> BrowserHost.open("x", 1800)) > other);    // (numbers are not used twice)
     }
 
     @Test
@@ -186,17 +180,6 @@ public class AppTest {
         assertEquals("✓ فتح المتصفح والاتصال به\n✗ شيء: خطأ\n", page.reportText.getText().toString());
         page.onBackPressed();
         assertEquals(View.GONE, page.report.getVisibility());
-    }
-
-    @Test
-    public void whatTheBrowserSaysOfItself() {
-        UserAgentMetadata metadata = BrowserHost.metadata(UA);
-        assertEquals("Windows", metadata.getPlatform());
-        assertEquals("131.0.0.0", metadata.getFullVersion());
-        assertFalse(metadata.isMobile());
-        assertEquals(3, metadata.getBrandVersionList().size());
-        assertEquals("Google Chrome", metadata.getBrandVersionList().get(1).getBrand());
-        assertEquals("131", metadata.getBrandVersionList().get(1).getMajorVersion());
     }
 
     @Test

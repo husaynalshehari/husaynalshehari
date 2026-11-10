@@ -722,8 +722,9 @@ class Page:
 
     def set_viewport_size(self, viewport_size: dict) -> None:
         width, height = int(viewport_size["width"]), int(viewport_size["height"])
-        self._backend.resize(self, width, height)
-        self._viewport = {"width": width, "height": height}
+        # (the app's browser keeps the phone's own width: the size it says it has is the one waited for and kept)
+        width, height = self._backend.resize(self, width, height) or (width, height)
+        self._viewport = {"width": int(width), "height": int(height)}
         self._pointer_ratio = None
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:

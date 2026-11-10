@@ -6,10 +6,10 @@ import android.view.ViewGroup;
 import android.webkit.WebView;
 
 /**
- * Where the tasks' browsers show, on the «المتصفح» tab. Each browser's WebView is exactly as large as the page
- * the script asked for (600 CSS pixels wide by default, and as tall as the script makes it: up to 25000 while it
- * collects from a group), which is larger than a phone's screen; it is drawn scaled down so that its whole width
- * shows, and the tab scrolls down along it. The browser opened last is on top.
+ * Where the tasks' browsers show, on the «المتصفح» tab. Each browser's WebView is as wide as the phone's screen,
+ * as any browser on this phone is, so the page has the phone's real width; only its height is the script's (taller
+ * than the screen: up to 25000 CSS pixels while it collects from a group), and the tab scrolls down along it. The
+ * browser opened last is on top.
  */
 final class BrowserStage extends ViewGroup {
     BrowserStage(Context context) {
@@ -22,7 +22,7 @@ final class BrowserStage extends ViewGroup {
     }
 
     void add(BrowserHost.Browser browser) {
-        addView(browser.view, new LayoutParams(px(browser.cssWidth), px(browser.cssHeight)));
+        addView(browser.view, new LayoutParams(LayoutParams.MATCH_PARENT, px(browser.cssHeight)));
         requestLayout();
     }
 
@@ -63,10 +63,6 @@ final class BrowserStage extends ViewGroup {
         return tag instanceof BrowserHost.Browser ? (BrowserHost.Browser) tag : null;
     }
 
-    private float scaleFor(int childWidth, int width) {
-        return childWidth <= 0 || width <= 0 ? 1f : Math.min(1f, width / (float) childWidth);
-    }
-
     @Override
     protected void onMeasure(int widthSpec, int heightSpec) {
         int width = MeasureSpec.getSize(widthSpec);
@@ -74,11 +70,10 @@ final class BrowserStage extends ViewGroup {
         for (int i = 0; i < getChildCount(); i++) {
             View child = getChildAt(i);
             BrowserHost.Browser browser = of(child);
-            int w = browser == null ? width : px(browser.cssWidth);
             int h = browser == null ? width : px(browser.cssHeight);
-            child.measure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(h, MeasureSpec.EXACTLY));
+            child.measure(MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(h, MeasureSpec.EXACTLY));
             if (i == getChildCount() - 1) {
-                tall = Math.round(h * scaleFor(w, width));          // (the tab is as long as the browser on top)
+                tall = h;                                            // (the tab is as long as the browser on top)
             }
         }
         setMeasuredDimension(width, Math.max(tall, getSuggestedMinimumHeight()));
@@ -86,17 +81,9 @@ final class BrowserStage extends ViewGroup {
 
     @Override
     protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
-        int width = right - left;
         for (int i = 0; i < getChildCount(); i++) {
             View child = getChildAt(i);
-            int w = child.getMeasuredWidth();
-            int h = child.getMeasuredHeight();
-            child.layout(0, 0, w, h);
-            float scale = scaleFor(w, width);
-            child.setPivotX(0f);
-            child.setPivotY(0f);
-            child.setScaleX(scale);
-            child.setScaleY(scale);
+            child.layout(0, 0, child.getMeasuredWidth(), child.getMeasuredHeight());
         }
     }
 }

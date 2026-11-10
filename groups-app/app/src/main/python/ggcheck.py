@@ -21,8 +21,8 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>check</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>body{margin:0;font:16px sans-serif} #b{position:absolute;left:100px;top:300px;width:120px;height:60px}
 #pin{position:absolute;left:20px;top:400px;width:200px;height:30px}
-#box{position:absolute;left:20px;top:460px;width:400px;min-height:40px;border:1px solid #888}
-#scroller{position:absolute;left:20px;top:560px;width:400px;height:300px;overflow:auto;border:1px solid #888}
+#box{position:absolute;left:20px;top:460px;width:280px;min-height:40px;border:1px solid #888}
+#scroller{position:absolute;left:20px;top:560px;width:280px;height:300px;overflow:auto;border:1px solid #888}
 #menu{position:absolute;left:20px;top:900px} #hidden{display:none} #far{position:absolute;left:20px;top:1500px;width:100px;height:40px}
 </style></head><body>
 <button id="b" data-testid="like">tap</button>
@@ -148,21 +148,29 @@ def run(profile_root: str | None = None, online: bool = False, say=None) -> str:
         if not step("فتح المتصفح والاتصال به", opened):
             return "\n".join(lines + ["", "النتيجة: المتصفح لم يُفتح، فلم يُجرَّب غيره."])
         context, page = holder["context"], holder["page"]
+        # In the app the browser is the phone's own: its identity and its width are not the ones asked for above
+        # (they are left as they are), and only the page's height is.
+        phone = getattr(getattr(context, "_backend", None), "kind", "") == "android"
 
         def loaded():
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            context.add_init_script("window.__gg_first = (window.__gg_first || 0) + 1")     # (a script of ours before the page's own)
             page.goto(base + "/", wait_until="domcontentloaded", timeout=30_000)
             expect(page.url.startswith(base), page.url)
             expect(page.title() == "check", page.title())
+            expect(page.evaluate("window.__gg_first") == 1, "add_init_script")
             return page.url
         step("فتح صفحة", loaded)
 
         def sized():
-            seen = page.evaluate("() => ({w: innerWidth, h: innerHeight, ratio: devicePixelRatio})")
+            seen = page.evaluate("() => ({w: innerWidth, h: innerHeight, ratio: devicePixelRatio, screen: screen.width})")
+            if phone:
+                expect(seen["w"] >= 240 and abs(seen["h"] - 1800) <= 2, json.dumps(seen))
+                expect(page.viewport_size == {"width": seen["w"], "height": 1800}, str(page.viewport_size))
+                return f"عرض الجوال نفسه {seen['w']} (شاشته {seen['screen']})، والطول {seen['h']} (كثافة {seen['ratio']})"
             expect(abs(seen["w"] - 600) <= 2 and abs(seen["h"] - 1800) <= 2, json.dumps(seen))
             expect(page.viewport_size == {"width": 600, "height": 1800}, str(page.viewport_size))
             return f"{seen['w']}×{seen['h']} (كثافة {seen['ratio']})"
-        step("مقاس الصفحة 600×1800", sized)
+        step("مقاس الصفحة", sized)
 
         def evaluated():
             got = page.evaluate("({a, b}) => ({sum: a + b, list: [1, 'x', null], nothing: undefined})", {"a": 2, "b": 3})
@@ -176,8 +184,14 @@ def run(profile_root: str | None = None, online: bool = False, say=None) -> str:
             seen = page.evaluate("() => ({ua: navigator.userAgent, webdriver: navigator.webdriver, lang: navigator.language,"
                                  " platform: navigator.userAgentData ? navigator.userAgentData.platform : '',"
                                  " brands: navigator.userAgentData ? navigator.userAgentData.brands.map((b) => b.brand) : []})")
-            expect(seen["ua"] == USER_AGENT, seen["ua"])
             header = next((headers.get("user-agent", "") for path, headers in reversed(_Handler.seen) if path == "/"), "")
+            if phone:
+                expect(seen["ua"] != USER_AGENT and header == seen["ua"], f"في الصفحة: {seen['ua']} | في الطلب: {header}")
+                expect(seen["webdriver"] is not None, "navigator.webdriver غُيّر")
+                language = next((headers.get("accept-language", "") for path, headers in reversed(_Handler.seen) if path == "/"), "")
+                return (f"هوية الجوال نفسها بلا تغيير: {seen['ua']} · لغة {seen['lang']} ({language}) · "
+                        f"منصة {seen['platform'] or '؟'} · {', '.join(seen['brands']) or 'بلا علامات'}")
+            expect(seen["ua"] == USER_AGENT, seen["ua"])
             expect(header == USER_AGENT, "في الطلب: " + header)
             notes = ""
             if seen["webdriver"]:
@@ -186,7 +200,7 @@ def run(profile_root: str | None = None, online: bool = False, say=None) -> str:
             if wv:
                 notes += "، ومع كل طلب اسم التطبيق كما في كل WebView (X-Requested-With: " + wv + ")"
             return f"لغة {seen['lang']}، منصة {seen['platform'] or '؟'}، {', '.join(seen['brands']) or 'بلا علامات'}{notes}"
-        step("هوية المتصفح كما يطلبها السكربت", identity)
+        step("هوية المتصفح", identity)
 
         def located():
             tweets = page.locator('article[data-testid="tweet"]')
@@ -275,10 +289,11 @@ def run(profile_root: str | None = None, online: bool = False, say=None) -> str:
         step("الكتابة (أرقام الرمز، نص عربي، مسح، Escape)", typed)
 
         def pictured():
-            shot = page.screenshot(type="jpeg", quality=40, timeout=8000, clip={"x": 0, "y": 0, "width": 600, "height": 1000})
+            wide = min(600, int(page.viewport_size["width"]))
+            shot = page.screenshot(type="jpeg", quality=40, timeout=8000, clip={"x": 0, "y": 0, "width": wide, "height": 1000})
             expect(shot[:2] == b"\xff\xd8", "ليست JPEG")
             size = _jpeg_size(shot)
-            expect(size and abs(size[0] - 600) <= 2 and abs(size[1] - 1000) <= 2, f"مقاس الصورة {size}")
+            expect(size and abs(size[0] - wide) <= 2 and abs(size[1] - 1000) <= 2, f"مقاس الصورة {size}")
             card = page.locator("#b").first.screenshot(type="jpeg", quality=70, timeout=12000)
             small = _jpeg_size(card)
             expect(small and abs(small[0] - 120) <= 2 and abs(small[1] - 60) <= 2, f"صورة الزر {small}")
@@ -288,16 +303,26 @@ def run(profile_root: str | None = None, online: bool = False, say=None) -> str:
         step("تصوير الصفحة وعنصر منها", pictured)
 
         def resized():
+            if phone:
+                own = page.evaluate("innerWidth")
+                seen = []
+                for height in (9000, 900, 1800):
+                    page.set_viewport_size({"width": 600, "height": height})
+                    now = page.evaluate("[innerWidth, innerHeight]")
+                    expect(now[0] == own and abs(now[1] - height) <= 2, f"طُلب الطول {height}: {now} (العرض كان {own})")
+                    expect(page.viewport_size == {"width": own, "height": height}, str(page.viewport_size))
+                    seen.append(str(now[1]))
+                return f"الطول {' ثم '.join(seen)}، والعرض ثابت {own}"
             page.set_viewport_size({"width": 600, "height": 9000})
             tall = page.evaluate("[innerWidth, innerHeight]")
             expect(abs(tall[0] - 600) <= 2 and abs(tall[1] - 9000) <= 2, f"طويلة: {tall}")
             page.set_viewport_size({"width": 412, "height": 900})
-            phone = page.evaluate("[innerWidth, innerHeight]")
-            expect(abs(phone[0] - 412) <= 2 and abs(phone[1] - 900) <= 2, f"جوال: {phone}")
+            narrow = page.evaluate("[innerWidth, innerHeight]")
+            expect(abs(narrow[0] - 412) <= 2 and abs(narrow[1] - 900) <= 2, f"جوال: {narrow}")
             page.set_viewport_size({"width": 600, "height": 1800})
             normal = page.evaluate("[innerWidth, innerHeight]")
             expect(abs(normal[0] - 600) <= 2 and abs(normal[1] - 1800) <= 2, f"عادية: {normal}")
-            return f"{tall[0]}×{tall[1]} ثم {phone[0]}×{phone[1]} ثم {normal[0]}×{normal[1]}"
+            return f"{tall[0]}×{tall[1]} ثم {narrow[0]}×{narrow[1]} ثم {normal[0]}×{normal[1]}"
         step("تغيير مقاس الصفحة أثناء العمل", resized)
 
         def cookied():

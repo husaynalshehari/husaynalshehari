@@ -27,8 +27,6 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import androidx.webkit.ProfileStore;
-import androidx.webkit.UserAgentMetadata;
-import androidx.webkit.WebSettingsCompat;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
@@ -36,14 +34,11 @@ import com.chaquo.python.PyObject;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * The tasks' browsers. The groups script asks for a browser the way it asks Playwright for one; in the app that
@@ -73,7 +68,6 @@ public final class BrowserHost {
         String profile = "";
         boolean ownProfile;
         WebView view;
-        int cssWidth = 600;
         int cssHeight = 1800;
         volatile PyObject router;
         volatile boolean download;
@@ -117,10 +111,11 @@ public final class BrowserHost {
         return lastError;
     }
 
-    /** A new browser for this profile, with the page this size in CSS pixels: its number (0 or less when it could
-     * not be made, and lastError says why). Its first page is titled gg-&lt;number&gt;, which is how the script
-     * finds it among the WebViews DevTools lists. */
-    public static int open(String profile, String userAgent, int width, int height) {
+    /** A new browser for this profile: its number (0 or less when it could not be made, and lastError says why).
+     * It is the phone's own browser as it is: its user agent, its language and its width are left alone, and only
+     * the page's height (in CSS pixels) is the script's. Its first page is titled gg-&lt;number&gt;, which is how
+     * the script finds it among the WebViews DevTools lists. */
+    public static int open(String profile, int height) {
         lastError = "";
         return onMain(() -> {
             MainActivity host = activity;
@@ -130,7 +125,6 @@ public final class BrowserHost {
             }
             Browser b = new Browser();
             b.id = ++lastId;
-            b.cssWidth = Math.max(200, width);
             b.cssHeight = Math.max(200, height);
             b.profile = "gg-" + String.valueOf(profile).replaceAll("[^A-Za-z0-9_-]", "_");
             WebView view = new WebView(host);
@@ -147,7 +141,7 @@ public final class BrowserHost {
                 sharedProfileFor(host, b.profile);
             }
             b.view = view;
-            configure(b, String.valueOf(userAgent == null ? "" : userAgent));
+            configure(b);
             browsers.put(b.id, b);
             host.stage.add(b);
             view.loadDataWithBaseURL(null, "<html><head><title>gg-" + b.id + "</title></head><body></body></html>",
@@ -176,14 +170,13 @@ public final class BrowserHost {
         }, 15_000, false);
     }
 
-    /** The page's size in CSS pixels: the WebView itself is made that size (the tab shows it scaled to fit). */
-    public static void resize(int id, int width, int height) {
+    /** The page's height in CSS pixels: the WebView itself is made that tall. Its width stays the phone's. */
+    public static void resize(int id, int height) {
         onMain(() -> {
             Browser b = browsers.get(id);
             if (b == null) {
                 return false;
             }
-            b.cssWidth = Math.max(200, width);
             b.cssHeight = Math.max(200, height);
             if (activity != null) {
                 activity.stage.sized(b);
@@ -424,7 +417,7 @@ public final class BrowserHost {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private static void configure(Browser b, String userAgent) {
+    private static void configure(Browser b) {
         WebView view = b.view;
         WebSettings settings = view.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -439,18 +432,9 @@ public final class BrowserHost {
         settings.setTextZoom(100);                   // (the phone's font size does not change X's layout)
         settings.setUseWideViewPort(false);          // (the page is as wide as the WebView, in CSS pixels)
         settings.setLoadWithOverviewMode(false);
-        if (!userAgent.isEmpty()) {
-            settings.setUserAgentString(userAgent);
-        }
+        // (The user agent, and what the browser says of itself beyond it, are the phone's own: nothing is set.)
         // (Every WebView adds its app's name to each request, as the header X-Requested-With, and Android gives no
         // way to leave it out: «فحص المتصفح» says so in its report.)
-        if (!userAgent.isEmpty() && supported(WebViewFeature.USER_AGENT_METADATA)) {
-            try {
-                WebSettingsCompat.setUserAgentMetadata(settings, metadata(userAgent));
-            } catch (RuntimeException e) {
-                // (an older WebView)
-            }
-        }
         CookieManager cookies = cookiesOf(b);
         cookies.setAcceptCookie(true);
         cookies.setAcceptThirdPartyCookies(view, true);
@@ -464,38 +448,6 @@ public final class BrowserHost {
         view.setWebViewClient(new Client(b));
         view.setWebChromeClient(new Chrome());
         view.setDownloadListener((url, agent, disposition, mime, length) -> b.download = true);
-    }
-
-    /** What a browser with this user agent says where a site asks for more than the user agent (the same as the
-     * script's side sets through DevTools). */
-    static UserAgentMetadata metadata(String userAgent) {
-        String major = "131";
-        String full = "131.0.0.0";
-        Matcher chrome = Pattern.compile("Chrome/(\\d+)((?:\\.\\d+)*)").matcher(userAgent);
-        if (chrome.find()) {
-            major = chrome.group(1);
-            full = chrome.group(1) + chrome.group(2);
-        }
-        boolean android = userAgent.contains("Android");
-        boolean windows = userAgent.contains("Windows NT");
-        boolean mac = userAgent.contains("Mac OS X");
-        UserAgentMetadata.BrandVersion chromium = new UserAgentMetadata.BrandVersion.Builder()
-            .setBrand("Chromium").setMajorVersion(major).setFullVersion(full).build();
-        UserAgentMetadata.BrandVersion google = new UserAgentMetadata.BrandVersion.Builder()
-            .setBrand("Google Chrome").setMajorVersion(major).setFullVersion(full).build();
-        UserAgentMetadata.BrandVersion other = new UserAgentMetadata.BrandVersion.Builder()
-            .setBrand("Not_A Brand").setMajorVersion("24").setFullVersion("24.0.0.0").build();
-        return new UserAgentMetadata.Builder()
-            .setBrandVersionList(Arrays.asList(chromium, google, other))
-            .setFullVersion(full)
-            .setPlatform(android ? "Android" : windows ? "Windows" : mac ? "macOS" : "Linux")
-            .setPlatformVersion(windows ? "10.0.0" : "")
-            .setArchitecture(android ? "arm" : "x86")
-            .setModel("")
-            .setMobile(userAgent.contains("Mobile"))
-            .setBitness(64)
-            .setWow64(false)
-            .build();
     }
 
     static final class Client extends WebViewClient {
