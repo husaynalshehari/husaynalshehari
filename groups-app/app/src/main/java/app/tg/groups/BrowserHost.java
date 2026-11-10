@@ -161,6 +161,11 @@ public final class BrowserHost {
         onMain(() -> {
             Browser b = browsers.get(id);
             if (b != null) {
+                try {
+                    cookiesOf(b).flush();
+                } catch (RuntimeException e) {
+                    // (the profile still keeps what the page already stored)
+                }
                 browsers.remove(id);
                 destroy(b);
                 if (activity != null) {
@@ -256,6 +261,20 @@ public final class BrowserHost {
         }, 20_000, "");
     }
 
+    /** The page is in the background with a task open: keep its browsers running instead of pausing them. */
+    public static void keepAwake() {
+        onMain(() -> {
+            for (int i = 0; i < browsers.size(); i++) {
+                WebView view = browsers.valueAt(i).view;
+                if (view != null) {
+                    view.onResume();
+                    view.resumeTimers();
+                }
+            }
+            return true;
+        }, 5_000, false);
+    }
+
     /** Wait (at most this long) until the app is on the screen: a WebView that is not shown draws nothing and takes
      * no clicks, so a task rests here while the app is in the background. Whether it is on the screen. */
     public static boolean awaitVisible(long maxMs) {
@@ -306,18 +325,38 @@ public final class BrowserHost {
         return browsers.size();
     }
 
-    static void setManualTyping(boolean allowed) {
-        manualTyping = allowed;
-        for (int i = 0; i < browsers.size(); i++) {
-            WebView view = browsers.valueAt(i).view;
-            if (view != null) {
-                view.setFocusable(allowed);
-                view.setFocusableInTouchMode(allowed);
-                if (!allowed) {
-                    view.clearFocus();
+    /** The login button: let the user type in the browser, and show that tab. View changes stay on the main thread. */
+    public static void prepareManualLogin() {
+        onMain(() -> {
+            setManualTyping(true);
+            if (activity != null) {
+                activity.showTab(true);
+                if (browsers.size() > 0) {
+                    WebView view = browsers.valueAt(browsers.size() - 1).view;
+                    if (view != null) {
+                        view.requestFocus();
+                    }
                 }
             }
-        }
+            return true;
+        }, 8_000, false);
+    }
+
+    static void setManualTyping(boolean allowed) {
+        manualTyping = allowed;
+        onMain(() -> {
+            for (int i = 0; i < browsers.size(); i++) {
+                WebView view = browsers.valueAt(i).view;
+                if (view != null) {
+                    view.setFocusable(allowed);
+                    view.setFocusableInTouchMode(allowed);
+                    if (!allowed) {
+                        view.clearFocus();
+                    }
+                }
+            }
+            return true;
+        }, 5_000, false);
     }
 
     // ---------------------------------------------------------------- one browser

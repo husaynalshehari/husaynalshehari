@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import os
+import queue
 import random
 import re
 import secrets
@@ -78,6 +79,38 @@ sessions_lock = threading.Lock()
 gemini_lock = threading.Lock()
 JOB_TTL_SECONDS = 86400
 DATA_DIR = Path(__file__).resolve().with_name("data")
+CLICK_LOG_PATH = DATA_DIR / "click-log.txt"
+_click_log_lock = threading.Lock()
+
+
+def trace_click(message: str) -> None:
+    """One line in data/click-log.txt and in the app's «السجل», so a failed press can be read afterwards."""
+    line = time.strftime("%H:%M:%S ") + str(message).replace("\n", " ")[:500]
+    print("نقر: " + line, flush=True)
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with _click_log_lock:
+            with CLICK_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            if CLICK_LOG_PATH.stat().st_size > 180_000:
+                kept = CLICK_LOG_PATH.read_text(encoding="utf-8")[-120_000:]
+                CLICK_LOG_PATH.write_text(kept, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def trace_page(page, why: str) -> None:
+    try:
+        snap = page.evaluate(
+            """() => {
+              const tests = [...document.querySelectorAll("[data-testid]")].slice(0, 40)
+                .map((el) => el.getAttribute("data-testid"));
+              return {url: location.href, w: innerWidth, h: innerHeight, dpr: window.devicePixelRatio || 1, tests};
+            }"""
+        )
+    except Exception as exc:
+        snap = type(exc).__name__ + ": " + str(exc)[:160]
+    trace_click(why + " | " + str(snap)[:450])
 SESSIONS_PATH = DATA_DIR / "sessions.json"
 JOBS_PATH = DATA_DIR / "jobs.json"
 GEMINI_PATH = DATA_DIR / "gemini.json"
@@ -726,14 +759,18 @@ EMBEDDED_PAGE = r'''<!doctype html>
         <section class="block">
           <div class="block-head">
             <h2>الجلسة</h2>
-            <p>يُحفظ الرمز مع اسم الحساب على هذا الخادم فقط، ويبقى بعد إغلاق المتصفح أو إعادة تشغيل السكربت.</p>
+            {% if in_app %}<p>سجّل الدخول من المتصفح، ثم اضغط تحقق. تُحفظ الجلسة مع اسم الحساب على هذا الجهاز.</p>{% else %}<p>يُحفظ الرمز مع اسم الحساب على هذا الخادم فقط، ويبقى بعد إغلاق المتصفح أو إعادة تشغيل السكربت.</p>{% endif %}
           </div>
           <div class="token-row">
             <input id="account-name" type="text" readonly tabindex="-1" dir="auto" placeholder="اسم المستخدم" aria-label="الحساب">
             <button id="quick-verify" class="btn btn-ghost" type="button">تحقق</button>
+            {% if in_app %}<button id="browser-login" class="btn btn-ghost" type="button">تسجيل الدخول</button>{% endif %}
             <button id="account-settings" class="btn btn-ghost" type="button" aria-expanded="false" aria-controls="account-panel">إعداد الحساب</button>
           </div>
           <div id="account-panel" hidden>
+            {% if in_app %}
+            <input id="auth_token" name="auth_token" type="hidden" value="">
+            {% else %}
             <label class="field-label" for="auth_token">Auth token</label>
             <div class="token-row">
               <input id="auth_token" name="auth_token" type="password" required maxlength="512"
@@ -743,6 +780,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
               <button id="edit-token" class="btn btn-ghost" type="button" aria-pressed="false">تحرير</button>
               <button id="login-button" class="btn btn-ghost" type="button">تحقق</button>
             </div>
+            {% endif %}
             <p id="session-account" class="session-account" hidden></p>
             <div id="saved-sessions" class="saved-sessions" hidden>
               <p class="field-label">جلسات محفوظة</p>
@@ -941,8 +979,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const apiRoot = {{ api_root|tojson }};
   const LABELS = {repost: "إعادة النشر", like: "إعجاب", bookmark: "المرجعية", comment: "تعليق"};
   const tokenField = document.getElementById("auth_token");
+  const inApp = {{ in_app|tojson }};
   const editToken = document.getElementById("edit-token");
   function lockToken(locked) {
+    if (!editToken) return;
     tokenField.readOnly = locked;
     editToken.textContent = locked ? "تحرير" : "تم";
     editToken.setAttribute("aria-pressed", locked ? "false" : "true");
@@ -1707,14 +1747,14 @@ EMBEDDED_PAGE = r'''<!doctype html>
     reveal(repostResults);
   }
 
-  toggleToken.addEventListener("click", () => {
+  if (toggleToken) toggleToken.addEventListener("click", () => {
     const show = tokenField.type === "password";
     tokenField.type = show ? "text" : "password";
     toggleToken.textContent = show ? "إخفاء" : "إظهار";
     toggleToken.setAttribute("aria-pressed", show ? "true" : "false");
   });
 
-  editToken.addEventListener("click", () => {
+  if (editToken) editToken.addEventListener("click", () => {
     if (tokenField.readOnly) {
       lockToken(false);
       tokenField.focus();
@@ -1724,7 +1764,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     lockToken(true);
     pushScreen();
   });
-
 
   commentToggle.addEventListener("change", syncGemini);
   if (showGemini) showGemini.addEventListener("click", () => openGemini(geminiFields.hidden));
@@ -1828,11 +1867,20 @@ EMBEDDED_PAGE = r'''<!doctype html>
   accountSettings.addEventListener("click", () => setAccountPanel(accountPanel.hidden));
 
   async function verifySession() {
+    if (inApp) {
+      try {
+        const pulled = await postJson("/browser-session", {});
+        if (pulled.success && pulled.auth_token) tokenField.value = pulled.auth_token;
+      } catch (_) {}
+    }
     const authToken = tokenField.value.trim();
-    if (!authToken) { showNotice("أدخل الرمز أولًا.", false); revealField(tokenField); return; }
-    loginButton.disabled = true;
+    if (!authToken) {
+      if (inApp) showNotice("اضغط تسجيل الدخول، ثم ارجع واضغط تحقق.", false);
+      else { showNotice("أدخل الرمز أولًا.", false); revealField(tokenField); }
+      return;
+    }
+    if (loginButton) loginButton.disabled = true;
     quickVerify.disabled = true;
-    toggleToken.disabled = true;
     showNotice("جارٍ التحقق من الجلسة…", true);
     try {
       const data = await postJson("/verify-login", {auth_token: authToken});
@@ -1844,13 +1892,29 @@ EMBEDDED_PAGE = r'''<!doctype html>
     } catch (_) {
       showNotice("تعذّر الاتصال لإكمال التحقق.", false);
     } finally {
-      loginButton.disabled = false;
+      if (loginButton) loginButton.disabled = false;
       quickVerify.disabled = false;
-      toggleToken.disabled = false;
     }
   }
-  loginButton.addEventListener("click", verifySession);
+  function needToken() {
+    if (inApp) showNotice("سجّل الدخول ثم اضغط تحقق أولًا.", false);
+    else { showNotice("أدخل الرمز أولًا.", false); revealField(tokenField); }
+  }
+  if (loginButton) loginButton.addEventListener("click", verifySession);
   quickVerify.addEventListener("click", verifySession);
+  document.getElementById("browser-login")?.addEventListener("click", async () => {
+    const button = document.getElementById("browser-login");
+    button.disabled = true;
+    showNotice("يُفتح المتصفح لتسجيل الدخول…", true);
+    try {
+      const data = await postJson("/browser-login", {});
+      showNotice(data.message, Boolean(data.success));
+    } catch (_) {
+      showNotice("تعذّر فتح المتصفح.", false);
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   function renderGroups() {
     groupBox.hidden = linksMode || groupNames.length === 0;
@@ -1887,7 +1951,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
     const authToken = tokenField.value.trim();
     const pin = pinField.value.trim();
-    if (!authToken) { showNotice("أدخل رمز الجلسة أولًا.", false); revealField(tokenField); return; }
+    if (!authToken) { needToken(); return; }
     if (!/^\d{4,8}$/.test(pin)) { showNotice("رمز الدردشة ٤ إلى ٨ أرقام.", false); revealField(pinField); return; }
     groupsButton.disabled = true;
     const settle = !!waitGroups.checked;
@@ -1920,7 +1984,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const actions = selectedActions();
     const byLinks = linksMode;
     const links = byLinks ? pastedTweets(linksField.value) : [];
-    if (!authToken) { showNotice("أدخل الرمز أولًا.", false); revealField(tokenField); return; }
+    if (!authToken) { needToken(); return; }
     if (byLinks) {
       // No chat and no group: only the tweets are needed (the chat PIN is not).
       if (!links.length) { showNotice("الصق رابط تغريدة واحدًا على الأقل.", false); linksField.focus(); return; }
@@ -2669,28 +2733,70 @@ def _human_path(start: tuple[float, float], end: tuple[float, float], viewport: 
     return points
 
 
-# Inside the Android app («قروبات») the buttons are pressed by their own ids (data-testid), with the page's own
-# click, not with the mouse, and the page is never scrolled for it: on a phone the mouse missed them.
+# Inside the Android app («قروبات») the page is not scrolled for the script's own sake: a button is clicked where
+# it is, once the page has stopped moving, and the aim is checked again just before the press (on a phone X loads
+# slower, and scrolling it while it loaded moved the buttons from under the mouse).
 IN_APP = os.environ.get("GG_IN_APP") == "1"
 
-# The button of an action in the tweet's own card, pressed by its id.
-CLICK_ACTION_BUTTON_JS = r"""
-({statusId, testid}) => {
-  const articles = [...document.querySelectorAll('article[data-testid="tweet"]')];
-  let card = null;
-  if (statusId) {
-    card = articles.find((article) => [...article.querySelectorAll('a[href*="/status/"]')]
-      .some((node) => (node.getAttribute("href") || "").includes("/status/" + statusId)));
-  }
-  if (!card) card = articles[0] || null;
-  if (!card) return "missing";
-  const button = card.querySelector('div[role="group"] [data-testid="' + testid + '"]')
-    || card.querySelector('[data-testid="' + testid + '"]');
-  if (!button) return "missing";
-  button.click();
-  return "";
-}
-"""
+
+def _same_box(a: dict | None, b: dict | None) -> bool:
+    return bool(a and b) and all(abs(float(a[key]) - float(b[key])) < 1 for key in ("x", "y", "width", "height"))
+
+
+def _in_view(page, box: dict | None) -> bool:
+    if not box:
+        return False
+    viewport = page.viewport_size or {"width": VIEWPORT_WIDTH, "height": 900}
+    middle_y = float(box["y"]) + float(box["height"]) / 2
+    middle_x = float(box["x"]) + float(box["width"]) / 2
+    return 0 < middle_y < viewport["height"] and 0 < middle_x < viewport["width"]
+
+
+def _still_box(page, read_box, seconds: float = 5.0, scroll=None):
+    """The box once it reads the same twice in a row (the page stopped moving). scroll(): asked once, only when
+    the box is outside the page's view."""
+    last = None
+    scrolled = scroll is None
+    deadline = time.monotonic() + seconds
+    while True:
+        box = read_box()
+        if box and _same_box(box, last):
+            if _in_view(page, box) or scrolled:
+                return box
+            try:
+                scroll()
+            except Exception:
+                pass
+            scrolled = True
+            box = None
+        if time.monotonic() >= deadline:
+            return box
+        last = box
+        page.wait_for_timeout(150)
+
+
+def _press_at(page, read_box, box: dict, local_x: float, local_y: float) -> None:
+    """Move to the spot like a hand; if the button moved meanwhile, move again to where it is now; then press."""
+    x, y = box["x"] + local_x, box["y"] + local_y
+    _move_like_a_hand(page, x, y)
+    for _ in range(4):
+        try:
+            now = read_box()
+        except Exception:
+            now = None
+        if not now:
+            break
+        nx = now["x"] + min(local_x, max(1.0, now["width"] - 1))
+        ny = now["y"] + min(local_y, max(1.0, now["height"] - 1))
+        if abs(nx - x) < 1 and abs(ny - y) < 1:
+            break
+        page.mouse.move(nx, ny, steps=4)
+        x, y = nx, ny
+        _mouse_at[id(page)] = (x, y)
+        page.wait_for_timeout(120)
+    page.mouse.down()
+    page.wait_for_timeout(100)
+    page.mouse.up()
 
 
 def _move_like_a_hand(page, x: float, y: float) -> None:
@@ -2705,18 +2811,13 @@ def real_click(locator) -> None:
     """Use the selector only to read the button box, then send a real mouse click."""
     locator.wait_for(state="visible", timeout=8000)
     if IN_APP:
-        # (by the element itself: focused, for a text box, then clicked by the page)
+        box = _still_box(locator.page, locator.bounding_box, scroll=lambda: locator.scroll_into_view_if_needed(timeout=4000))
+    else:
         try:
-            locator.focus(timeout=2000)
+            locator.scroll_into_view_if_needed(timeout=4000)
         except Exception:
             pass
-        locator.dispatch_event("click")
-        return
-    try:
-        locator.scroll_into_view_if_needed(timeout=4000)
-    except Exception:
-        pass
-    box = locator.bounding_box()
+        box = locator.bounding_box()
     if not box or box["width"] < 2 or box["height"] < 2:
         raise PlaywrightTimeoutError("button box missing")
     width = box["width"]
@@ -2742,6 +2843,9 @@ def real_click(locator) -> None:
     local_x = min(max(local_x, inset_x), width - inset_x)
     local_y = min(max(local_y, inset_y), height - inset_y)
     page = locator.page
+    if IN_APP:
+        _press_at(page, locator.bounding_box, box, local_x, local_y)
+        return
     x = box["x"] + local_x
     y = box["y"] + local_y
     _move_like_a_hand(page, x, y)
@@ -2768,6 +2872,8 @@ def click_box(page, box: dict) -> None:
         raise PlaywrightTimeoutError("button box missing")
     x = float(box["x"]) + width * random.uniform(0.4, 0.6)
     y = float(box["y"]) + height * random.uniform(0.4, 0.6)
+    box_text = {key: round(float(box[key]), 1) for key in ("x", "y", "width", "height")}
+    trace_click(f"ضغط على ({x:.0f},{y:.0f}) صندوق {box_text}")
     _move_like_a_hand(page, x, y)
     page.mouse.down()
     page.wait_for_timeout(100)
@@ -2792,12 +2898,42 @@ def read_action_state(page, status_id: str, actions: list[str]) -> dict | None:
           if (!card) return null;
           if (scroll) { try { card.scrollIntoView({block: "center"}); } catch (error) {} }
           const map = {repost: ["unretweet", "retweet"], like: ["unlike", "like"], bookmark: ["removeBookmark", "bookmark"]};
+          const labelOf = {
+            reply: /reply|رد/i, retweet: /repost|retweet|إعادة النشر|اعادة النشر/i,
+            unretweet: /undo repost|unretweet|تم إعادة|إلغاء إعادة/i,
+            like: /like|إعجاب|اعجاب/i, unlike: /unlike|liked|أعجبني|معجب/i,
+            bookmark: /bookmark|إشارة مرجعية/i, removeBookmark: /remove bookmark|إزالة الإشارة/i
+          };
+          const scopeOf = (article) => (article && article.closest("[data-testid='cellInnerDiv']")) || article;
+          const findBtn = (root, testid) => {
+            if (!root) return null;
+            const re = labelOf[testid];
+            const nodes = [];
+            const tagged = root.querySelector('[data-testid="' + testid + '"]');
+            if (tagged) nodes.push(tagged);
+            if (re) {
+              for (const node of root.querySelectorAll("button, [role='button']")) {
+                const label = node.getAttribute("aria-label") || "";
+                if (!re.test(label)) continue;
+                if (testid === "like" && /unlike|liked|أعجبني|معجب/i.test(label)) continue;
+                nodes.push(node);
+              }
+            }
+            for (const node of nodes) {
+              const btn = node.closest("button, [role='button']") || node;
+              if (btn.closest("[data-testid='tweetTextarea_0'], [data-testid='toolBar']")) continue;
+              const rect = btn.getBoundingClientRect();
+              if (rect.width >= 2 && rect.height >= 2) return btn;
+            }
+            return null;
+          };
           const out = {};
+          const root = scopeOf(card);
           for (const name of names) {
             const pair = map[name];
             if (!pair) continue;
-            const on = card.querySelector('[data-testid="' + pair[0] + '"]');
-            const off = card.querySelector('div[role="group"] [data-testid="' + pair[1] + '"]') || card.querySelector('[data-testid="' + pair[1] + '"]');
+            const on = findBtn(root, pair[0]);
+            const off = findBtn(root, pair[1]);
             out[name] = {on: !!on, box: on ? null : boxOf(off)};
           }
           return out;
@@ -2809,7 +2945,13 @@ def read_action_state(page, status_id: str, actions: list[str]) -> dict | None:
 
 ACTION_BUTTON_PROBE_JS = r"""
 ({statusId, testid, scroll}) => {
-  const articles = [...document.querySelectorAll('article[data-testid="tweet"]')];
+  const labelOf = {
+    reply: /reply|رد/i, retweet: /repost|retweet|إعادة النشر|اعادة النشر/i,
+    unretweet: /undo repost|unretweet|تم إعادة|إلغاء إعادة/i,
+    like: /like|إعجاب|اعجاب/i, unlike: /unlike|liked|أعجبني|معجب/i,
+    bookmark: /bookmark|إشارة مرجعية/i, removeBookmark: /remove bookmark|إزالة الإشارة/i
+  };
+  const articles = [...document.querySelectorAll('article[data-testid="tweet"], [data-testid="tweet"]')];
   let card = null;
   if (statusId) {
     card = articles.find((article) => [...article.querySelectorAll('a[href*="/status/"]')]
@@ -2817,8 +2959,26 @@ ACTION_BUTTON_PROBE_JS = r"""
   }
   if (!card) card = articles[0] || null;
   if (!card) return null;
-  const button = card.querySelector('div[role="group"] [data-testid="' + testid + '"]')
-    || card.querySelector('[data-testid="' + testid + '"]');
+  const root = card.closest('[data-testid="cellInnerDiv"]') || card;
+  const re = labelOf[testid];
+  const nodes = [];
+  const tagged = root.querySelector('[data-testid="' + testid + '"]');
+  if (tagged) nodes.push(tagged);
+  if (re) {
+    for (const node of root.querySelectorAll("button, [role='button']")) {
+      const label = node.getAttribute("aria-label") || "";
+      if (!re.test(label)) continue;
+      if (testid === "like" && /unlike|liked|أعجبني|معجب/i.test(label)) continue;
+      nodes.push(node);
+    }
+  }
+  let button = null;
+  for (const node of nodes) {
+    const btn = node.closest("button, [role='button']") || node;
+    if (btn.closest("[data-testid='tweetTextarea_0'], [data-testid='toolBar']")) continue;
+    const rect = btn.getBoundingClientRect();
+    if (rect.width >= 2 && rect.height >= 2) { button = btn; break; }
+  }
   if (!button) return {box: null};
   if (scroll) {
     try { button.scrollIntoView({block: "center", inline: "nearest", behavior: "instant"}); } catch (error) {}
@@ -2829,7 +2989,7 @@ ACTION_BUTTON_PROBE_JS = r"""
   const x = rect.x + rect.width / 2;
   const y = rect.y + rect.height / 2;
   const hit = document.elementFromPoint(x, y);
-  const ok = !!hit && (button === hit || button.contains(hit));
+  const ok = !!hit && (button === hit || button.contains(hit) || hit.closest("button, [role='button']") === button);
   let blocker = "";
   if (!ok && hit) {
     const tag = hit.closest("[data-testid]");
@@ -2837,6 +2997,54 @@ ACTION_BUTTON_PROBE_JS = r"""
   }
   return {box: {x: rect.x, y: rect.y, width: rect.width, height: rect.height}, ok, blocker,
           inView: y > 0 && y < window.innerHeight};
+}
+"""
+
+TAP_ACTION_JS = r"""
+({statusId, testid}) => {
+  const labelOf = {
+    reply: /reply|رد/i, retweet: /repost|retweet|إعادة النشر|اعادة النشر/i,
+    unretweet: /undo repost|unretweet|تم إعادة|إلغاء إعادة/i,
+    like: /like|إعجاب|اعجاب/i, unlike: /unlike|liked|أعجبني|معجب/i,
+    bookmark: /bookmark|إشارة مرجعية/i, removeBookmark: /remove bookmark|إزالة الإشارة/i
+  };
+  const articles = [...document.querySelectorAll('article[data-testid="tweet"], [data-testid="tweet"]')];
+  let card = null;
+  if (statusId) {
+    card = articles.find((article) => [...article.querySelectorAll('a[href*="/status/"]')]
+      .some((node) => (node.getAttribute("href") || "").includes("/status/" + statusId)));
+  }
+  if (!card) card = articles[0] || null;
+  if (!card) return "missing";
+  const root = card.closest('[data-testid="cellInnerDiv"]') || card;
+  const re = labelOf[testid];
+  const nodes = [];
+  const tagged = root.querySelector('[data-testid="' + testid + '"]');
+  if (tagged) nodes.push(tagged);
+  if (re) {
+    for (const node of root.querySelectorAll("button, [role='button']")) {
+      const label = node.getAttribute("aria-label") || "";
+      if (!re.test(label)) continue;
+      if (testid === "like" && /unlike|liked|أعجبني|معجب/i.test(label)) continue;
+      nodes.push(node);
+    }
+  }
+  let button = null;
+  for (const node of nodes) {
+    const btn = node.closest("button, [role='button']") || node;
+    if (btn.closest("[data-testid='tweetTextarea_0'], [data-testid='toolBar']")) continue;
+    if (btn.tagName === "A" && /\/status\//.test(btn.getAttribute("href") || "")) continue;
+    const rect = btn.getBoundingClientRect();
+    if (rect.width >= 2 && rect.height >= 2) { button = btn; break; }
+  }
+  if (!button) return "missing";
+  const rect = button.getBoundingClientRect();
+  if (rect.bottom < 0 || rect.top > window.innerHeight) {
+    try { button.scrollIntoView({block: "center", inline: "nearest", behavior: "instant"}); } catch (error) {}
+  }
+  button.addEventListener("click", (event) => event.stopPropagation(), {capture: true, once: true});
+  button.click();
+  return "clicked";
 }
 """
 
@@ -2905,6 +3113,319 @@ def close_popups(page) -> int:
     return len(closed) + int(cookies)
 
 
+# Official mobile actions from X's docs (docs.x.com Web Intents). On a phone the timeline
+# button is not the desktop control: a tap opens the post and its reply box. Like, repost and
+# reply are documented as these pages, which work in a mobile WebView.
+OFFICIAL_INTENTS = {
+    "like": "https://x.com/intent/like?tweet_id={id}",
+    "repost": "https://x.com/intent/retweet?tweet_id={id}",
+}
+
+CONFIRM_INTENT_JS = r"""
+() => {
+  const body = ((document.body && document.body.innerText) || "").replace(/\s+/g, " ").slice(0, 2500);
+  if (/you liked|liked this tweet|تم الإعجاب|أعجبك هذا/i.test(body)) return "done";
+  if (/reposted|you reposted|تم إعادة النشر|أعدت نشر/i.test(body)) return "done";
+  const words = /^(like|إعجاب|اعجاب|repost|retweet|إعادة النشر|اعادة النشر)$/i;
+  const nodes = [...document.querySelectorAll('button, [role="button"], input[type="submit"], [data-testid="confirmationSheetConfirm"]')];
+  const hit = nodes.find((node) => {
+    if (node.closest("[data-testid='tweetTextarea_0']")) return false;
+    const test = node.getAttribute("data-testid") || "";
+    const text = (node.innerText || node.value || node.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+    return test === "confirmationSheetConfirm" || words.test(text);
+  });
+  if (!hit) return "";
+  hit.click();
+  return "clicked";
+}
+"""
+
+
+def _tweet_back_url(path: str, status_id: str) -> str:
+    raw = (path or "").strip()
+    if raw.startswith("http"):
+        return raw
+    if raw.startswith("/"):
+        return "https://x.com" + raw
+    if status_id:
+        return f"https://x.com/i/web/status/{status_id}"
+    return "https://x.com" + ("/" + raw if raw else "")
+
+
+def press_official_intent(page, path: str, status_id: str, action: str) -> str:
+    """Like or repost through the official mobile intent page, then return to the post."""
+    if not status_id or action not in OFFICIAL_INTENTS:
+        return "missing"
+    back = _tweet_back_url(path, status_id)
+    goto_x(page, OFFICIAL_INTENTS[action].format(id=status_id))
+    outcome = ""
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        try:
+            outcome = str(page.evaluate(CONFIRM_INTENT_JS) or "")
+        except Exception:
+            outcome = ""
+        if outcome:
+            break
+        page.wait_for_timeout(400)
+    page.wait_for_timeout(900)
+    try:
+        goto_x(page, back)
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
+    return "" if outcome else "missing"
+
+
+# The phone page does not use the desktop buttons. A click on the card opens the tweet and
+# stops there. These are the calls that page itself makes when a button works (the same web
+# session, read from the open page). Query ids are the ones documented from X's own client
+# and are replaced by whatever that page already loaded when it differs.
+WEB_MUTATION_JS = r"""
+async ({action, tweetId, text}) => {
+  const bearer = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
+  const fallback = {
+    FavoriteTweet: "lI07N6Otwv1PhnEgXILM7A",
+    UnfavoriteTweet: "ZYKSe-w7KEslx3JhSIk5LA",
+    CreateRetweet: "mbRO74GrOvSfRcJnlMapnQ",
+    DeleteRetweet: "ZyZigVsNiFO6v1dEks1eWg",
+    CreateBookmark: "aoDbu3RHznuiSkQ9aNM67Q",
+    DeleteBookmark: "Wlmlj2-xzyS1GN3a6cj-mQ",
+    CreateTweet: "l4hk8uVGvR-a8kzQ4nOhPA"
+  };
+  const tweetFeatures = {
+    premium_content_api_read_enabled: false,
+    communities_web_enable_tweet_community_results_fetch: true,
+    c9s_tweet_anatomy_moderator_badge_enabled: true,
+    responsive_web_grok_analyze_button_fetch_trends_enabled: false,
+    responsive_web_grok_analyze_post_followups_enabled: true,
+    rweb_cashtags_composer_attachment_enabled: true,
+    responsive_web_jetfuel_frame: true,
+    rweb_sports_post_context_enabled: true,
+    x_elections_post_context_enabled: true,
+    responsive_web_grok_share_attachment_enabled: true,
+    responsive_web_grok_annotations_enabled: true,
+    responsive_web_edit_tweet_api_enabled: true,
+    graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+    view_counts_everywhere_api_enabled: true,
+    longform_notetweets_consumption_enabled: true,
+    responsive_web_twitter_article_tweet_consumption_enabled: true,
+    content_disclosure_indicator_enabled: true,
+    content_disclosure_ai_generated_indicator_enabled: true,
+    responsive_web_grok_show_grok_translated_post: true,
+    responsive_web_grok_analysis_button_from_backend: true,
+    post_ctas_fetch_enabled: true,
+    longform_notetweets_rich_text_read_enabled: true,
+    longform_notetweets_inline_media_enabled: false,
+    profile_label_improvements_pcf_label_in_post_enabled: true,
+    responsive_web_profile_redirect_enabled: true,
+    rweb_tipjar_consumption_enabled: false,
+    verified_phone_label_enabled: false,
+    responsive_web_nested_quote_preview_enabled: true,
+    articles_preview_enabled: true,
+    rweb_cashtags_enabled: true,
+    responsive_web_grok_community_note_auto_translation_is_enabled: true,
+    freedom_of_speech_not_reach_fetch_enabled: true,
+    standardized_nudges_misinfo: true,
+    tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+    responsive_web_grok_image_annotation_enabled: true,
+    responsive_web_grok_imagine_annotation_enabled: true,
+    responsive_web_graphql_timeline_navigation_enabled: true
+  };
+  const ct0 = decodeURIComponent((document.cookie.match(/(?:^|; )ct0=([^;]+)/) || [])[1] || "");
+  if (!ct0) return {ok: false, error: "لا توجد جلسة دخول في الصفحة"};
+  const learn = () => {
+    if (window.__ggQLearned) return;
+    window.__ggQLearned = true;
+    window.__ggQ = Object.assign({}, fallback, window.__ggQ || {});
+    const grab = (source) => {
+      if (!source) return;
+      const first = /queryId:"([A-Za-z0-9_-]{8,80})",operationName:"([A-Za-z0-9_]+)"/g;
+      const second = /operationName:"([A-Za-z0-9_]+)",queryId:"([A-Za-z0-9_-]{8,80})"/g;
+      let match;
+      while ((match = first.exec(source))) window.__ggQ[match[2]] = match[1];
+      while ((match = second.exec(source))) window.__ggQ[match[1]] = match[2];
+    };
+    try {
+      const chunks = self.webpackChunk_twitter_responsive_web || [];
+      let budget = 0;
+      for (const chunk of chunks) {
+        const mods = chunk && chunk[1];
+        if (!mods) continue;
+        for (const fn of Object.values(mods)) {
+          let source = "";
+          try { source = Function.prototype.toString.call(fn); } catch (error) { continue; }
+          if (source.indexOf("queryId") < 0 && source.indexOf("FavoriteTweet") < 0 && source.indexOf("CreateTweet") < 0) continue;
+          grab(source);
+          budget += source.length;
+          if (budget > 2500000) return;
+        }
+      }
+    } catch (error) {}
+  };
+  const send = async (name, variables, features) => {
+    const queryId = (window.__ggQ && window.__ggQ[name]) || fallback[name];
+    const response = await fetch("https://x.com/i/api/graphql/" + queryId + "/" + name, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        authorization: "Bearer " + bearer,
+        "x-csrf-token": ct0,
+        "x-twitter-auth-type": "OAuth2Session",
+        "x-twitter-active-user": "yes",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({variables, features: features || {}, queryId})
+    });
+    const raw = await response.text();
+    let data = {};
+    try { data = JSON.parse(raw); } catch (error) {}
+    const errors = data.errors || [];
+    const message = (errors[0] && (errors[0].message || "")) || "";
+    const already = /already|duplicate|has already|been already|327|139/i.test(message + " " + raw.slice(0, 300));
+    return {status: response.status, ok: (response.status === 200 && errors.length === 0) || already, error: message || ("HTTP " + response.status), raw: raw.slice(0, 180)};
+  };
+  learn();
+  const ops = {like: "FavoriteTweet", repost: "CreateRetweet", bookmark: "CreateBookmark", comment: "CreateTweet"};
+  const name = ops[action];
+  if (!name) return {ok: false, error: "إجراء غير معروف"};
+  let variables = {tweet_id: String(tweetId)};
+  let features = {};
+  if (action === "repost") variables = {tweet_id: String(tweetId), dark_request: false};
+  if (action === "comment") {
+    variables = {
+      tweet_text: text || "",
+      dark_request: false,
+      media: {media_entities: [], possibly_sensitive: false},
+      semantic_annotation_ids: [],
+      reply: {in_reply_to_tweet_id: String(tweetId), exclude_reply_user_ids: []}
+    };
+    features = tweetFeatures;
+  }
+  let result = await send(name, variables, features);
+  if (!result.ok && result.status === 404) {
+    window.__ggQLearned = false;
+    learn();
+    result = await send(name, variables, features);
+  }
+  if (!result.ok && action === "like") {
+    const response = await fetch("https://x.com/i/api/1.1/favorites/create.json", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        authorization: "Bearer " + bearer,
+        "x-csrf-token": ct0,
+        "x-twitter-auth-type": "OAuth2Session",
+        "x-twitter-active-user": "yes",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({id: String(tweetId)})
+    });
+    const raw = await response.text();
+    if (response.status === 200 || /already|139/i.test(raw)) return {ok: true, via: "rest"};
+    result = {ok: false, error: result.error || ("HTTP " + response.status)};
+  }
+  if (!result.ok && action === "repost") {
+    const response = await fetch("https://x.com/i/api/1.1/statuses/retweet/" + encodeURIComponent(tweetId) + ".json", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        authorization: "Bearer " + bearer,
+        "x-csrf-token": ct0,
+        "x-twitter-auth-type": "OAuth2Session",
+        "x-twitter-active-user": "yes",
+        "content-type": "application/x-www-form-urlencoded"
+      },
+      body: "id=" + encodeURIComponent(tweetId)
+    });
+    const raw = await response.text();
+    if (response.status === 200 || /already|327/i.test(raw)) return {ok: true, via: "rest"};
+  }
+  return result.ok ? {ok: true} : {ok: false, error: (result.error || "فشل الطلب").slice(0, 140)};
+}
+"""
+
+
+def web_mutate(page, status_id: str, action: str, text: str = "") -> dict:
+    """Like, repost, bookmark, or reply through the call the logged-in page already uses."""
+    try:
+        result = page.evaluate(WEB_MUTATION_JS, {"action": action, "tweetId": status_id, "text": text or ""})
+    except Exception as exc:
+        return {"ok": False, "error": str(exc).splitlines()[0][:140]}
+    return result if isinstance(result, dict) else {"ok": False, "error": "رد غير مفهوم من الصفحة"}
+
+
+PRESS_PAGE_JS = r"""
+async ({statusId, testid}) => {
+  const labelOf = {
+    reply: /reply|رد/i, retweet: /repost|retweet|إعادة النشر|اعادة النشر/i,
+    unretweet: /undo repost|unretweet|تم إعادة|إلغاء إعادة/i,
+    like: /like|إعجاب|اعجاب/i, unlike: /unlike|liked|أعجبني|معجب/i,
+    bookmark: /bookmark|إشارة مرجعية/i, removeBookmark: /remove bookmark|إزالة الإشارة/i
+  };
+  const articles = [...document.querySelectorAll('article[data-testid="tweet"], [data-testid="tweet"]')];
+  let card = articles.find((article) => statusId && [...article.querySelectorAll('a[href*="/status/"]')]
+    .some((node) => (node.getAttribute("href") || "").includes("/status/" + statusId))) || articles[0] || null;
+  if (!card) return {how: "missing"};
+  const root = card.closest('[data-testid="cellInnerDiv"]') || card;
+  const re = labelOf[testid];
+  const nodes = [];
+  const tagged = root.querySelector('[data-testid="' + testid + '"]');
+  if (tagged) nodes.push(tagged);
+  if (re) {
+    for (const node of root.querySelectorAll("button, [role='button']")) {
+      const label = node.getAttribute("aria-label") || "";
+      if (!re.test(label)) continue;
+      if (testid === "like" && /unlike|liked|أعجبني|معجب/i.test(label)) continue;
+      nodes.push(node);
+    }
+  }
+  let button = null;
+  for (const node of nodes) {
+    const btn = node.closest("button, [role='button']") || node;
+    if (btn.closest("[data-testid='tweetTextarea_0'], [data-testid='toolBar']")) continue;
+    const rect = btn.getBoundingClientRect();
+    if (rect.width >= 2 && rect.height >= 2) { button = btn; break; }
+  }
+  if (!button) return {how: "missing"};
+  const before = button.getAttribute("aria-label") || "";
+  const event = (node) => ({
+    preventDefault() {}, stopPropagation() {}, persist() {},
+    nativeEvent: {isTrusted: true, button: 0},
+    isTrusted: true, button: 0, type: "click",
+    target: node, currentTarget: node
+  });
+  const fire = (node) => {
+    if (!node) return "";
+    const keys = Object.keys(node);
+    for (const key of keys) {
+      if (!key.startsWith("__reactProps$")) continue;
+      const props = node[key];
+      if (props && typeof props.onClick === "function") {
+        props.onClick(event(node));
+        return "react";
+      }
+    }
+    return "";
+  };
+  let how = fire(button);
+  if (!how) {
+    for (const child of button.querySelectorAll("*")) {
+      how = fire(child);
+      if (how) break;
+    }
+  }
+  await new Promise((done) => setTimeout(done, 400));
+  const sheet = document.querySelector('[data-testid="confirmationSheetConfirm"], [data-testid="retweetConfirm"]');
+  if (sheet) {
+    fire(sheet) || sheet.click();
+    how = (how || "sheet") + "+تأكيد";
+  }
+  return {how: how || "no-handler", before, after: button.isConnected ? (button.getAttribute("aria-label") || "") : "gone"};
+}
+"""
+
+
 def press_action_button(page, path: str, status_id: str, action: str) -> str:
     """Scroll the button into view, make sure nothing covers it, then click it.
 
@@ -2913,31 +3434,37 @@ def press_action_button(page, path: str, status_id: str, action: str) -> str:
     """
     testid = ACTION_CONTROLS[action][1]
     blocker = ""
-    if IN_APP:
-        close_popups(page)
+
+    def probe(scroll: bool = False):
         try:
-            return page.evaluate(CLICK_ACTION_BUTTON_JS, {"statusId": status_id, "testid": testid}) or ""
-        except Exception as exc:
-            if browser_closed_error(exc):
-                raise
-            return "غير معروف"
+            return page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": testid, "scroll": scroll})
+        except Exception:
+            return None
+
     for _ in range(3):
         close_popups(page)
-        try:
-            page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": testid, "scroll": True})
-        except Exception:
-            pass
-        page.wait_for_timeout(500)
-        try:
-            info = page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": testid, "scroll": False})
-        except Exception:
-            info = None
+        info = probe(False)
+        trace_click(f"{action} {status_id} فحص {info}")
         if not info or not info.get("box"):
+            trace_page(page, f"{action} الزر غير موجود")
             return "missing"
-        if info.get("ok") and info.get("inView"):
+        if not info.get("inView"):
+            probe(True)
+            page.wait_for_timeout(400)
+            info = probe(False)
+        if info and info.get("ok") and info.get("inView") and info.get("box"):
+            if IN_APP:
+                try:
+                    pressed = page.evaluate(PRESS_PAGE_JS, {"statusId": status_id, "testid": testid})
+                except Exception as exc:
+                    pressed = {"how": "error", "error": str(exc)[:160]}
+                trace_click(f"{action} معالج الصفحة {pressed}")
+                return ""
             click_box(page, info["box"])
+            trace_click(f"{action} أُرسلت النقرة")
             return ""
-        blocker = str(info.get("blocker") or "خارج الشاشة")
+        blocker = str((info or {}).get("blocker") or "خارج الشاشة")
+        trace_click(f"{action} لم تُصب النقرة: {blocker}")
         try:
             page.keyboard.press("Escape")
         except Exception:
@@ -2987,7 +3514,7 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
                 except PlaywrightTimeoutError:
                     pass
             confirmed = False
-            deadline = time.monotonic() + 1.0
+            deadline = time.monotonic() + 2.5
             while time.monotonic() < deadline:
                 again = read_action_state(page, status_id, [action]) or {}
                 if (again.get(action) or {}).get("on"):
@@ -2995,10 +3522,17 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
                     break
                 page.wait_for_timeout(60)
             outcome[action] = "تم التنفيذ" if confirmed else "أُرسل الطلب لكن تعذر تأكيد الحالة"
+            if not confirmed and IN_APP and status_id:
+                done = web_mutate(page, status_id, action)
+                trace_click(f"{action} طلب الجلسة {done}")
+                if done.get("ok"):
+                    outcome[action] = "تم التنفيذ"
+            trace_click(f"{action} النتيجة: {outcome[action]}")
         except Exception as exc:
             if browser_closed_error(exc):
                 raise BrowserClosed() from exc
             outcome[action] = "تعذر التنفيذ"
+            trace_click(action + " استثناء " + traceback.format_exc().replace("\n", " | ")[-400:])
     return outcome
 
 
@@ -3757,7 +4291,27 @@ def composer_visible(page) -> bool:
 
 
 def open_reply_composer(page, path: str) -> None:
-    """Wait for the tweet to settle, then open the reply box. Retry if it is late."""
+    """Wait for the tweet to settle, then open the reply box. On the phone, call the reply
+    button's own handler. A coordinate press was landing on the account name."""
+    match = re.search(r"status/(\d{6,25})", path or "")
+    status_id = match.group(1) if match else ""
+    if IN_APP:
+        for _ in range(3):
+            if composer_visible(page):
+                trace_click("reply مربع الكتابة ظاهر")
+                return
+            try:
+                pressed = page.evaluate(PRESS_PAGE_JS, {"statusId": status_id, "testid": "reply"})
+            except Exception as exc:
+                pressed = {"how": "error", "error": str(exc).splitlines()[0][:160]}
+            trace_click(f"reply فتح {pressed}")
+            try:
+                page.locator('[data-testid="tweetTextarea_0"]').last.wait_for(state="visible", timeout=8000)
+                trace_click("reply ظهر مربع الكتابة")
+                return
+            except PlaywrightTimeoutError:
+                page.wait_for_timeout(500)
+        raise PlaywrightTimeoutError("tweetTextarea_0 not visible after retries")
     for attempt in range(3):
         page.wait_for_timeout(800 if attempt == 0 else 1400)
         if composer_visible(page):
@@ -3793,6 +4347,32 @@ def open_reply_composer(page, path: str) -> None:
 
 
 def insert_reply_text(page, text: str) -> None:
+    if IN_APP:
+        page.evaluate(
+            """(value) => {
+              const box = document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]')
+                || document.querySelector('[data-testid="tweetTextarea_0"]');
+              if (!box) return false;
+              const editable = box.querySelector('[contenteditable="true"]') || box;
+              editable.focus();
+              document.execCommand("selectAll", false);
+              document.execCommand("delete", false);
+              document.execCommand("insertText", false, value);
+              editable.dispatchEvent(new InputEvent("input", {bubbles: true, inputType: "insertText", data: value}));
+              return true;
+            }""",
+            text,
+        )
+        page.wait_for_timeout(400)
+        if reply_button_ready(page):
+            trace_click("reply كُتب النص")
+            return
+        page.keyboard.insert_text(text)
+        page.wait_for_timeout(400)
+        if not reply_button_ready(page):
+            raise PlaywrightTimeoutError("reply button stayed disabled")
+        trace_click("reply كُتب النص من لوحة المفاتيح")
+        return
     box = page.locator('[role="dialog"] [data-testid="tweetTextarea_0"]')
     if box.count() == 0:
         box = page.locator('[data-testid="tweetTextarea_0"]')
@@ -3833,6 +4413,42 @@ def insert_reply_text(page, text: str) -> None:
     )
 
 
+PRESS_SEND_JS = r"""
+() => {
+  const nodes = [...document.querySelectorAll('[data-testid="tweetButtonInline"], [data-testid="tweetButton"]')];
+  const button = [...nodes].reverse().find((node) => node.getAttribute("aria-disabled") !== "true" && !node.disabled);
+  if (!button) return {how: "missing"};
+  const before = (button.innerText || button.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+  const event = {
+    preventDefault() {}, stopPropagation() {}, persist() {},
+    nativeEvent: {isTrusted: true, button: 0},
+    isTrusted: true, button: 0, type: "click",
+    target: button, currentTarget: button
+  };
+  const keys = Object.keys(button);
+  for (const key of keys) {
+    if (!key.startsWith("__reactProps$")) continue;
+    const props = button[key];
+    if (props && typeof props.onClick === "function") {
+      props.onClick(event);
+      return {how: "react", before};
+    }
+  }
+  for (const child of button.querySelectorAll("*")) {
+    for (const key of Object.keys(child)) {
+      if (!key.startsWith("__reactProps$")) continue;
+      const props = child[key];
+      if (props && typeof props.onClick === "function") {
+        props.onClick(event);
+        return {how: "react", before};
+      }
+    }
+  }
+  return {how: "no-handler", before};
+}
+"""
+
+
 def click_reply_send(page) -> None:
     enabled = page.locator(
         '[data-testid="tweetButtonInline"]:not([aria-disabled="true"]), '
@@ -3840,6 +4456,12 @@ def click_reply_send(page) -> None:
     )
     if enabled.count() == 0:
         raise PlaywrightTimeoutError("reply button stayed disabled")
+    if IN_APP:
+        sent = page.evaluate(PRESS_SEND_JS)
+        trace_click(f"reply نشر {sent}")
+        if not isinstance(sent, dict) or sent.get("how") not in ("react", "fiber"):
+            raise PlaywrightTimeoutError("reply button stayed disabled")
+        return
     real_click(enabled.last)
 
 
@@ -4192,14 +4814,14 @@ def channel_not_installed(exc: Exception) -> bool:
                                          "error while loading shared libraries"))
 
 
-def open_x_profile(playwright, auth_token: str, profile_dir: Path):
+def open_x_profile(playwright, auth_token: str, profile_dir: Path, user_agent: str = "", viewport: dict | None = None):
     """Open the account's permanent browser profile (created on first use)."""
     profile_dir.mkdir(parents=True, exist_ok=True)
     options = browser_launch_options()
     settings = dict(
         headless=True,
-        viewport=screen_size(NORMAL_VIEWPORT_HEIGHT),
-        user_agent=(
+        viewport=viewport or screen_size(NORMAL_VIEWPORT_HEIGHT),
+        user_agent=user_agent or (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         ),
@@ -4242,6 +4864,175 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path):
     page.set_default_timeout(20_000)
     page.set_default_navigation_timeout(60_000)
     return context, page
+
+
+_login_jobs: queue.Queue = queue.Queue()
+_login_state: dict = {}
+_login_worker_started = False
+_login_worker_guard = threading.Lock()
+_MANUAL_LOGIN_AGENT = (
+    "Mozilla/5.0 (Linux; Android 14; SM-G998U) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+)
+
+
+def _login_worker() -> None:
+    while True:
+        fn, box = _login_jobs.get()
+        try:
+            box["result"] = fn()
+        except Exception as exc:
+            box["error"] = exc
+        finally:
+            box["done"].set()
+
+
+def _ensure_login_worker() -> None:
+    global _login_worker_started
+    with _login_worker_guard:
+        if _login_worker_started:
+            return
+        threading.Thread(target=_login_worker, name="manual-login", daemon=True).start()
+        _login_worker_started = True
+
+
+def _on_login_thread(fn, timeout: float = 90):
+    _ensure_login_worker()
+    box: dict = {"done": threading.Event()}
+    _login_jobs.put((fn, box))
+    if not box["done"].wait(timeout):
+        raise TimeoutError("manual login")
+    if box.get("error") is not None:
+        raise box["error"]
+    return box.get("result")
+
+
+def _show_manual_browser() -> None:
+    if not IN_APP:
+        return
+    from java import jclass
+    jclass("app.tg.groups.BrowserHost").prepareManualLogin()
+
+
+def _login_page_open() -> bool:
+    page = _login_state.get("page")
+    if page is None:
+        return False
+    try:
+        return not page.is_closed()
+    except Exception:
+        return False
+
+
+def _open_login_browser() -> None:
+    """One browser the user types into. Kept open so «تحقق» can read its session."""
+    if not _login_page_open():
+        playwright = sync_playwright().start()
+        context, page = open_x_profile(
+            playwright, "", PROFILES_DIR / "manual-login",
+            user_agent=_MANUAL_LOGIN_AGENT, viewport={"width": 412, "height": 820},
+        )
+        allow_media(page)
+        _login_state.update(playwright=playwright, context=context, page=page)
+    page = _login_state["page"]
+    _show_manual_browser()
+    page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=60_000)
+    _show_manual_browser()
+
+
+def start_manual_login() -> None:
+    _on_login_thread(_open_login_browser)
+
+
+def _read_login_token() -> str:
+    if not _login_page_open():
+        return ""
+    try:
+        cookies = _login_state["page"].context.cookies(["https://x.com", "https://twitter.com"])
+    except Exception:
+        return ""
+    for cookie in cookies:
+        if cookie.get("name") == "auth_token" and cookie.get("value"):
+            return str(cookie["value"])
+    return ""
+
+
+def manual_login_token() -> str:
+    if not _login_worker_started:
+        return ""
+    try:
+        token = str(_on_login_thread(_read_login_token, timeout=20) or "")
+    except Exception:
+        return ""
+    if valid_auth_token(token):
+        remember_manual_profile(token)
+    return token
+
+
+def _close_login_browser() -> None:
+    """Close the login window without deleting its profile, so a task can open that same browser."""
+    context = _login_state.pop("context", None)
+    playwright = _login_state.pop("playwright", None)
+    _login_state.pop("page", None)
+    if context is not None:
+        try:
+            context.close()
+        except Exception:
+            pass
+    if playwright is not None:
+        try:
+            playwright.stop()
+        except Exception:
+            pass
+
+
+def release_manual_browser() -> None:
+    if not _login_worker_started:
+        return
+    try:
+        _on_login_thread(_close_login_browser, timeout=20)
+    except Exception:
+        pass
+
+
+MANUAL_BROWSER = "manual-login"
+MANUAL_PROFILES_PATH = DATA_DIR / "manual_profiles.json"
+_manual_profiles_lock = threading.Lock()
+
+
+def _load_manual_profiles() -> dict:
+    try:
+        data = json.loads(MANUAL_PROFILES_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def remember_manual_profile(auth_token: str) -> None:
+    """This token belongs to the browser the user signed in to by hand."""
+    key = profile_key(auth_token)
+    with _manual_profiles_lock:
+        saved = {name: folder for name, folder in _load_manual_profiles().items() if folder != MANUAL_BROWSER}
+        saved[key] = MANUAL_BROWSER
+        MANUAL_PROFILES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MANUAL_PROFILES_PATH.write_text(json.dumps(saved), encoding="utf-8")
+
+
+def manual_profile_folder(auth_token: str) -> str:
+    key = profile_key(auth_token)
+    with _manual_profiles_lock:
+        saved = _load_manual_profiles()
+    return str(saved.get(key) or key)
+
+
+def forget_manual_profile(auth_token: str) -> None:
+    key = profile_key(auth_token)
+    with _manual_profiles_lock:
+        saved = _load_manual_profiles()
+        if key not in saved:
+            return
+        del saved[key]
+        MANUAL_PROFILES_PATH.write_text(json.dumps(saved), encoding="utf-8")
 
 
 # The running task's "close and reopen the browser" function (one per worker thread).
@@ -4333,11 +5124,25 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
     on the same account take turns. With slots > 1 the account gets that many profile
     folders and that many of its tasks run at the same time.
     """
-    key = profile_key(auth_token)
+    folder = manual_profile_folder(auth_token)
+    if folder == MANUAL_BROWSER:
+        slots = 1
+        release_manual_browser()
+    key = folder
     slot_name = acquire_profile_slot(key, slots)
+    same_browser = slot_name == MANUAL_BROWSER or slot_name.startswith(MANUAL_BROWSER + "-")
     try:
         playwright = sync_playwright().start()
         state = {"context": None}
+
+        def open_saved(target):
+            if same_browser:
+                trace_click("التنفيذ على المتصفح الذي سُجّل الدخول إليه يدوياً")
+                return open_x_profile(
+                    target, auth_token, PROFILES_DIR / slot_name,
+                    user_agent=_MANUAL_LOGIN_AGENT, viewport={"width": 412, "height": 820},
+                )
+            return open_x_profile(target, auth_token, PROFILES_DIR / slot_name)
 
         def restart(while_closed=None):
             """Close the profile's browser, reopen it on Google, then go to X. Returns the new page.
@@ -4351,7 +5156,7 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
             state["context"] = None
             if while_closed is not None and while_closed() is False:
                 return None
-            state["context"], new_page = open_x_profile(playwright, auth_token, PROFILES_DIR / slot_name)
+            state["context"], new_page = open_saved(playwright)
             try:
                 new_page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=60_000)
                 new_page.wait_for_timeout(2000)
@@ -4366,7 +5171,7 @@ def run_on_fresh_browser(auth_token: str, work, slots: int = 1):
 
         browser_restart.fn = restart
         try:
-            state["context"], page = open_x_profile(playwright, auth_token, PROFILES_DIR / slot_name)
+            state["context"], page = open_saved(playwright)
             return work(page)
         finally:
             browser_restart.fn = None
@@ -4402,13 +5207,17 @@ def set_page_height(page, height: int) -> None:
 
 def delete_profile(auth_token: str) -> None:
     key = profile_key(auth_token)
+    folder = manual_profile_folder(auth_token)
+    forget_manual_profile(auth_token)
+    names = {key, folder}
     lock = profile_lock(key)
     if not lock.acquire(timeout=5):
         return
     try:
-        shutil.rmtree(PROFILES_DIR / key, ignore_errors=True)
-        for extra in PROFILES_DIR.glob(f"{key}-*"):
-            shutil.rmtree(extra, ignore_errors=True)
+        for name in names:
+            shutil.rmtree(PROFILES_DIR / name, ignore_errors=True)
+            for extra in PROFILES_DIR.glob(f"{name}-*"):
+                shutil.rmtree(extra, ignore_errors=True)
     finally:
         lock.release()
 
@@ -4483,30 +5292,107 @@ def session_is_logged_in(page) -> bool:
 
 
 def read_session_username(page) -> str:
-    """Read the logged-in handle from the home sidebar, not the target profile."""
+    """The logged-in handle. The phone has no side menu, so the desktop profile link is
+    often missing; the avatar button and the session itself still carry the name."""
     try:
         handle = page.evaluate(
-            """() => {
-              const reserved = new Set(["home","explore","search","settings","messages","notifications","i","compose"]);
+            """async () => {
+              const reserved = new Set(["home","explore","search","settings","messages","notifications","i","compose","unknown","undefined","null","none","user","profile","guest"]);
+              const clean = (value) => {
+                const name = String(value || "").trim().replace(/^@/, "");
+                if (!/^[A-Za-z0-9_]{1,15}$/.test(name) || reserved.has(name.toLowerCase())) return "";
+                return name;
+              };
+              const fromHref = (node) => {
+                if (!node) return "";
+                const match = (node.getAttribute("href") || "").match(/^\\/([A-Za-z0-9_]{1,15})\\/?$/);
+                return match ? clean(match[1]) : "";
+              };
+              const fromAvatar = (node) => {
+                if (!node) return "";
+                const tagged = node.getAttribute && (node.getAttribute("data-testid") || "").startsWith("UserAvatar-Container-")
+                  ? node
+                  : node.querySelector('[data-testid^="UserAvatar-Container-"]');
+                if (!tagged) return "";
+                return clean((tagged.getAttribute("data-testid") || "").slice("UserAvatar-Container-".length));
+              };
               const profile = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
-              if (profile) {
-                const href = profile.getAttribute("href") || "";
-                const match = href.match(/^\\/([A-Za-z0-9_]{1,15})\\/?$/);
-                if (match && !reserved.has(match[1].toLowerCase())) return match[1];
-              }
-              const nodes = document.querySelectorAll('[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="UserName"]');
+              const dash = document.querySelector('[data-testid="DashButton_ProfileIcon_Link"]');
+              const visible = fromHref(profile) || fromAvatar(profile) || fromHref(dash) || fromAvatar(dash);
+              if (visible) return {name: visible, source: "page"};
+              const nodes = document.querySelectorAll('[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="UserName"], [data-testid="DashButton_ProfileIcon_Link"]');
               for (const node of nodes) {
                 const match = ((node.innerText || node.textContent || "")).match(/@([A-Za-z0-9_]{1,15})/);
-                if (match) return match[1];
+                if (match && clean(match[1])) return {name: match[1], source: "text"};
               }
-              return "";
+              const dig = (value, depth, seen) => {
+                if (!value || depth > 8 || typeof value !== "object") return "";
+                if (seen.has(value)) return "";
+                seen.add(value);
+                const direct = clean(value.screen_name || value.screenName || "");
+                if (direct) return direct;
+                for (const key of ["legacy", "core", "user", "viewer", "result", "data", "next", "memoizedState"]) {
+                  if (value[key]) {
+                    const found = dig(value[key], depth + 1, seen);
+                    if (found) return found;
+                  }
+                }
+                return "";
+              };
+              const root = dash || profile;
+              if (root) {
+                const fiberKey = Object.keys(root).find((key) => key.startsWith("__reactFiber$"));
+                let fiber = fiberKey ? root[fiberKey] : null;
+                for (let step = 0; fiber && step < 40; step++, fiber = fiber.return) {
+                  const found = dig(fiber.memoizedProps, 0, new Set()) || dig(fiber.memoizedState, 0, new Set());
+                  if (found) return {name: found, source: "account"};
+                }
+              }
+              return {name: "", source: "empty"};
             }"""
-        ) or ""
-    except Exception:
+        ) or {}
+    except Exception as exc:
         handle = ""
-    handle = str(handle).strip().lstrip("@")
+        trace_click("قراءة الاسم فشلت: " + type(exc).__name__)
+    else:
+        if isinstance(handle, dict):
+            trace_click(f"قراءة الاسم {handle}")
+            handle = str(handle.get("name") or "")
+        else:
+            handle = str(handle or "")
+    handle = handle.strip().lstrip("@")
+    if handle.lower() in {"unknown", "undefined", "null", "none", "user"}:
+        handle = ""
     if re.fullmatch(r"[A-Za-z0-9_]{1,15}", handle):
         return handle
+    try:
+        goto_x(page, "https://x.com/settings/screen_name")
+        page.wait_for_timeout(2500)
+        found = page.evaluate(
+            """() => {
+              const reserved = new Set(["home","explore","search","settings","messages","notifications","i","compose","unknown","undefined","null","none","user","profile","guest","screen_name","username"]);
+              const clean = (value) => {
+                const name = String(value || "").trim().replace(/^@/, "");
+                if (!/^[A-Za-z0-9_]{1,15}$/.test(name) || reserved.has(name.toLowerCase())) return "";
+                return name;
+              };
+              const preferred = document.querySelector('input[name="username"], input[name="screen_name"], input[autocomplete="username"]');
+              const fromInput = clean(preferred && preferred.value);
+              if (fromInput) return fromInput;
+              for (const input of document.querySelectorAll("input")) {
+                const name = clean(input.value);
+                if (name) return name;
+              }
+              const match = ((document.body && document.body.innerText) || "").match(/@([A-Za-z0-9_]{1,15})/);
+              return match ? clean(match[1]) : "";
+            }"""
+        ) or ""
+        trace_click(f"قراءة الاسم من الإعدادات: {found or 'فارغ'}")
+        found = str(found).strip().lstrip("@")
+        if re.fullmatch(r"[A-Za-z0-9_]{1,15}", found) and found.lower() not in {"unknown", "settings"}:
+            return found
+    except Exception as exc:
+        trace_click("قراءة الاسم من الإعدادات فشلت: " + type(exc).__name__)
     return ""
 
 
@@ -4519,6 +5405,7 @@ def verify_x_login(auth_token: str) -> tuple[bool, str]:
         if not username:
             page.wait_for_timeout(1200)
             username = read_session_username(page)
+        trace_click(f"التحقق اسم الحساب: {username or 'غير معروف'}")
         return True, username
     return run_on_browser(auth_token, work)
 
@@ -4916,27 +5803,61 @@ def peek_named_group(page, name: str, wait_s: float = 10.0) -> bool:
     return True
 
 
-# During the wait inside the group, its page is reloaded once after this many seconds.
-GROUP_RELOAD_AFTER = 10
-
-
-def reload_group(page, pin: str, group_name: str) -> None:
-    """Reload the open group's page and wait until the group shows again. Types the chat PIN if
-    X asks for it, and goes back to the group's link if X then shows the chat list; if the group
-    is still not showing after 30 s, opens it again from the chat list."""
-    group_url = (page.url or "").split("?")[0]
-    try:
-        page.reload(wait_until="domcontentloaded", timeout=60_000)
-    except Exception as exc:
-        if browser_closed_error(exc):
-            raise
-    if land_in_group(page, group_url, pin, 30):
+def sway_group_while_waiting(page, seconds: int, should_stop=None) -> None:
+    """During the wait inside the group, move the chat up and down. The last ten seconds
+    stay at the bottom, where the newest messages are."""
+    seconds = int(seconds)
+    if seconds <= 0:
         return
-    error = open_chat(page, pin)
-    if error:
-        raise RuntimeError(error)
-    show_groups_only(page)
-    open_named_group(page, group_name)
+    step = """(dir) => {
+      const start = document.querySelector('[data-testid="dm-message-scroller"]')
+        || document.querySelector('[data-testid="dm-message-list"]');
+      const scrollerOf = (node) => {
+        for (let el = node; el && el.nodeType === 1; el = el.parentElement) {
+          if (/(auto|scroll|overlay)/.test(getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight + 10) return el;
+        }
+        const page = document.scrollingElement;
+        if (page && page.scrollHeight > page.clientHeight + 10) return page;
+        return node;
+      };
+      const scroller = start ? scrollerOf(start) : document.scrollingElement;
+      if (!scroller) return false;
+      if (dir === 0) scroller.scrollTop = scroller.scrollHeight;
+      else {
+        const client = scroller.clientHeight || 800;
+        const base = dir > 0
+          ? Math.max(560, Math.min(1200, Math.round(client * 0.75)))
+          : Math.max(400, Math.min(800, Math.round(client * 0.5)));
+        const jump = Math.max(base, Math.min(base * 2, Math.round(client * 0.9)));
+        scroller.scrollTop = dir < 0
+          ? Math.max(0, scroller.scrollTop - jump)
+          : Math.min(scroller.scrollHeight, scroller.scrollTop + jump);
+      }
+      try { scroller.dispatchEvent(new Event("scroll", {bubbles: true})); } catch (error) {}
+      return true;
+    }"""
+    end = time.monotonic() + seconds
+    bottom_at = end - 10 if seconds > 10 else time.monotonic()
+    direction = -1
+    while True:
+        if should_stop and should_stop():
+            return
+        now = time.monotonic()
+        if now >= end:
+            return
+        if now >= bottom_at:
+            try:
+                page.evaluate(step, 0)
+            except Exception:
+                pass
+            page.wait_for_timeout(int(max(0, end - time.monotonic()) * 1000))
+            return
+        try:
+            page.evaluate(step, direction)
+        except Exception:
+            pass
+        direction = 1 if direction < 0 else -1
+        page.wait_for_timeout(800)
 
 
 def leave_group(page, pin: str) -> None:
@@ -4966,13 +5887,6 @@ def open_group_for_task(page, pin: str, group_name: str, group_wait_s: int, say)
         say(f"فتح القروب مباشرة: {group_name}")
         if open_group_direct(page, group_link, pin):
             wait_group_messages(page, 25)
-            if group_wait_s <= GROUP_RELOAD_AFTER:
-                # X first opens a group at the place this account last read up to: load its page
-                # once more so it opens at the newest messages. (With a longer wait before
-                # collecting, the reload during that wait does this.)
-                say("فُتح القروب. تحديث صفحته لتظهر أحدث الرسائل…")
-                reload_group(page, pin, group_name)
-                wait_group_messages(page, 25)
             return group_name
         # The link did not open the group: back to the chat list, to find it there.
         error = open_chat(page, pin)
@@ -4980,12 +5894,6 @@ def open_group_for_task(page, pin: str, group_name: str, group_wait_s: int, say)
             raise RuntimeError(error)
     show_groups_only(page)
     say(f"فتح القروب: {group_name}")
-    # X first opens a group at the place this account last read up to. Open it once (until its
-    # messages show, at most 10 s), leave, and open it again at the newest messages.
-    if peek_named_group(page, group_name, 10):
-        say("فُتح القروب. الخروج منه والعودة إليه لتظهر أحدث الرسائل…")
-        leave_group(page, pin)
-        show_groups_only(page)
     return open_named_group(page, group_name)
 
 
@@ -5572,11 +6480,19 @@ def read_status_gate(page) -> str:
 QUICK_ACTIONS_ON_JS = r"""
 ({statusId, names}) => {
   if (!statusId) return false;
-  const card = [...document.querySelectorAll('article[data-testid="tweet"]')].find((article) =>
+  const card = [...document.querySelectorAll('article[data-testid="tweet"], [data-testid="tweet"]')].find((article) =>
     [...article.querySelectorAll('a[href*="/status/"]')].some((node) => (node.getAttribute("href") || "").includes("/status/" + statusId)));
   if (!card) return false;
+  const root = card.closest('[data-testid="cellInnerDiv"]') || card;
   const on = {repost: "unretweet", like: "unlike", bookmark: "removeBookmark"};
-  return names.length > 0 && names.every((name) => on[name] && card.querySelector('[data-testid="' + on[name] + '"]'));
+  const labels = {unretweet: /undo repost|unretweet|تم إعادة|إلغاء إعادة/i, unlike: /unlike|liked|أعجبني|معجب/i, removeBookmark: /remove bookmark|إزالة الإشارة/i};
+  const has = (testid) => {
+    if (root.querySelector('[data-testid="' + testid + '"]')) return true;
+    const re = labels[testid];
+    if (!re) return false;
+    return [...root.querySelectorAll("button, [role='button']")].some((node) => re.test(node.getAttribute("aria-label") || ""));
+  };
+  return names.length > 0 && names.every((name) => on[name] && has(on[name]));
 }
 """
 
@@ -6165,18 +7081,9 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 )
                 if opened_name != group_name:
                     publish_job(job_id, phase="login", message=f"تغيّر اسم القروب إلى «{opened_name}» وفُتح.")
-                if group_wait_s > GROUP_RELOAD_AFTER:
-                    # Wait the first seconds, reload the group's page once, then wait the rest.
-                    publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع، مع تحديث الصفحة بعد {GROUP_RELOAD_AFTER} ث…")
-                    page.wait_for_timeout(GROUP_RELOAD_AFTER * 1000)
-                    publish_job(job_id, phase="login", message="تحديث صفحة القروب…")
-                    reload_group(page, pin, opened_name)
-                    rest = int(group_wait_s) - GROUP_RELOAD_AFTER
-                    publish_job(job_id, phase="login", message=f"حُدّثت صفحة القروب. انتظار {rest} ث قبل بدء التمرير والجمع…")
-                    page.wait_for_timeout(rest * 1000)
-                elif group_wait_s > 0:
-                    publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث قبل بدء التمرير والجمع…")
-                    page.wait_for_timeout(int(group_wait_s) * 1000)
+                if group_wait_s > 0:
+                    publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث، مع التحريك للأعلى والأسفل ثم العودة للأسفل…")
+                    sway_group_while_waiting(page, group_wait_s, lambda: job_cancelled(job_id))
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
                 items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
                 # Drop tweets by ignored accounts here, before anything is opened: they leave no trace
@@ -6374,9 +7281,39 @@ def login_page(access_path: str):
         PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(), max_links=MAX_TWEET_LINKS,
         claude_here=key_typed_here(), claude_default=CLAUDE_DEFAULT_MODEL,
         content_ready=content_ready.is_set() or (CONTENT_FILE.is_file() if is_owner_copy() else bool(CONTENT_EMBEDDED)),
-        tweets_in_content=content_shows_tweets,
+        tweets_in_content=content_shows_tweets, in_app=IN_APP,
     ))
     return response
+
+
+@app.post("/<access_path>/browser-login")
+def browser_login_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    if not IN_APP:
+        return jsonify(success=False, message="تسجيل الدخول من المتصفح متاح داخل التطبيق."), 400
+    try:
+        start_manual_login()
+    except Exception:
+        app.logger.warning("manual login browser failed", exc_info=True)
+        return jsonify(success=False, message="تعذّر فتح المتصفح. أعد المحاولة."), 502
+    return jsonify(success=True, message="سجّل الدخول في تبويب المتصفح، ثم ارجع إلى اللوحة واضغط تحقق.")
+
+
+@app.post("/<access_path>/browser-session")
+def browser_session_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    token = manual_login_token()
+    if not valid_auth_token(token):
+        return jsonify(success=False, message="لم تكتمل جلسة المتصفح بعد.")
+    return jsonify(success=True, auth_token=token)
 
 
 @app.post("/<access_path>/verify-login")

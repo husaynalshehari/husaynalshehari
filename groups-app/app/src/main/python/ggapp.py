@@ -101,6 +101,23 @@ def log_text(lines: int = 500) -> str:
     return "\n".join(rows) if rows else "لا شيء في السجل بعد."
 
 
+def click_log_text() -> str:
+    """The click trace written by the script, plus the last lines printed."""
+    folder = STATE.get("folder") or os.getcwd()
+    path = os.path.join(folder, "data", "click-log.txt")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            body = handle.read()[-20000:]
+    except OSError:
+        body = ""
+    with _log_lock:
+        printed = "\n".join(list(LOG)[-250:])
+    head = device_line()
+    if not body:
+        body = "لا يوجد سجل نقر بعد. نفّذ مهمة على تغريدة ثم ارجع إلى هذه القائمة."
+    return head + "\n\n" + body + "\n\n--- آخر ما طُبع ---\n" + printed
+
+
 def device_line() -> str:
     """This phone, in one line (it heads the check's report)."""
     try:

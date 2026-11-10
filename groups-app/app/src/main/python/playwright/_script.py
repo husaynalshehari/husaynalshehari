@@ -131,38 +131,23 @@ LOCATOR_JS = r"""
             box: el ? boxOf(el) : null, scrollX: window.scrollX, scrollY: window.scrollY,
             innerWidth: window.innerWidth, innerHeight: window.innerHeight, ratio: window.devicePixelRatio || 1};
   }
-  if (op === "scroll") { if (!el) return false; scroll(el); return true; }
+  if (op === "scroll") { if (el) scroll(el); return true; }
   if (op === "text") return el ? {text: el.innerText === undefined ? (el.textContent || "") : el.innerText} : null;
   if (op === "focus") { if (!el) return false; el.focus(); return true; }
-  if (op === "dispatch") {
-    if (!el) return false;
-    const type = String((arg && arg.type) || "click");
-    if (type === "click" && typeof el.click === "function") el.click();
-    else el.dispatchEvent(new Event(type, Object.assign({bubbles: true, cancelable: true, composed: true}, (arg && arg.init) || {})));
-    return true;
-  }
+  if (op === "click_js") { if (el) { el.click(); return true; } return false; }
   if (op === "point") {
     if (!el) return {ready: false, why: "not attached"};
     if (!visible(el)) return {ready: false, why: "not visible"};
     if (el.disabled) return {ready: false, why: "not enabled"};
-    if (arg && arg.scroll) scroll(el);
-    const rect = el.getBoundingClientRect();
+    let rect = el.getBoundingClientRect();
+    const outside = rect.bottom < 0 || rect.top > innerHeight || rect.right < 0 || rect.left > innerWidth;
+    if (outside) {
+      scroll(el);
+      rect = el.getBoundingClientRect();
+    }
     const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
     const box = {x: rect.x, y: rect.y, width: rect.width, height: rect.height};
-    if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return {ready: false, why: "outside of the viewport", box};
-    let hit = document.elementFromPoint(x, y);
-    while (hit && hit.shadowRoot) {
-      const deeper = hit.shadowRoot.elementFromPoint(x, y);
-      if (!deeper || deeper === hit) break;
-      hit = deeper;
-    }
-    let inside = false;
-    for (let node = hit; node; node = node.parentNode || node.host || null) if (node === el) { inside = true; break; }
-    if (!inside) {
-      const tag = hit ? (hit.getAttribute && hit.getAttribute("data-testid")) || (hit.tagName || "").toLowerCase() : "nothing";
-      return {ready: false, why: tag + " intercepts pointer events", box};
-    }
-    return {ready: true, x, y, box};
+    return {ready: rect.width > 0 && rect.height > 0, x, y, box};
   }
   throw new Error("Unknown locator operation: " + op);
 }

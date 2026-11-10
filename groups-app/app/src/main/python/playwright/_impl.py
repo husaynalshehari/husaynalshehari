@@ -163,10 +163,33 @@ class Mouse:
         self._button = "none"
 
     def _event(self, kind: str, **extra) -> None:
-        params = {"type": kind, "x": self._x, "y": self._y, "modifiers": self._page.keyboard._modifiers(),
+        # Coordinates stay in CSS pixels: the button box is read that way. Multiplying by the
+        # screen density (3.5 on this phone) put the press far below the button, so nothing happened.
+        x, y = self._x, self._y
+        page = self._page
+        android = getattr(getattr(page, "_backend", None), "kind", "") == "android"
+        if android and kind in ("mousePressed", "mouseReleased"):
+            try:
+                if kind == "mousePressed":
+                    page._call("Input.dispatchTouchEvent", {
+                        "type": "touchStart",
+                        "modifiers": page.keyboard._modifiers(),
+                        "touchPoints": [{"x": x, "y": y, "radiusX": 1, "radiusY": 1, "force": 1, "id": 1}],
+                    }, 20)
+                    print(f"نقر: لمسة على ({x:.0f},{y:.0f}) بدون ضرب الكثافة", flush=True)
+                else:
+                    page._call("Input.dispatchTouchEvent", {
+                        "type": "touchEnd",
+                        "modifiers": page.keyboard._modifiers(),
+                        "touchPoints": [],
+                    }, 20)
+                return
+            except Exception as exc:
+                print(f"نقر: اللمسة لم تُقبل ({exc})، تُرسل نقرة المؤشر في المكان نفسه", flush=True)
+        params = {"type": kind, "x": x, "y": y, "modifiers": page.keyboard._modifiers(),
                   "button": self._button, "buttons": self._buttons}
         params.update(extra)
-        self._page._call("Input.dispatchMouseEvent", params, 20)
+        page._call("Input.dispatchMouseEvent", params, 20)
 
     def move(self, x: float, y: float, steps: int = 1) -> None:
         from_x, from_y = self._x, self._y
@@ -365,36 +388,17 @@ class Locator:
         self._wait("attached", timeout, "Locator.focus")
         self._op("focus")
 
-    def dispatch_event(self, type: str, event_init=None, timeout=None) -> None:
-        """The event on the element itself (a click is the page's own click()), with no mouse."""
-        self._wait("attached", timeout, "Locator.dispatch_event")
-        self._op("dispatch", {"type": str(type), "init": event_init or {}})
-
     def click(self, timeout=None, delay: float = 0, button: str = "left", click_count: int = 1, **_others) -> None:
-        """Wait until the element shows, is still, and nothing covers its middle; then a real mouse click there."""
-        limit = _ms(timeout, self.page._timeout)
-        deadline = time.monotonic() + limit / 1000
-        before = None
-        why = "not attached"
-        while True:
-            point = self._op("point", {"scroll": True}) or {}
-            if point.get("ready"):
-                spot = (float(point["x"]), float(point["y"]))
-                if before is not None and abs(before[0] - spot[0]) < 1 and abs(before[1] - spot[1]) < 1:
-                    break
-                before = spot
-                time.sleep(0.05)
-                continue
-            before = None
-            why = str(point.get("why") or why)
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"Locator.click: Timeout {limit:g}ms exceeded.\nCall log:\n  - waiting for {self!r}\n  - {why}")
-            time.sleep(0.1)
-        self.page.mouse.click(before[0], before[1], delay=delay, button=button, click_count=click_count)
+        """A real pointer press at the element's center, so the page receives a trusted click."""
+        self._wait("visible", timeout, "Locator.click")
+        point = self._op("point") or {}
+        if not point.get("ready"):
+            raise TimeoutError(f"Locator.click: the element is not clickable ({point.get('why') or 'not ready'})")
+        self.page.mouse.click(float(point["x"]), float(point["y"]), delay=delay, button=button, click_count=click_count)
 
     def screenshot(self, type: str = "png", quality=None, timeout=None, **_others) -> bytes:
         state = self._wait("visible", timeout, "Locator.screenshot")
-        self._op("scroll")
+        # no scroll
         time.sleep(0.05)
         state = self._op("state") or state
         box = state.get("box")
@@ -720,6 +724,7 @@ class Page:
         width, height = int(viewport_size["width"]), int(viewport_size["height"])
         self._backend.resize(self, width, height)
         self._viewport = {"width": width, "height": height}
+        self._pointer_ratio = None
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             try:

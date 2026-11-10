@@ -4,10 +4,10 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
-import android.app.PictureInPictureParams;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
@@ -19,8 +19,8 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.text.TextUtils;
-import android.util.Rational;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -42,6 +42,11 @@ import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 
 /**
  * The app's one page. «اللوحة» is the groups script's own page (the script runs inside the app, see Engine), and
@@ -103,7 +108,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onStop() {
         super.onStop();
-        BrowserHost.setVisible(false);
+        // A task keeps going in the background. Only a quiet notification stays, not a floating window.
+        if (BrowserHost.count() == 0) {
+            BrowserHost.setVisible(false);
+        } else {
+            BrowserHost.setVisible(true);
+            BrowserHost.keepAwake();
+        }
     }
 
     @Override
@@ -293,16 +304,14 @@ public class MainActivity extends Activity {
         emptyNote.setVisibility(onBrowserTab && open == 0 ? View.VISIBLE : View.GONE);
         if (open > 0) {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 7);
+            }
+            WorkService.start(this);
         } else {
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        }
-        if (Build.VERSION.SDK_INT >= 31 && canShrink()) {
-            try {
-                setPictureInPictureParams(new PictureInPictureParams.Builder().setAspectRatio(new Rational(9, 16))
-                    .setAutoEnterEnabled(open > 0).build());
-            } catch (RuntimeException e) {
-                // (this phone does not shrink apps)
-            }
+            WorkService.stop(this);
         }
     }
 
@@ -373,6 +382,7 @@ public class MainActivity extends Activity {
         menu.getMenu().add(0, 1, 0, "فحص المتصفح");
         menu.getMenu().add(0, 2, 1, "فحص المتصفح والوصول إلى X");
         menu.getMenu().add(0, 3, 2, "السجل");
+        menu.getMenu().add(0, 7, 3, "سجل النقر");
         menu.getMenu().add(0, 6, 3, BrowserHost.manualTyping ? "منع الكتابة في المتصفح بيدي" : "السماح بالكتابة في المتصفح بيدي");
         menu.getMenu().add(0, 4, 4, "تحديث السكربت");
         menu.getMenu().add(0, 5, 5, "إعادة تشغيل التطبيق");
@@ -386,6 +396,9 @@ public class MainActivity extends Activity {
                     return true;
                 case 3:
                     showLog();
+                    return true;
+                case 7:
+                    showClickLog();
                     return true;
                 case 4:
                     confirmUpdate();
@@ -435,6 +448,59 @@ public class MainActivity extends Activity {
                 }
             });
         }, "browser-check").start();
+    }
+
+    void showClickLog() {
+        if (!Engine.phase.equals("running") && !Engine.phase.equals("failed")) {
+            openReport("سجل النقر", "السكربت لم يبدأ بعد.");
+            return;
+        }
+        openReport("سجل النقر", "…");
+        new Thread(() -> {
+            String log = com.chaquo.python.Python.isStarted() ? Engine.call("click_log_text") : "";
+            runOnUiThread(() -> {
+                if (!alive) {
+                    return;
+                }
+                reportText.setText(log);
+                reportCopy = log;
+                saveTextDownload("groups-click-log.txt", log);
+            });
+        }, "click-log").start();
+    }
+
+    /** The click log as a text file in the phone's Downloads, so it can be sent back. */
+    void saveTextDownload(String name, String body) {
+        try {
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            if (Build.VERSION.SDK_INT >= 29) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                values.put(MediaStore.Downloads.MIME_TYPE, "text/plain");
+                values.put(MediaStore.Downloads.IS_PENDING, 1);
+                Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (uri == null) {
+                    throw new RuntimeException("no file");
+                }
+                try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+                    if (out == null) {
+                        throw new RuntimeException("no stream");
+                    }
+                    out.write(bytes);
+                }
+                values.clear();
+                values.put(MediaStore.Downloads.IS_PENDING, 0);
+                getContentResolver().update(uri, values, null, null);
+            } else {
+                File file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), name);
+                try (FileOutputStream out = new FileOutputStream(file)) {
+                    out.write(bytes);
+                }
+            }
+            Toast.makeText(this, "حُفظ في التنزيلات: " + name + " — أرسل هذا الملف", Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "تعذّر حفظ الملف. استخدم زر النسخ.", Toast.LENGTH_LONG).show();
+        }
     }
 
     void showLog() {
@@ -496,24 +562,6 @@ public class MainActivity extends Activity {
     }
 
     // ---------------------------------------------------------------- leaving the app while tasks run
-
-    boolean canShrink() {
-        return Build.VERSION.SDK_INT >= 26 && getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE);
-    }
-
-    @Override
-    protected void onUserLeaveHint() {
-        super.onUserLeaveHint();
-        // With a task's browser open, leaving the app shrinks it to a small window over the other apps, so that the
-        // browser stays on the screen and the task goes on. (From Android 12 the phone does this by itself.)
-        if (BrowserHost.count() > 0 && canShrink() && Build.VERSION.SDK_INT < 31) {
-            try {
-                enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(9, 16)).build());
-            } catch (RuntimeException e) {
-                // (not allowed on this phone: the task rests until the app is opened again)
-            }
-        }
-    }
 
     @Override
     public void onPictureInPictureModeChanged(boolean inSmallWindow, Configuration newConfig) {
