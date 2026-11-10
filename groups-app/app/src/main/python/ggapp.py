@@ -70,6 +70,7 @@ def main(folder: str, port: int, access: str) -> None:
     os.environ["PORT"] = str(int(port))
     os.environ["BIND_HOST"] = "127.0.0.1"
     os.environ["X_ACCESS_PATH"] = str(access)
+    os.environ["GG_IN_APP"] = "1"                 # (the script clicks without scrolling the page: see IN_APP there)
     os.chdir(folder)
     sys.argv = [script]
     try:

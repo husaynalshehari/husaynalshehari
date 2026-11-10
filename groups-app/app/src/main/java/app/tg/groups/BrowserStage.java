@@ -45,6 +45,19 @@ final class BrowserStage extends ViewGroup {
         }
     }
 
+    /** A finger on the tab scrolls the tab, never the page inside a browser (which would move the buttons from
+     * under the script's mouse); only with «الكتابة في المتصفح بيدي» do touches reach the page. */
+    @Override
+    public boolean onInterceptTouchEvent(android.view.MotionEvent event) {
+        return !BrowserHost.manualTyping;
+    }
+
+    @Override
+    @SuppressWarnings("ClickableViewAccessibility")
+    public boolean onTouchEvent(android.view.MotionEvent event) {
+        return false;
+    }
+
     private static BrowserHost.Browser of(View child) {
         Object tag = child.getTag();
         return tag instanceof BrowserHost.Browser ? (BrowserHost.Browser) tag : null;
