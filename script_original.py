@@ -2669,70 +2669,28 @@ def _human_path(start: tuple[float, float], end: tuple[float, float], viewport: 
     return points
 
 
-# Inside the Android app («قروبات») the page is not scrolled for the script's own sake: a button is clicked where
-# it is, once the page has stopped moving, and the aim is checked again just before the press (on a phone X loads
-# slower, and scrolling it while it loaded moved the buttons from under the mouse).
+# Inside the Android app («قروبات») the buttons are pressed by their own ids (data-testid), with the page's own
+# click, not with the mouse, and the page is never scrolled for it: on a phone the mouse missed them.
 IN_APP = os.environ.get("GG_IN_APP") == "1"
 
-
-def _same_box(a: dict | None, b: dict | None) -> bool:
-    return bool(a and b) and all(abs(float(a[key]) - float(b[key])) < 1 for key in ("x", "y", "width", "height"))
-
-
-def _in_view(page, box: dict | None) -> bool:
-    if not box:
-        return False
-    viewport = page.viewport_size or {"width": VIEWPORT_WIDTH, "height": 900}
-    middle_y = float(box["y"]) + float(box["height"]) / 2
-    middle_x = float(box["x"]) + float(box["width"]) / 2
-    return 0 < middle_y < viewport["height"] and 0 < middle_x < viewport["width"]
-
-
-def _still_box(page, read_box, seconds: float = 5.0, scroll=None):
-    """The box once it reads the same twice in a row (the page stopped moving). scroll(): asked once, only when
-    the box is outside the page's view."""
-    last = None
-    scrolled = scroll is None
-    deadline = time.monotonic() + seconds
-    while True:
-        box = read_box()
-        if box and _same_box(box, last):
-            if _in_view(page, box) or scrolled:
-                return box
-            try:
-                scroll()
-            except Exception:
-                pass
-            scrolled = True
-            box = None
-        if time.monotonic() >= deadline:
-            return box
-        last = box
-        page.wait_for_timeout(150)
-
-
-def _press_at(page, read_box, box: dict, local_x: float, local_y: float) -> None:
-    """Move to the spot like a hand; if the button moved meanwhile, move again to where it is now; then press."""
-    x, y = box["x"] + local_x, box["y"] + local_y
-    _move_like_a_hand(page, x, y)
-    for _ in range(4):
-        try:
-            now = read_box()
-        except Exception:
-            now = None
-        if not now:
-            break
-        nx = now["x"] + min(local_x, max(1.0, now["width"] - 1))
-        ny = now["y"] + min(local_y, max(1.0, now["height"] - 1))
-        if abs(nx - x) < 1 and abs(ny - y) < 1:
-            break
-        page.mouse.move(nx, ny, steps=4)
-        x, y = nx, ny
-        _mouse_at[id(page)] = (x, y)
-        page.wait_for_timeout(120)
-    page.mouse.down()
-    page.wait_for_timeout(100)
-    page.mouse.up()
+# The button of an action in the tweet's own card, pressed by its id.
+CLICK_ACTION_BUTTON_JS = r"""
+({statusId, testid}) => {
+  const articles = [...document.querySelectorAll('article[data-testid="tweet"]')];
+  let card = null;
+  if (statusId) {
+    card = articles.find((article) => [...article.querySelectorAll('a[href*="/status/"]')]
+      .some((node) => (node.getAttribute("href") || "").includes("/status/" + statusId)));
+  }
+  if (!card) card = articles[0] || null;
+  if (!card) return "missing";
+  const button = card.querySelector('div[role="group"] [data-testid="' + testid + '"]')
+    || card.querySelector('[data-testid="' + testid + '"]');
+  if (!button) return "missing";
+  button.click();
+  return "";
+}
+"""
 
 
 def _move_like_a_hand(page, x: float, y: float) -> None:
@@ -2747,13 +2705,18 @@ def real_click(locator) -> None:
     """Use the selector only to read the button box, then send a real mouse click."""
     locator.wait_for(state="visible", timeout=8000)
     if IN_APP:
-        box = _still_box(locator.page, locator.bounding_box, scroll=lambda: locator.scroll_into_view_if_needed(timeout=4000))
-    else:
+        # (by the element itself: focused, for a text box, then clicked by the page)
         try:
-            locator.scroll_into_view_if_needed(timeout=4000)
+            locator.focus(timeout=2000)
         except Exception:
             pass
-        box = locator.bounding_box()
+        locator.dispatch_event("click")
+        return
+    try:
+        locator.scroll_into_view_if_needed(timeout=4000)
+    except Exception:
+        pass
+    box = locator.bounding_box()
     if not box or box["width"] < 2 or box["height"] < 2:
         raise PlaywrightTimeoutError("button box missing")
     width = box["width"]
@@ -2779,9 +2742,6 @@ def real_click(locator) -> None:
     local_x = min(max(local_x, inset_x), width - inset_x)
     local_y = min(max(local_y, inset_y), height - inset_y)
     page = locator.page
-    if IN_APP:
-        _press_at(page, locator.bounding_box, box, local_x, local_y)
-        return
     x = box["x"] + local_x
     y = box["y"] + local_y
     _move_like_a_hand(page, x, y)
@@ -2953,36 +2913,29 @@ def press_action_button(page, path: str, status_id: str, action: str) -> str:
     """
     testid = ACTION_CONTROLS[action][1]
     blocker = ""
-    def probe(scroll: bool = False):
+    if IN_APP:
+        close_popups(page)
         try:
-            return page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": testid, "scroll": scroll})
-        except Exception:
-            return None
-
+            return page.evaluate(CLICK_ACTION_BUTTON_JS, {"statusId": status_id, "testid": testid}) or ""
+        except Exception as exc:
+            if browser_closed_error(exc):
+                raise
+            return "غير معروف"
     for _ in range(3):
         close_popups(page)
-        if IN_APP:
-            found: dict = {}
-
-            def read_box():
-                found["info"] = probe() or {}
-                return found["info"].get("box")
-
-            _still_box(page, read_box, scroll=lambda: probe(True))
-            info = found.get("info")
-        else:
-            probe(True)
-            page.wait_for_timeout(500)
-            info = probe()
+        try:
+            page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": testid, "scroll": True})
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+        try:
+            info = page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": testid, "scroll": False})
+        except Exception:
+            info = None
         if not info or not info.get("box"):
             return "missing"
         if info.get("ok") and info.get("inView"):
-            if IN_APP:
-                box = info["box"]
-                _press_at(page, lambda: (probe() or {}).get("box"), box,
-                          box["width"] * random.uniform(0.4, 0.6), box["height"] * random.uniform(0.4, 0.6))
-            else:
-                click_box(page, info["box"])
+            click_box(page, info["box"])
             return ""
         blocker = str(info.get("blocker") or "خارج الشاشة")
         try:

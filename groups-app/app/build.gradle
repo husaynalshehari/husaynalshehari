@@ -18,8 +18,8 @@ android {
         applicationId 'app.tg.groups'
         minSdk 26
         targetSdk 35
-        versionCode 2
-        versionName '1.1'
+        versionCode 3
+        versionName '1.2'
         ndk {
             // Phones of the last years (64-bit ARM). Python 3.12 for Android has no 32-bit build.
             // (-PggAbis=arm64-v8a,x86_64 adds the emulator's, for trying the app on a computer.)

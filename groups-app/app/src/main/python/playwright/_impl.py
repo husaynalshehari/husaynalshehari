@@ -365,6 +365,11 @@ class Locator:
         self._wait("attached", timeout, "Locator.focus")
         self._op("focus")
 
+    def dispatch_event(self, type: str, event_init=None, timeout=None) -> None:
+        """The event on the element itself (a click is the page's own click()), with no mouse."""
+        self._wait("attached", timeout, "Locator.dispatch_event")
+        self._op("dispatch", {"type": str(type), "init": event_init or {}})
+
     def click(self, timeout=None, delay: float = 0, button: str = "left", click_count: int = 1, **_others) -> None:
         """Wait until the element shows, is still, and nothing covers its middle; then a real mouse click there."""
         limit = _ms(timeout, self.page._timeout)

@@ -134,6 +134,13 @@ LOCATOR_JS = r"""
   if (op === "scroll") { if (!el) return false; scroll(el); return true; }
   if (op === "text") return el ? {text: el.innerText === undefined ? (el.textContent || "") : el.innerText} : null;
   if (op === "focus") { if (!el) return false; el.focus(); return true; }
+  if (op === "dispatch") {
+    if (!el) return false;
+    const type = String((arg && arg.type) || "click");
+    if (type === "click" && typeof el.click === "function") el.click();
+    else el.dispatchEvent(new Event(type, Object.assign({bubbles: true, cancelable: true, composed: true}, (arg && arg.init) || {})));
+    return true;
+  }
   if (op === "point") {
     if (!el) return {ready: false, why: "not attached"};
     if (!visible(el)) return {ready: false, why: "not visible"};
