@@ -6,6 +6,7 @@ import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.net.http.SslError;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
@@ -17,8 +18,10 @@ import android.webkit.JsPromptResult;
 import android.webkit.JsResult;
 import android.webkit.PermissionRequest;
 import android.webkit.RenderProcessGoneDetail;
+import android.webkit.SslErrorHandler;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
@@ -88,6 +91,7 @@ public final class BrowserHost {
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             lastError = cause.getClass().getSimpleName() + ": " + cause.getMessage();
+            AppLog.error("تعذّر أمر لمتصفح التطبيق", cause);
             return fallback;
         }
     }
@@ -121,6 +125,7 @@ public final class BrowserHost {
             MainActivity host = activity;
             if (host == null) {
                 lastError = "التطبيق ليس مفتوحًا على الشاشة. افتحه ثم أعد المحاولة.";
+                AppLog.error("لم يُفتح متصفح: " + lastError);
                 return -1;
             }
             Browser b = new Browser();
@@ -147,6 +152,7 @@ public final class BrowserHost {
             view.loadDataWithBaseURL(null, "<html><head><title>gg-" + b.id + "</title></head><body></body></html>",
                 "text/html", "utf-8", null);
             host.browsersChanged();
+            AppLog.add("متصفح " + b.id + " فُتح (ملف الحساب " + (b.ownProfile ? "مستقل" : "مشترك") + "، طول الصفحة " + b.cssHeight + ")");
             return b.id;
         }, 30_000, -1);
     }
@@ -162,6 +168,7 @@ public final class BrowserHost {
                 }
                 browsers.remove(id);
                 destroy(b);
+                AppLog.add("متصفح " + id + " أُغلق");
                 if (activity != null) {
                     activity.browsersChanged();
                 }
@@ -497,10 +504,40 @@ public final class BrowserHost {
             return null;
         }
 
+        // What goes wrong with the page itself (not with the pictures and the like inside it) is noted in the log.
+        @Override
+        public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+            if (request.isForMainFrame()) {
+                AppLog.error("متصفح " + browser.id + ": لم تُفتح الصفحة " + address(request) + " — " + error.getDescription()
+                    + " (" + error.getErrorCode() + ")");
+            }
+        }
+
+        @Override
+        public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+            if (request.isForMainFrame()) {
+                AppLog.error("متصفح " + browser.id + ": الموقع ردّ بـ " + response.getStatusCode() + " على " + address(request));
+            }
+        }
+
+        @Override
+        public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
+            AppLog.error("متصفح " + browser.id + ": شهادة الموقع غير موثوقة: " + error.getUrl());
+            handler.cancel();
+        }
+
+        private static String address(WebResourceRequest request) {
+            String url = String.valueOf(request.getUrl());
+            int query = url.indexOf('?');
+            url = query < 0 ? url : url.substring(0, query);
+            return url.length() > 140 ? url.substring(0, 140) + "…" : url;
+        }
+
         @Override
         public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
             // The page's process stopped (Android took its memory back, or it crashed): this browser is closed, and
             // the script opens another.
+            AppLog.error("متصفح " + browser.id + ": توقفت عملية الصفحة (" + (detail.didCrash() ? "انهارت" : "أنهاها النظام، غالبًا لنقص الذاكرة") + ")");
             MAIN.post(() -> {
                 Browser b = browsers.get(browser.id);
                 if (b != null) {

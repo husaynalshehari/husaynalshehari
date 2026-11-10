@@ -72,13 +72,16 @@ final class Engine {
                 Python.start(new AndroidPlatform(app));
             }
             phase = "running";
+            AppLog.add("Python يعمل، ويُشغَّل السكربت على المنفذ " + port);
             Python.getInstance().getModule("ggapp").callAttr("main", home.getAbsolutePath(), port, path);
             // The script is meant to run until the app ends: it stopped.
             error = call("state");
             phase = "failed";
+            AppLog.error("توقف السكربت (سببه فيما كتبه قبل هذا السطر)");
         } catch (Throwable e) {
             error = e.getClass().getSimpleName() + ": " + e.getMessage();
             phase = "failed";
+            AppLog.error("لم يعمل السكربت", e);
         }
     }
 
@@ -172,6 +175,7 @@ final class Engine {
             PyObject answer = Python.getInstance().getModule("ggapp").callAttr(function, arguments);
             return answer == null ? "" : answer.toString();
         } catch (Throwable e) {
+            AppLog.error("تعذّر طلب " + function + " من السكربت", e);
             return e.getClass().getSimpleName() + ": " + e.getMessage();
         }
     }

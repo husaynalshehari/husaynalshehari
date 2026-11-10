@@ -183,6 +183,51 @@ public class AppTest {
     }
 
     @Test
+    public void theOneLog() {
+        // What happens and what fails go to one file, each line with its time, an error's first line with ✗.
+        AppLog.add("سطر عادي");
+        AppLog.error("شيء فشل", new IllegalStateException("السبب"));
+        String log = AppLog.tail(6000);
+        assertTrue(log, log.contains(" سطر عادي\n"));
+        assertTrue(log, log.contains(" ✗ شيء فشل: java.lang.IllegalStateException: السبب\n"));
+        assertTrue(log, log.contains("AppTest.theOneLog"));                 // (where it came from)
+        assertTrue(log, log.matches("(?s)\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d .*"));
+        assertTrue(log, log.contains("———— تشغيل: قروبات "));              // (the app's start heads each run)
+
+        // «السجل»: the phone and the script's state, then the newest part; opened from the menu it is the one log.
+        String report = AppLog.report(3000);
+        assertTrue(report, report.startsWith("قروبات "));
+        assertTrue(report, report.contains("\nالسكربت: "));
+        page.showLog();
+        for (int i = 0; i < 100 && !page.reportText.getText().toString().contains("سطر عادي"); i++) {
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                break;
+            }
+            shadowOf(Looper.getMainLooper()).idle();
+        }
+        assertEquals(View.VISIBLE, page.report.getVisibility());
+        assertTrue(page.reportText.getText().toString().contains("شيء فشل"));
+        assertEquals(page.reportText.getText().toString(), page.reportCopy);
+
+        // A long log is cut back to its newer half, and stays whole lines.
+        StringBuilder line = new StringBuilder();
+        for (int i = 0; i < 12; i++) {
+            line.append("كلام طويل ");
+        }
+        for (int i = 0; i < 9000; i++) {
+            AppLog.add(line + String.valueOf(i));
+        }
+        AppLog.add("الأخير");
+        assertTrue(new File(page.getFilesDir(), "app-log.txt").length() <= AppLog.MAX_BYTES);
+        String newest = AppLog.tail(400);
+        assertTrue(newest, newest.endsWith(" الأخير\n"));
+        assertTrue(newest, newest.matches("(?s)\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d .*"));
+        assertFalse(AppLog.tail(AppLog.SAVED_CHARS).contains("سطر عادي"));    // (the oldest went)
+    }
+
+    @Test
     public void theScriptsFilesGoToTheAppsFolder() throws Exception {
         File folder = new File(page.getFilesDir(), "gg-here");
         Engine.unpack(page, folder);

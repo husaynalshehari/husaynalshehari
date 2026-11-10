@@ -77,11 +77,14 @@ public class MainActivity extends Activity {
     LinearLayout report;
     TextView reportTitle;
     TextView reportText;
+    ScrollView reportScroll;
     Button tabPanel;
     Button tabBrowser;
     boolean onBrowserTab;
     boolean panelLoaded;
     boolean panelFailed;
+    String panelProblem = "";
+    int panelErrors;
     boolean alive;
     boolean small;                        // shrunk to the small window over other apps
     String reportCopy = "";
@@ -102,18 +105,28 @@ public class MainActivity extends Activity {
     @Override
     protected void onStart() {
         super.onStart();
+        AppLog.add("التطبيق في الواجهة");
         BrowserHost.setVisible(true);
     }
 
     @Override
     protected void onStop() {
         super.onStop();
+        AppLog.add(BrowserHost.count() > 0 ? "التطبيق في الخلفية، والمهمة مستمرة" : "التطبيق في الخلفية");
         // A task keeps going in the background. Only a quiet notification stays, not a floating window.
         if (BrowserHost.count() == 0) {
             BrowserHost.setVisible(false);
         } else {
             BrowserHost.setVisible(true);
             BrowserHost.keepAwake();
+        }
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level == TRIM_MEMORY_RUNNING_LOW || level == TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_MODERATE) {
+            AppLog.error("ذاكرة الجوال قليلة (درجة " + level + "): قد يوقف النظام المتصفح أو التطبيق");
         }
     }
 
@@ -212,7 +225,17 @@ public class MainActivity extends Activity {
         settings.setSupportMultipleWindows(false);
         settings.setMediaPlaybackRequiresUserGesture(true);
         view.setBackgroundColor(PAPER);
-        view.setWebChromeClient(new WebChromeClient());        // (the page's own «هل أنت متأكد؟» questions show)
+        view.setWebChromeClient(new WebChromeClient() {       // (the page's own «هل أنت متأكد؟» questions show)
+            @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage message) {
+                // An error in the panel's own page goes to the log (the first of them: one may repeat without end).
+                if (message.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR && panelErrors < 40) {
+                    panelErrors++;
+                    AppLog.error("خطأ في صفحة اللوحة: " + message.message() + " (سطر " + message.lineNumber() + ")");
+                }
+                return super.onConsoleMessage(message);
+            }
+        });
         view.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView web, WebResourceRequest request) {
@@ -232,6 +255,10 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView web, String url) {
                 if (!panelFailed && url != null && url.startsWith("http://127.0.0.1")) {
+                    if (!panelLoaded) {
+                        AppLog.add("اللوحة فُتحت");
+                    }
+                    panelProblem = "";
                     panelLoaded = true;
                     status.setVisibility(View.GONE);
                 }
@@ -240,6 +267,11 @@ public class MainActivity extends Activity {
             @Override
             public void onReceivedError(WebView web, WebResourceRequest request, WebResourceError error) {
                 if (request.isForMainFrame() && alive) {
+                    String problem = String.valueOf(error.getDescription());
+                    if (!problem.equals(panelProblem)) {
+                        panelProblem = problem;
+                        AppLog.error("اللوحة لم تُفتح: " + problem + " (" + error.getErrorCode() + ")");
+                    }
                     // (the script was not answering yet, or was restarting: asked again in a moment)
                     panelFailed = true;
                     panelLoaded = false;
@@ -278,12 +310,12 @@ public class MainActivity extends Activity {
         close.setOnClickListener(v -> report.setVisibility(View.GONE));
         head.addView(close, gap(0));
         box.addView(head);
-        ScrollView scroll = new ScrollView(this);
+        reportScroll = new ScrollView(this);
         reportText = text("", 14, INK, false);
         reportText.setTextIsSelectable(true);
         reportText.setPadding(0, dp(10), 0, dp(20));
-        scroll.addView(reportText);
-        box.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        reportScroll.addView(reportText);
+        box.addView(reportScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         return box;
     }
 
@@ -338,6 +370,7 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
+            AppLog.error("لم يبدأ السكربت: " + (Engine.error.isEmpty() ? "لم يُجب خلال ثلاث دقائق" : Engine.error));
             runOnUiThread(() -> {
                 if (alive) {
                     status.setTextColor(CLAY);
@@ -382,7 +415,6 @@ public class MainActivity extends Activity {
         menu.getMenu().add(0, 1, 0, "فحص المتصفح");
         menu.getMenu().add(0, 2, 1, "فحص المتصفح والوصول إلى X");
         menu.getMenu().add(0, 3, 2, "السجل");
-        menu.getMenu().add(0, 7, 3, "سجل النقر");
         menu.getMenu().add(0, 6, 3, BrowserHost.manualTyping ? "منع الكتابة في المتصفح بيدي" : "السماح بالكتابة في المتصفح بيدي");
         menu.getMenu().add(0, 4, 4, "تحديث السكربت");
         menu.getMenu().add(0, 5, 5, "إعادة تشغيل التطبيق");
@@ -396,9 +428,6 @@ public class MainActivity extends Activity {
                     return true;
                 case 3:
                     showLog();
-                    return true;
-                case 7:
-                    showClickLog();
                     return true;
                 case 4:
                     confirmUpdate();
@@ -450,30 +479,18 @@ public class MainActivity extends Activity {
         }, "browser-check").start();
     }
 
-    void showClickLog() {
-        if (!Engine.phase.equals("running") && !Engine.phase.equals("failed")) {
-            openReport("سجل النقر", "السكربت لم يبدأ بعد.");
-            return;
-        }
-        openReport("سجل النقر", "…");
-        new Thread(() -> {
-            String log = com.chaquo.python.Python.isStarted() ? Engine.call("click_log_text") : "";
-            runOnUiThread(() -> {
-                if (!alive) {
-                    return;
-                }
-                reportText.setText(log);
-                reportCopy = log;
-                saveTextDownload("groups-click-log.txt", log);
-            });
-        }, "click-log").start();
-    }
-
-    /** The click log as a text file in the phone's Downloads, so it can be sent back. */
+    /** The log as a text file in the phone's Downloads, so it can be sent back. The file of the same name that the
+     * app saved before is replaced, so that there is always one. */
     void saveTextDownload(String name, String body) {
         try {
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
             if (Build.VERSION.SDK_INT >= 29) {
+                try {
+                    getContentResolver().delete(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        MediaStore.Downloads.DISPLAY_NAME + "=?", new String[] {name});
+                } catch (RuntimeException e) {
+                    // (none to replace, or not this app's to remove: a second file is made)
+                }
                 ContentValues values = new ContentValues();
                 values.put(MediaStore.Downloads.DISPLAY_NAME, name);
                 values.put(MediaStore.Downloads.MIME_TYPE, "text/plain");
@@ -503,20 +520,21 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** «السجل»: the app's one log (see AppLog). Its newest part shows here, and is what «نسخ» takes; a longer part
+     * is saved as one file in the phone's Downloads (the one before it is replaced), to be sent as it is. */
     void showLog() {
-        if (!Engine.phase.equals("running") && !Engine.phase.equals("failed")) {
-            openReport("السجل", "السكربت لم يبدأ بعد.");
-            return;
-        }
         openReport("السجل", "…");
         new Thread(() -> {
-            String log = com.chaquo.python.Python.isStarted() ? Engine.call("log_text", 600) : "";
-            String all = Engine.phase.equals("failed") ? (log + "\n\n" + Engine.error).trim() : log;
+            String shown = AppLog.report(AppLog.SHOWN_CHARS);
+            String saved = AppLog.report(AppLog.SAVED_CHARS);
             runOnUiThread(() -> {
-                if (alive) {
-                    reportText.setText(all);
-                    reportCopy = all;
+                if (!alive) {
+                    return;
                 }
+                reportText.setText(shown);
+                reportCopy = shown;
+                reportScroll.post(() -> reportScroll.fullScroll(View.FOCUS_DOWN));       // (the newest is at the end)
+                saveTextDownload("groups-log.txt", saved);
             });
         }, "log").start();
     }

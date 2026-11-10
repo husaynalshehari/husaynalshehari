@@ -79,24 +79,54 @@ sessions_lock = threading.Lock()
 gemini_lock = threading.Lock()
 JOB_TTL_SECONDS = 86400
 DATA_DIR = Path(__file__).resolve().with_name("data")
-CLICK_LOG_PATH = DATA_DIR / "click-log.txt"
-_click_log_lock = threading.Lock()
+# The app has one log, «السجل» (the app keeps everything printed here in a file, with the time of each line). A
+# line that tells of something that failed starts with ✗.
+try:
+    (DATA_DIR / "click-log.txt").unlink()          # (the separate click log of earlier versions)
+except OSError:
+    pass
 
 
 def trace_click(message: str) -> None:
-    """One line in data/click-log.txt and in the app's «السجل», so a failed press can be read afterwards."""
-    line = time.strftime("%H:%M:%S ") + str(message).replace("\n", " ")[:500]
-    print("نقر: " + line, flush=True)
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        with _click_log_lock:
-            with CLICK_LOG_PATH.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-            if CLICK_LOG_PATH.stat().st_size > 180_000:
-                kept = CLICK_LOG_PATH.read_text(encoding="utf-8")[-120_000:]
-                CLICK_LOG_PATH.write_text(kept, encoding="utf-8")
-    except Exception:
-        pass
+    """One line in the app's log about a press, so a failed one can be read afterwards."""
+    text = str(message).replace("\n", " ")[:500]
+    failed = any(word in text for word in ("تعذر", "تعذّر", "فشل", "استثناء", "لم تُصب", "غير موجود", "no-handler", "'ok': False", "error"))
+    print(("✗ " if failed else "") + "نقر: " + text, flush=True)
+
+
+def trace_error(what: str) -> None:
+    """The error being handled now, with where in the script it came from, in the app's log."""
+    print("✗ " + what + ":\n" + traceback.format_exc().strip(), flush=True)
+
+
+_job_said: dict[str, str] = {}
+
+
+def note_job(job_id: str, fields: dict) -> None:
+    """Each new message of a task is a line in the app's log; a task that ended badly is marked."""
+    message = str(fields.get("message") or "")
+    if not message or _job_said.get(job_id) == message:
+        return
+    if len(_job_said) > 200:
+        _job_said.clear()
+    _job_said[job_id] = message
+    failed = fields.get("status") == "done" and fields.get("success") is False
+    print(("✗ " if failed else "") + f"مهمة {job_id[:4]}: {message}", flush=True)
+
+
+class LoggedResults(list):
+    """A task's results: each tweet's outcome is also a line in the app's log."""
+
+    def append(self, result) -> None:
+        super().append(result)
+        try:
+            outcomes = result.get("actions") or {}
+            fine = ("تم التنفيذ", "تم التجاوز", "تم التخطي")
+            failed = any(not any(word in str(value) for word in fine) for value in outcomes.values())
+            where = str(result.get("url") or "")[-48:]
+            print(("✗ " if failed else "") + f"تغريدة {where}: " + "، ".join(f"{key}: {value}" for key, value in outcomes.items()), flush=True)
+        except Exception:
+            pass
 
 
 def trace_page(page, why: str) -> None:
@@ -4507,7 +4537,7 @@ def resolve_comment_target(page, path: str, needs_parent: bool) -> tuple[str, ob
 
 def execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress=None, should_stop=None, on_snapshot=None, account: str = "", voice: str = DEFAULT_REPLY_VOICE) -> list[dict]:
     allow_media(page)
-    results: list[dict] = []
+    results: list[dict] = LoggedResults()
     plain = [action for action in actions if action != "comment"]
     total = len(items)
     failures = FailedTweets()
@@ -6768,7 +6798,7 @@ def pause_after_failures(should_stop=None, on_progress=None, total: int = 0, aft
 
 
 def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "") -> list[dict]:
-    results: list[dict] = []
+    results: list[dict] = LoggedResults()
     total = len(items)
     failures = FailedTweets()
     # Where each tweet's result starts in results: going back after a pause drops them from there on.
@@ -7117,6 +7147,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             if browser_closed_error(exc):
                 raise BrowserClosed() from exc
             app.logger.warning("group run failed")
+            trace_error("فشلت المهمة")
             publish_job(job_id, status="done", success=False, message=str(exc) or "تعذّر تنفيذ إجراءات القروب.")
             raise
     # One attempt only. If anything fails, the task stops with a message and is not retried.
@@ -7139,6 +7170,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             already_done = job.get("status") == "done"
         if not already_done:
             app.logger.warning("group run failed")
+            trace_error("فشلت المهمة")
             message = "أُغلق المتصفح أثناء العمل." if browser_closed_error(exc) else (str(exc) or "تعذّر تنفيذ إجراءات القروب.")
             publish_job(job_id, status="done", success=False, message=message)
     finally:
@@ -7292,6 +7324,7 @@ def verify_login_endpoint(access_path: str):
         return jsonify(success=success, message=message, username=handle)
     except Exception:
         app.logger.warning("X login verification failed (details suppressed)")
+        trace_error("فشل التحقق من الجلسة")
         return jsonify(success=False, message="تعذّر إكمال التحقق بسبب مشكلة في الاتصال أو تشغيل المتصفح."), 502
     finally:
         auth_token = ""
@@ -8439,6 +8472,7 @@ def publish_job(job_id: str, **fields) -> None:
             return
         job.update(fields)
         job["updated_at"] = time.time()
+        note_job(job_id, fields)
         if "status" in fields or time.monotonic() - jobs_saved_at >= JOBS_SAVE_EVERY:
             persist_jobs_unlocked()
         else:
@@ -8646,6 +8680,7 @@ def groups_endpoint(access_path: str):
         names, error = fetch_group_names(auth_token, pin, settle, settle_seconds)
     except Exception:
         app.logger.warning("group list failed")
+        trace_error("فشل جلب القروبات")
         return jsonify(success=False, message="تعذّر فتح الدردشة."), 502
     if error:
         return jsonify(success=False, message=error, groups=[])

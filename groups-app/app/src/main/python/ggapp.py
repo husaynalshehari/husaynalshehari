@@ -17,16 +17,45 @@ import urllib.request
 # Where «تحديث السكربت» takes the script's newest files from.
 RAW = "https://raw.githubusercontent.com/husaynalshehari/husaynalshehari/ccr-695f6c04-mlgxcr"
 STATE = {"phase": "idle", "error": "", "folder": ""}
+# On a computer (the tests) what is printed is kept here; in the app it goes to the app's own log (AppLog.java),
+# a file that is still there after a crash, shown by «السجل».
 LOG: collections.deque = collections.deque(maxlen=3000)
 _log_lock = threading.Lock()
+_app_log = None
+
+
+def _log():
+    """The app's log (app.tg.groups.AppLog), or False where there is none (a computer)."""
+    global _app_log
+    if _app_log is None:
+        try:
+            from java import jclass
+            _app_log = jclass("app.tg.groups.AppLog")
+        except Exception:
+            _app_log = False
+    return _app_log
+
+
+def _note(line: str) -> None:
+    sink = _log()
+    if sink:
+        try:
+            sink.add(line)
+            return
+        except Exception:
+            pass
+    with _log_lock:
+        LOG.append(time.strftime("%H:%M:%S ") + line)
 
 
 class _Tee:
-    """What is printed goes where it went (Android's log) and into LOG, a line at a time, with the time."""
+    """What is printed goes where it went (Android's own log) and, a line at a time, to the app's log. A line
+    that starts an error's trace is marked ✗, as every error in that log is."""
 
     def __init__(self, stream):
         self._stream = stream
         self._rest = ""
+        self._lock = threading.Lock()
 
     def write(self, text):
         if not isinstance(text, str):          # (as a text stream refuses bytes: what asks takes it for one)
@@ -35,11 +64,13 @@ class _Tee:
             self._stream.write(text)
         except Exception:
             pass
-        with _log_lock:
+        with self._lock:
             self._rest += text
-            while "\n" in self._rest:
-                line, self._rest = self._rest.split("\n", 1)
-                LOG.append(time.strftime("%H:%M:%S ") + line)
+            *lines, self._rest = self._rest.split("\n")
+        for line in lines:
+            if line.startswith(("Traceback (most recent call last)", "Exception in thread")) or " ERROR in " in line:
+                line = "✗ " + line
+            _note(line)
         return len(text)
 
     def flush(self):
@@ -86,7 +117,7 @@ def main(folder: str, port: int, access: str) -> None:
         STATE.update(phase="stopped", error=f"توقف السكربت ({exc.code}).")
     except BaseException:
         detail = traceback.format_exc()
-        print(detail, flush=True)
+        print("✗ توقف السكربت بخطأ:\n" + detail, flush=True)
         STATE.update(phase="failed", error=detail[-3000:])
 
 
@@ -95,27 +126,13 @@ def state() -> str:
 
 
 def log_text(lines: int = 500) -> str:
-    """The last lines the script printed."""
+    """The newest part of the log: the app's own where there is one, else what was printed here."""
+    sink = _log()
+    if sink:
+        return str(sink.tail(int(lines) * 120)) or "لا شيء في السجل بعد."
     with _log_lock:
         rows = list(LOG)[-int(lines):]
     return "\n".join(rows) if rows else "لا شيء في السجل بعد."
-
-
-def click_log_text() -> str:
-    """The click trace written by the script, plus the last lines printed."""
-    folder = STATE.get("folder") or os.getcwd()
-    path = os.path.join(folder, "data", "click-log.txt")
-    try:
-        with open(path, encoding="utf-8") as handle:
-            body = handle.read()[-20000:]
-    except OSError:
-        body = ""
-    with _log_lock:
-        printed = "\n".join(list(LOG)[-250:])
-    head = device_line()
-    if not body:
-        body = "لا يوجد سجل نقر بعد. نفّذ مهمة على تغريدة ثم ارجع إلى هذه القائمة."
-    return head + "\n\n" + body + "\n\n--- آخر ما طُبع ---\n" + printed
 
 
 def device_line() -> str:
