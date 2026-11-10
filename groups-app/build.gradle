@@ -1,4 +1,4 @@
-// The groups app («قروبات»): the groups script (../script_original.py) inside an Android app, with Python in the
+// The groups app («قروبات»): the app's own copy of the groups script (gg_app.py) inside an Android app, with Python in the
 // app (Chaquopy) and the app's own browser (WebView) in place of Chromium. Built with Gradle 8.14, the Android SDK
 // (platform 35) and Python 3.12 on the building machine:
 //   ANDROID_HOME=<sdk> gradle :app:assembleRelease

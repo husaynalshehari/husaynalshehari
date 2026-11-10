@@ -161,7 +161,8 @@ def update_script() -> str:
     folder = STATE.get("folder") or os.getcwd()
     fetched = []
     try:
-        for name, target in (("script_original.py", "gg.py"), ("content.py", "content.py")):
+        # (the app's own script, groups-app/gg_app.py: never the servers' script_original.py)
+        for name, target in (("groups-app/gg_app.py", "gg.py"), ("content.py", "content.py")):
             request = urllib.request.Request(f"{RAW}/{name}", headers={"User-Agent": "tg-groups-app/1.0", "Cache-Control": "no-cache"})
             with urllib.request.urlopen(request, timeout=60) as answer:
                 body = answer.read(8 << 20)
