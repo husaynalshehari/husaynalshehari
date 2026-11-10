@@ -12,6 +12,10 @@ import android.webkit.WebView;
  * browser opened last is on top.
  */
 final class BrowserStage extends ViewGroup {
+    // In the one-pixel window that holds the browsers while the app is not on the screen (see BrowserHost): the
+    // phone's width, which that window does not have. 0 on the tab, where the stage's own width is that.
+    int fixedWidth;
+
     BrowserStage(Context context) {
         super(context);
         setClipChildren(true);
@@ -65,7 +69,8 @@ final class BrowserStage extends ViewGroup {
 
     @Override
     protected void onMeasure(int widthSpec, int heightSpec) {
-        int width = MeasureSpec.getSize(widthSpec);
+        int own = MeasureSpec.getSize(widthSpec);
+        int width = fixedWidth > 0 ? fixedWidth : own;
         int tall = 0;
         for (int i = 0; i < getChildCount(); i++) {
             View child = getChildAt(i);
@@ -76,7 +81,11 @@ final class BrowserStage extends ViewGroup {
                 tall = h;                                            // (the tab is as long as the browser on top)
             }
         }
-        setMeasuredDimension(width, Math.max(tall, getSuggestedMinimumHeight()));
+        if (fixedWidth > 0) {
+            setMeasuredDimension(own, MeasureSpec.getSize(heightSpec));      // (the window's one pixel; the browsers keep their size)
+        } else {
+            setMeasuredDimension(width, Math.max(tall, getSuggestedMinimumHeight()));
+        }
     }
 
     @Override

@@ -758,6 +758,11 @@ class Page:
         params = {"format": kind, "clip": clip, "captureBeyondViewport": bool(beyond)}
         if kind == "jpeg":
             params["quality"] = int(quality if quality is not None else 80)
+        shown = {"x": left, "y": top, "width": right - left, "height": bottom - top}
+        if self._backend.capture_first():
+            other = self._backend.capture(self, shown, kind, params.get("quality", 80))
+            if other:
+                return other
         data = b""
         try:
             data = base64.b64decode(self._call("Page.captureScreenshot", params, timeout).get("data") or "")
@@ -765,7 +770,7 @@ class Page:
             if CLOSED_MESSAGE in str(exc):
                 raise
         if len(data) < 100:
-            other = self._backend.capture(self, {"x": left, "y": top, "width": right - left, "height": bottom - top}, kind, params.get("quality", 80))
+            other = self._backend.capture(self, shown, kind, params.get("quality", 80))
             if other:
                 return other
             raise Error("Page.screenshot: the browser gave no picture")

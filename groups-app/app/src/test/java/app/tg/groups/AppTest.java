@@ -171,6 +171,57 @@ public class AppTest {
     }
 
     @Test
+    public void inTheBackgroundTheBrowsersStayOnTheScreen() throws Exception {
+        org.robolectric.shadows.ShadowSettings.setCanDrawOverlays(true);
+        int id = fromScript(() -> BrowserHost.open("0a1b2c3d4e5f6a7b8c9d0e1f", 1800));
+        WebView view = BrowserHost.browsers.get(id).view;
+        layout();
+        org.junit.Assert.assertSame(page.stage, view.getParent());
+        assertFalse(BrowserHost.offScreen());
+
+        // The app leaves the screen: the browser moves to the one-pixel window, as wide and as tall as it was, and
+        // the task goes on (it is not made to wait for the app to come back).
+        controller.pause().stop();
+        BrowserStage window = BrowserHost.backstage;
+        assertNotNull(window);
+        org.junit.Assert.assertSame(window, view.getParent());
+        assertTrue(BrowserHost.offScreen());
+        assertTrue(BrowserHost.visible);
+        int one = View.MeasureSpec.makeMeasureSpec(1, View.MeasureSpec.EXACTLY);
+        window.measure(one, one);
+        window.layout(0, 0, 1, 1);
+        assertEquals(1, window.getMeasuredWidth());
+        assertEquals(1, window.getMeasuredHeight());
+        assertEquals(1233, view.getMeasuredWidth());
+        assertEquals(5400, view.getMeasuredHeight());
+
+        // A browser opened meanwhile goes there too, and a page made taller there is laid out there.
+        int other = fromScript(() -> BrowserHost.open("ffffffffffffffffffffffff", 1800));
+        org.junit.Assert.assertSame(window, BrowserHost.browsers.get(other).view.getParent());
+        fromScript(() -> { BrowserHost.resize(id, 25000); return true; });
+        window.measure(one, one);
+        window.layout(0, 0, 1, 1);
+        assertEquals(1233, view.getMeasuredWidth());
+        assertEquals(75000, view.getMeasuredHeight());
+
+        // Back on the screen: both are in the tab again, in their order, and the window is gone.
+        controller.start().resume();
+        org.junit.Assert.assertNull(BrowserHost.backstage);
+        assertFalse(BrowserHost.offScreen());
+        assertEquals(2, page.stage.getChildCount());
+        org.junit.Assert.assertSame(page.stage, view.getParent());
+        org.junit.Assert.assertSame(view, page.stage.getChildAt(0));
+
+        // Without the permission the browsers stay in the page (slowed by the phone), and the task still goes on.
+        org.robolectric.shadows.ShadowSettings.setCanDrawOverlays(false);
+        controller.pause().stop();
+        org.junit.Assert.assertNull(BrowserHost.backstage);
+        org.junit.Assert.assertSame(page.stage, view.getParent());
+        assertTrue(BrowserHost.visible);
+        controller.start().resume();
+    }
+
+    @Test
     public void theReportPage() {
         page.openReport("فحص المتصفح", "");
         assertEquals(View.VISIBLE, page.report.getVisibility());

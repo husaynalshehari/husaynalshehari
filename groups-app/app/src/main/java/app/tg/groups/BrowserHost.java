@@ -6,12 +6,17 @@ import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.net.http.SslError;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.util.Base64;
 import android.util.SparseArray;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JsPromptResult;
@@ -57,6 +62,14 @@ public final class BrowserHost {
     // On the main thread only:
     static final SparseArray<Browser> browsers = new SparseArray<>();
     static MainActivity activity;
+    // A page that is not on the screen is slowed by the browser itself almost to a stop (its timers run once a
+    // second, then once a minute, and nothing is drawn), so a task hardly moves while the app is in the background.
+    // While the app's page is not on the screen its browsers are therefore moved into a window of one pixel that
+    // Android keeps over the other apps (the permission «الظهور فوق التطبيقات»): as far as the browser knows they
+    // are still on the screen, and they work at their full speed. Nothing shows to the user.
+    static BrowserStage backstage;
+    static boolean away;                       // the app's page is not on the screen
+    static volatile boolean offScreen;         // the browsers are in the one-pixel window
     static int lastId;
     // Whether the user may type in the browsers by hand («الكتابة في المتصفح بيدي» in the menu). Otherwise they never
     // take the keyboard: the script types through DevTools, and the panel keeps the keyboard for itself.
@@ -148,7 +161,7 @@ public final class BrowserHost {
             b.view = view;
             configure(b);
             browsers.put(b.id, b);
-            host.stage.add(b);
+            (away && openBackstage(host) ? backstage : host.stage).add(b);
             view.loadDataWithBaseURL(null, "<html><head><title>gg-" + b.id + "</title></head><body></body></html>",
                 "text/html", "utf-8", null);
             host.browsersChanged();
@@ -185,8 +198,9 @@ public final class BrowserHost {
                 return false;
             }
             b.cssHeight = Math.max(200, height);
-            if (activity != null) {
-                activity.stage.sized(b);
+            BrowserStage where = stageOf(b);
+            if (where != null) {
+                where.sized(b);
             }
             return true;
         }, 10_000, false);
@@ -232,8 +246,9 @@ public final class BrowserHost {
     public static void show(int id) {
         onMain(() -> {
             Browser b = browsers.get(id);
-            if (b != null && activity != null) {
-                activity.stage.front(b);
+            BrowserStage where = b == null ? null : stageOf(b);
+            if (where != null) {
+                where.front(b);
             }
             return true;
         }, 5_000, false);
@@ -311,7 +326,128 @@ public final class BrowserHost {
             destroy(browsers.valueAt(i));
         }
         browsers.clear();
+        closeBackstage(host);
+        away = false;
         activity = null;
+    }
+
+    private static BrowserStage stageOf(Browser b) {
+        return b.view != null && b.view.getParent() instanceof BrowserStage ? (BrowserStage) b.view.getParent() : null;
+    }
+
+    /** Whether Android lets the app keep its one-pixel window over other apps («الظهور فوق التطبيقات»). */
+    static boolean mayStayOnScreen(Context context) {
+        try {
+            return Settings.canDrawOverlays(context);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** The script's side asks: a picture is then drawn by the app itself (the screen has one pixel of the page). */
+    public static boolean offScreen() {
+        return offScreen;
+    }
+
+    /** The app's page left the screen: its browsers go on working in the one-pixel window, where Android allows
+     * it; where it does not, they stay in the page, slowed by the browser until the app is back. */
+    static void leaveScreen(MainActivity host) {
+        away = true;
+        if (!mayStayOnScreen(host)) {
+            if (browsers.size() > 0) {
+                AppLog.error("التطبيق في الخلفية بلا إذن «الظهور فوق التطبيقات»: المتصفح يبطؤ كثيرًا إلى أن تعود إلى التطبيق");
+                setVisible(true);
+                keepAwake();
+            } else {
+                AppLog.add("التطبيق في الخلفية");
+                setVisible(false);
+            }
+            return;
+        }
+        if (browsers.size() > 0 && openBackstage(host)) {
+            for (View view : childrenOf(host.stage)) {
+                move(view, host.stage, backstage);
+            }
+            AppLog.add("التطبيق في الخلفية: المتصفحات (" + browsers.size() + ") تكمل عملها بسرعتها في نافذة الخلفية");
+        } else {
+            AppLog.add("التطبيق في الخلفية");
+        }
+        setVisible(true);                  // (a task that starts now opens its browser in that window)
+    }
+
+    /** The app's page is on the screen again: the browsers are back in its «المتصفح» tab. */
+    static void returnToScreen(MainActivity host) {
+        away = false;
+        if (backstage != null) {
+            for (View view : childrenOf(backstage)) {
+                move(view, backstage, host.stage);
+            }
+            closeBackstage(host);
+        }
+        AppLog.add("التطبيق في الواجهة");
+        setVisible(true);
+    }
+
+    private static boolean openBackstage(MainActivity host) {
+        if (backstage != null) {
+            return true;
+        }
+        if (!mayStayOnScreen(host)) {
+            return false;
+        }
+        try {
+            Context app = host.getApplicationContext();
+            BrowserStage made = new BrowserStage(app);
+            int width = host.stage.getWidth();
+            made.fixedWidth = width > 0 ? width : host.getResources().getDisplayMetrics().widthPixels;
+            WindowManager.LayoutParams params = new WindowManager.LayoutParams(1, 1,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                PixelFormat.TRANSLUCENT);
+            params.gravity = Gravity.TOP | Gravity.START;
+            params.alpha = 0.01f;                                   // (its one pixel does not show)
+            params.setTitle("gg-background");
+            ((WindowManager) app.getSystemService(Context.WINDOW_SERVICE)).addView(made, params);
+            backstage = made;
+            offScreen = true;
+            return true;
+        } catch (RuntimeException e) {
+            AppLog.error("تعذّر فتح نافذة الخلفية، فالمتصفح يبطؤ إلى أن تعود إلى التطبيق", e);
+            return false;
+        }
+    }
+
+    private static void closeBackstage(Context context) {
+        BrowserStage old = backstage;
+        backstage = null;
+        offScreen = false;
+        if (old == null) {
+            return;
+        }
+        try {
+            ((WindowManager) context.getApplicationContext().getSystemService(Context.WINDOW_SERVICE)).removeViewImmediate(old);
+        } catch (RuntimeException e) {
+            // (already gone)
+        }
+    }
+
+    private static java.util.List<View> childrenOf(ViewGroup group) {
+        java.util.List<View> views = new java.util.ArrayList<>();
+        for (int i = 0; i < group.getChildCount(); i++) {
+            views.add(group.getChildAt(i));
+        }
+        return views;
+    }
+
+    /** A browser's WebView from one holder to the other, as it is (its page goes on). */
+    private static void move(View view, ViewGroup from, BrowserStage to) {
+        from.removeView(view);
+        if (view.getTag() instanceof Browser) {
+            to.add((Browser) view.getTag());
+        } else {
+            to.addView(view);
+        }
     }
 
     static void setVisible(boolean now) {
@@ -370,8 +506,8 @@ public final class BrowserHost {
             return;
         }
         try {
-            if (activity != null) {
-                activity.stage.remove(view);
+            if (view.getParent() instanceof ViewGroup) {
+                ((ViewGroup) view.getParent()).removeView(view);
             }
             view.stopLoading();
             view.setWebViewClient(new WebViewClient());

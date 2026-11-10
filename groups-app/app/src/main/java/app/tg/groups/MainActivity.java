@@ -100,26 +100,48 @@ public class MainActivity extends Activity {
         browsersChanged();
         Engine.start(this);
         waitForScript();
+        askForBackground();
+    }
+
+    /** Once at each start until it is given: the permission that keeps the browsers at their full speed while the
+     * app is not on the screen. Android gives it on a settings page of its own. */
+    void askForBackground() {
+        if (BrowserHost.mayStayOnScreen(this)) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("العمل في الخلفية")
+            .setMessage("ليكمل المتصفح عمله بسرعته وأنت خارج التطبيق، اسمح لـ«قروبات» بـ«الظهور فوق التطبيقات» في الصفحة التالية.\n\n"
+                + "لا يظهر شيء على الشاشة. بدون هذا الإذن يوقف الجوال صفحة المتصفح تقريبًا كلما خرجت من التطبيق.")
+            .setPositiveButton("السماح", (dialog, which) -> openBackgroundSetting())
+            .setNegativeButton("لاحقًا", null)
+            .show();
+    }
+
+    void openBackgroundSetting() {
+        try {
+            startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
+        } catch (ActivityNotFoundException | SecurityException e) {
+            try {
+                startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION));
+            } catch (ActivityNotFoundException | SecurityException again) {
+                Toast.makeText(this, "افتح إعدادات الجوال ← التطبيقات ← قروبات ← الظهور فوق التطبيقات.", Toast.LENGTH_LONG).show();
+            }
+        }
     }
 
     @Override
     protected void onStart() {
         super.onStart();
-        AppLog.add("التطبيق في الواجهة");
-        BrowserHost.setVisible(true);
+        BrowserHost.returnToScreen(this);
     }
 
     @Override
     protected void onStop() {
         super.onStop();
-        AppLog.add(BrowserHost.count() > 0 ? "التطبيق في الخلفية، والمهمة مستمرة" : "التطبيق في الخلفية");
-        // A task keeps going in the background. Only a quiet notification stays, not a floating window.
-        if (BrowserHost.count() == 0) {
-            BrowserHost.setVisible(false);
-        } else {
-            BrowserHost.setVisible(true);
-            BrowserHost.keepAwake();
-        }
+        // A task keeps going in the background, at its full speed where Android lets the app keep its browsers "on
+        // the screen" (see BrowserHost). Only a quiet notification shows, not a floating window.
+        BrowserHost.leaveScreen(this);
     }
 
     @Override
@@ -416,6 +438,9 @@ public class MainActivity extends Activity {
         menu.getMenu().add(0, 2, 1, "فحص المتصفح والوصول إلى X");
         menu.getMenu().add(0, 3, 2, "السجل");
         menu.getMenu().add(0, 6, 3, BrowserHost.manualTyping ? "منع الكتابة في المتصفح بيدي" : "السماح بالكتابة في المتصفح بيدي");
+        if (!BrowserHost.mayStayOnScreen(this)) {
+            menu.getMenu().add(0, 8, 4, "السماح بالعمل السريع في الخلفية");
+        }
         menu.getMenu().add(0, 4, 4, "تحديث السكربت");
         menu.getMenu().add(0, 5, 5, "إعادة تشغيل التطبيق");
         menu.setOnMenuItemClickListener(item -> {
@@ -431,6 +456,9 @@ public class MainActivity extends Activity {
                     return true;
                 case 4:
                     confirmUpdate();
+                    return true;
+                case 8:
+                    openBackgroundSetting();
                     return true;
                 case 5:
                     restart();

@@ -120,6 +120,9 @@ class Backend:
     def capture(self, page, box: dict, kind: str, quality: int):
         return None
 
+    def capture_first(self) -> bool:
+        return False
+
 
 class DesktopBackend(Backend):
     """A Chromium of this machine, one per profile folder, as Playwright would start it."""
@@ -416,6 +419,14 @@ class AndroidBackend(Backend):
             self._host.show(self.id)
         except Exception:
             pass
+
+    def capture_first(self) -> bool:
+        """While the app is not on the screen its browsers are in a window of one pixel (the app keeps them there so
+        that they go on at speed): the screen then holds nothing of the page, and a picture is drawn by the app."""
+        try:
+            return bool(self._host.offScreen())
+        except Exception:
+            return False
 
     def capture(self, page, box: dict, kind: str, quality: int):
         try:
