@@ -6347,7 +6347,197 @@ STEP_OLDER_JS = r"""
 GROUP_SCROLL_FACTOR = 2
 
 
+# In the app, while a group's tweets are collected: a measure of where the time goes, written to the log. Every
+# 10 s: how far the collecting got, and what the page asked the network for in that time (by kind: how many, how
+# much, how long). Once: what the page holds for its chat (its databases, and the names of the calls its code knows
+# for messages). And the shape of the chat's first answers (their fields and sizes, never their content). It is
+# what is needed to ask the page itself for the chat's messages, without scrolling it.
+CHAT_FACTS_JS = r"""
+async () => {
+  const out = {dbs: [], ops: [], wasm: [], scripts: 0};
+  try { if (indexedDB.databases) out.dbs = (await indexedDB.databases()).map((d) => d.name + ":" + d.version).slice(0, 25); } catch (error) {}
+  try {
+    const ops = new Set();
+    const re = /operationName:"([A-Za-z0-9_]*(?:Message|Conversation|Chat|Inbox|Thread|Group|Key)[A-Za-z0-9_]*)"/g;
+    for (const chunk of (self.webpackChunk_twitter_responsive_web || [])) {
+      for (const fn of Object.values((chunk && chunk[1]) || {})) {
+        let source = "";
+        try { source = Function.prototype.toString.call(fn); } catch (error) { continue; }
+        if (source.indexOf("operationName") < 0) continue;
+        let match;
+        while ((match = re.exec(source)) && ops.size < 80) ops.add(match[1]);
+      }
+    }
+    out.ops = [...ops].sort();
+  } catch (error) {}
+  try {
+    const entries = performance.getEntriesByType("resource");
+    out.wasm = entries.filter((e) => /\.wasm(\?|$)/.test(e.name)).map((e) => e.name.split("/").pop().split("?")[0]).slice(0, 8);
+    out.scripts = entries.filter((e) => e.initiatorType === "script").length;
+  } catch (error) {}
+  return out;
+}
+"""
+CHAT_TICK_JS = r"""
+() => {
+""" + CHAT_FIND_JS + r"""
+  const list = query('[data-testid="dm-message-list"]') || query('[data-testid="dm-conversation-content"]') || query('[data-testid="dm-message-scroller"]');
+  if (!list) return {list: false};
+  const all = queryAll('[data-testid^="message-"]').filter((el) => list.contains(el) || el.getRootNode() !== document);
+  let linked = 0, textLink = 0, cards = 0;
+  for (const bubble of all) {
+    if (bubble.querySelector('[href*="status/"]')) linked++;
+    if (/(?:x|twitter)\.com\/[^\s]*status\/\d/.test(bubble.innerText || "")) textLink++;
+    if (bubble.querySelector('[data-testid="tweet"], article, [data-testid*="card"]')) cards++;
+  }
+  let scroller = list;
+  for (let el = list; el && el.nodeType === 1; el = el.parentElement) {
+    if (/(auto|scroll)/.test(getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight + 10) { scroller = el; break; }
+  }
+  return {list: true, bubbles: all.length, linked, textLink, cards, loading: queryAll('[role="progressbar"]').length,
+          top: Math.round(scroller.scrollTop || 0), height: Math.round(scroller.scrollHeight || 0)};
+}
+"""
+
+
+def json_shape(value, depth: int = 0):
+    """A JSON answer's fields and sizes, without what is in them."""
+    if depth > 5:
+        return "…"
+    if isinstance(value, dict):
+        return {str(key)[:40]: json_shape(item, depth + 1) for key, item in list(value.items())[:14]}
+    if isinstance(value, list):
+        return [json_shape(value[0], depth + 1), f"×{len(value)}"] if value else []
+    if isinstance(value, str):
+        return f"str{len(value)}"
+    return type(value).__name__
+
+
+class CollectProbe:
+    """The measure of a group's collecting in the app (see CHAT_FACTS_JS)."""
+
+    CHAT_WORDS = re.compile(r"message|conversation|chat|inbox|thread|xchat|dm_|/dm/|keyregistry|juicebox", re.I)
+
+    def __init__(self, page, found_now):
+        self.page = page
+        self.found_now = found_now
+        self.started = time.monotonic()
+        self.lock = threading.Lock()
+        self.kinds: dict[str, list] = {}
+        self.total = {"count": 0, "bytes": 0}
+        self.shapes = 0
+        self.stopped = threading.Event()
+        try:
+            facts = page.evaluate(CHAT_FACTS_JS)
+            print("قياس الجمع: الصفحة " + json.dumps(facts, ensure_ascii=False)[:1500], flush=True)
+        except Exception as exc:
+            print(f"قياس الجمع: تعذّرت قراءة الصفحة ({type(exc).__name__})", flush=True)
+        try:
+            page.on("requestfinished", self.finished)
+        except Exception:
+            pass
+        threading.Thread(target=self.every, name="collect-probe", daemon=True).start()
+
+    @staticmethod
+    def kind(url: str) -> str:
+        found = re.match(r"https?://([^/?#]+)([^?#]*)", url or "")
+        if not found:
+            return "?"
+        host, path = found.group(1), found.group(2)
+        operation = re.search(r"/graphql/[^/]+/([A-Za-z0-9_]+)", path)
+        if operation:
+            return operation.group(1)
+        if host.endswith("twimg.com"):
+            return host.split(".")[0] + ":" + (path.rsplit(".", 1)[-1][:6] if "." in path.rsplit("/", 1)[-1] else "؟")
+        parts = [part for part in path.split("/") if part][:3]
+        return host + "/" + "/".join(re.sub(r"\d{5,}", "#", part) for part in parts)
+
+    def finished(self, request) -> None:
+        try:
+            size = int((request.sizes() or {}).get("responseBodySize") or 0)
+        except Exception:
+            size = 0
+        try:
+            took = float((request.timing or {}).get("responseEnd") or 0)
+        except Exception:
+            took = 0.0
+        kind = self.kind(str(request.url))
+        with self.lock:
+            row = self.kinds.setdefault(kind, [0, 0, 0.0])
+            row[0] += 1
+            row[1] += size
+            row[2] += max(0.0, took)
+            self.total["count"] += 1
+            self.total["bytes"] += size
+            look = self.shapes < 4 and bool(self.CHAT_WORDS.search(str(request.url)))
+            if look:
+                self.shapes += 1
+        if look:
+            try:
+                response = request.response()
+                body = response.body() if response else b""
+                kind_of = (response.headers.get("content-type") or "?") if response else "?"
+                try:
+                    shape = json.dumps(json_shape(json.loads(body.decode("utf-8"))), ensure_ascii=False)
+                except Exception:
+                    shape = f"ليس JSON ({len(body)} بايت)"
+                print(f"قياس الجمع: رد {kind} [{kind_of[:40]}] {shape[:1400]}", flush=True)
+            except Exception as exc:
+                print(f"قياس الجمع: رد {kind}: تعذّرت قراءته ({type(exc).__name__})", flush=True)
+
+    def report(self) -> None:
+        seconds = int(time.monotonic() - self.started)
+        try:
+            chat = self.page.evaluate(CHAT_TICK_JS)
+        except Exception as exc:
+            chat = {"error": type(exc).__name__}
+        with self.lock:
+            kinds, self.kinds = self.kinds, {}
+            total = dict(self.total)
+        top = sorted(kinds.items(), key=lambda item: -item[1][1])[:8]
+        net = "، ".join(f"{name}×{row[0]} {row[1] // 1024}KB {int(row[2] / max(1, row[0]))}ms" for name, row in top) or "لا شيء"
+        print(f"قياس الجمع ({seconds} ث): جُمع {self.found_now()} · المحادثة {json.dumps(chat, ensure_ascii=False)} · "
+              f"الشبكة في آخر فترة: {net} · منذ البداية {total['count']} طلب {total['bytes'] // 1024}KB", flush=True)
+
+    def every(self) -> None:
+        while not self.stopped.wait(10):
+            try:
+                self.report()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        self.stopped.set()
+        try:
+            self.page.remove_listener("requestfinished", self.finished)
+        except Exception:
+            pass
+        try:
+            self.report()
+        except Exception:
+            pass
+        print(f"قياس الجمع: انتهى بعد {int(time.monotonic() - self.started)} ث", flush=True)
+
+
 def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", should_stop=None) -> tuple[list[dict], bool]:
+    """In the app the collecting is measured (see CollectProbe)."""
+    if not IN_APP:
+        return collect_group_tweets_now(page, limit, on_progress, stop_id, should_stop)
+    counted = {"n": 0}
+
+    def progress(done, total, phase):
+        counted["n"] = done
+        if on_progress:
+            on_progress(done, total, phase)
+
+    probe = CollectProbe(page, lambda: counted["n"])
+    try:
+        return collect_group_tweets_now(page, limit, progress, stop_id, should_stop)
+    finally:
+        probe.close()
+
+
+def collect_group_tweets_now(page, limit: int, on_progress=None, stop_id: str = "", should_stop=None) -> tuple[list[dict], bool]:
     found: list[dict] = []
     seen: set[str] = set()
     reached = False

@@ -88,9 +88,21 @@ class Request:
         self.headers = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
         self._response = None
         self.failure = None
+        self._started = 0.0
+        self._ended = 0.0
+        self._bytes = 0
 
     def response(self):
         return self._response
+
+    def sizes(self) -> dict:
+        return {"requestBodySize": 0, "requestHeadersSize": 0, "responseBodySize": int(self._bytes or 0), "responseHeadersSize": 0}
+
+    @property
+    def timing(self) -> dict:
+        """(milliseconds from the start, as Playwright gives them)"""
+        end = (self._ended - self._started) * 1000 if self._started and self._ended else -1
+        return {"startTime": self._started * 1000, "responseEnd": end}
 
     def is_navigation_request(self) -> bool:
         return self.resource_type == "document"
@@ -799,9 +811,11 @@ class Page:
 
     def _on_request(self, params: dict) -> None:
         request = params.get("request") or {}
-        self._requests[params.get("requestId")] = Request(
+        made = Request(
             self, str(params.get("requestId") or ""), str(request.get("url") or ""), str(request.get("method") or "GET"),
             RESOURCE_TYPES.get(str(params.get("type") or "Other"), "other"), request.get("headers"))
+        made._started = float(params.get("timestamp") or 0)
+        self._requests[params.get("requestId")] = made
         if len(self._requests) > 600:
             for old in list(self._requests)[:200]:
                 self._requests.pop(old, None)
@@ -820,6 +834,8 @@ class Page:
         request = self._requests.pop(params.get("requestId"), None)
         if request is None:
             return
+        request._ended = float(params.get("timestamp") or 0)
+        request._bytes = int(params.get("encodedDataLength") or 0)
         for listener in list(self._listeners.get("requestfinished", ())):
             try:
                 listener(request)
