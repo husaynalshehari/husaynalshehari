@@ -6404,18 +6404,21 @@ CHAT_TICK_JS = r"""
 
 # In the app: X's page loads a group's chat a few messages at a time (each of its GetConversationPageQuery asks
 # brings a handful, and each takes half a second or more on a phone's network), and decrypts them itself. This,
-# put in the page before X's own code, asks X for bigger pages instead: where the page's own ask names how many to
-# bring (a number named like count or limit), it asks for CHAT_PAGE_SIZE, and X's page decrypts and shows them as
-# ever. If X refuses a bigger page, its own ask is sent as it was, and no other ask is changed again. What it saw
-# (the ask's fields, never their content) is read back for the log.
-CHAT_PAGE_SIZE = 60
+# put in the page before X's own code, asks X for far bigger pages instead: where the page's own ask names how many
+# to bring (conversation_event_limit, or another number named like a limit or a count), it asks for the first of
+# CHAT_PAGE_SIZES; the first ask of the group then brings its last 1000 messages at once, and X's page decrypts and
+# shows them as ever. If X refuses that size, the next one down is asked at once; if it refuses them all, its own
+# ask is sent as it was, and no ask is changed again. What it saw (the ask's fields, never their content) is read
+# back for the log.
+CHAT_PAGE_SIZES = (1000, 300, 100)
 CHAT_PAGES_JS = r"""
 (() => {
   if (window.__ggChatPages) return;
-  const state = window.__ggChatPages = {seen: 0, changed: 0, off: false, failed: "", fields: "", how: ""};
-  const WANT = __WANT__;
+  const state = window.__ggChatPages = {seen: 0, changed: 0, off: false, failed: "", fields: "", how: "", size: 0};
+  const SIZES = __SIZES__;
+  let step = 0;
   const isPage = (url) => /\/GetConversationPageQuery(\?|$)/.test(String(url || ""));
-  const COUNT = /^(count|limit|page_?size|max_?(events|messages|count|results)|num_?(events|messages)|size|first|last)$/i;
+  const COUNT = /^(?:[a-z_]*_)?(?:event_limit|limit|count|page_?size|max_?(?:events|messages|count|results)|num_?(?:events|messages)|size|first|last)$/i;
   const describe = (value, depth) => {
     if (depth > 3) return "…";
     if (Array.isArray(value)) return "[" + (value.length ? describe(value[0], depth + 1) : "") + "]";
@@ -6426,6 +6429,7 @@ CHAT_PAGES_JS = r"""
   };
   const bigger = (vars) => {
     let touched = "";
+    const WANT = SIZES[step];
     const walk = (obj, depth) => {
       if (!obj || typeof obj !== "object" || depth > 3) return;
       for (const key of Object.keys(obj)) {
@@ -6441,7 +6445,7 @@ CHAT_PAGES_JS = r"""
   };
   // The ask with bigger pages: its new address (and body), or null when there is nothing to change.
   const remake = (url, body) => {
-    if (state.off) return null;
+    if (state.off || step >= SIZES.length) return null;
     try {
       const address = new URL(String(url), location.href);
       const raw = address.searchParams.get("variables");
@@ -6466,7 +6470,12 @@ CHAT_PAGES_JS = r"""
     } catch (error) {}
     return null;
   };
-  const refused = (why) => { state.off = true; state.failed = String(why).slice(0, 160); };
+  // X refused this size: the next one down, or (none left) X's own asks as they are, from now on.
+  const refused = (why) => {
+    state.failed = (state.failed ? state.failed + " | " : "") + SIZES[step] + ": " + String(why).slice(0, 120);
+    step++;
+    if (step >= SIZES.length) state.off = true;
+  };
   const realFetch = window.fetch;
   if (realFetch) {
     window.fetch = async function (input, init) {
@@ -6474,18 +6483,21 @@ CHAT_PAGES_JS = r"""
       if (!isPage(url)) return realFetch.apply(this, arguments);
       state.seen++;
       const plainBody = init && typeof init.body === "string" ? init.body : null;
-      const made = (typeof input === "string" || input instanceof URL || plainBody !== null) ? remake(url, plainBody) : null;
-      if (!made) return realFetch.apply(this, arguments);
-      try {
-        const nextInit = Object.assign({}, init || {});
-        if (made.body !== null && made.body !== undefined) nextInit.body = made.body;
-        const answer = await realFetch.call(this, typeof input === "string" || input instanceof URL ? made.url : new Request(made.url, input), nextInit);
-        if (answer.ok) {
-          const data = await answer.clone().json().catch(() => null);
-          if (data && !data.errors) { state.changed++; return answer; }
-          refused("errors: " + ((data && data.errors && data.errors[0] && data.errors[0].message) || "?"));
-        } else refused("HTTP " + answer.status);
-      } catch (error) { refused(error); }
+      const changeable = typeof input === "string" || input instanceof URL || plainBody !== null;
+      while (changeable && !state.off) {
+        const made = remake(url, plainBody);
+        if (!made) break;
+        try {
+          const nextInit = Object.assign({}, init || {});
+          if (made.body !== null && made.body !== undefined) nextInit.body = made.body;
+          const answer = await realFetch.call(this, typeof input === "string" || input instanceof URL ? made.url : new Request(made.url, input), nextInit);
+          if (answer.ok) {
+            const data = await answer.clone().json().catch(() => null);
+            if (data && !data.errors) { state.changed++; state.size = SIZES[step]; return answer; }
+            refused("errors: " + ((data && data.errors && data.errors[0] && data.errors[0].message) || "?"));
+          } else refused("HTTP " + answer.status);
+        } catch (error) { refused(error); }
+      }
       return realFetch.apply(this, arguments);
     };
   }
@@ -6509,15 +6521,16 @@ CHAT_PAGES_JS = r"""
       if (made) { body = made.body; page.changed = true; }
     }
     if (page && page.changed) {
+      const asked = step;
       this.addEventListener("loadend", () => {
-        if (this.status === 200) state.changed++;
-        else refused("HTTP " + this.status);
+        if (this.status === 200) { state.changed++; state.size = SIZES[asked]; }
+        else if (asked === step) refused("HTTP " + this.status);
       });
     }
     return send.call(this, body);
   };
 })();
-""".replace("__WANT__", str(CHAT_PAGE_SIZE))
+""".replace("__SIZES__", json.dumps(list(CHAT_PAGE_SIZES)))
 
 
 def json_shape(value, depth: int = 0):
