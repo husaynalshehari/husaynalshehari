@@ -631,7 +631,7 @@ def main() -> None:
     parser.add_argument("--host", help="the address in the link, when the one found is wrong")
     args = parser.parse_args()
     data = load_config()
-    if not any((args.setup, args.link, args.log, args.update, args.restart, args.new_link)):
+    if not any((args.setup, args.link, args.log, args.check, args.update, args.restart, args.new_link)):
         serve(data)
         return
     if args.log:
