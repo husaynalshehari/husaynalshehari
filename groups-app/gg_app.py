@@ -4468,6 +4468,8 @@ def write_comment(api_key: str, model: str, image: bytes | None, tweet_text: str
 
 
 def screenshot_article(card) -> bytes | None:
+    if IN_APP:
+        return None              # (the comments server reads the tweet itself)
     try:
         if not IN_APP:
             try:
@@ -4778,7 +4780,8 @@ def resolve_comment_target(page, path: str, needs_parent: bool) -> tuple[str, ob
 
 
 def execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress=None, should_stop=None, on_snapshot=None, account: str = "", voice: str = DEFAULT_REPLY_VOICE) -> list[dict]:
-    allow_media(page)
+    if not IN_APP:
+        allow_media(page)        # (in the app the comments server reads the tweet itself: no picture is downloaded)
     results: list[dict] = LoggedResults()
     plain = [action for action in actions if action != "comment"]
     total = len(items)
@@ -6741,6 +6744,53 @@ def tweet_flags_from_api(data, status_id: str) -> dict | None:
     return None
 
 
+# In the app, on a phone's network: the next tweet is opened inside the X page already open, as a click on a link
+# there does (X's own app moves to it and asks only for that tweet), instead of loading the whole site again for
+# each tweet. Where X's page does not move within a few seconds, the tweet is loaded in full as before; after two
+# such times in a row it is always loaded in full.
+APP_ROUTE_JS = r"""
+(path) => {
+  if (location.hostname !== "x.com" || !document.querySelector('[data-testid="primaryColumn"]')) return false;
+  for (const node of document.querySelectorAll('[data-testid="primaryColumn"] article, [data-testid="primaryColumn"] [data-testid="cellInnerDiv"]')) {
+    node.setAttribute("data-gg-old", "1");
+  }
+  history.pushState({}, "", path);
+  dispatchEvent(new PopStateEvent("popstate", {state: history.state}));
+  return true;
+}
+"""
+APP_ROUTED_JS = r"""
+(id) => location.pathname.indexOf(id) >= 0 && !document.querySelector("[data-gg-old]")
+  && !!document.querySelector('[data-testid="primaryColumn"]')
+"""
+app_route_failures = [0]
+
+
+def app_route(page, target: str, status_id: str) -> bool:
+    """Whether X's own page moved to the tweet (see APP_ROUTE_JS): its earlier content is gone and its address is
+    the tweet's."""
+    if not IN_APP or app_route_failures[0] >= 2 or not status_id:
+        return False
+    try:
+        here = page.url or ""
+        if not here.startswith("https://x.com/") or status_id in here:
+            return False
+        if not page.evaluate(APP_ROUTE_JS, target.replace("https://x.com", "", 1)):
+            return False
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            if page.evaluate(APP_ROUTED_JS, status_id):
+                app_route_failures[0] = 0
+                return True
+            page.wait_for_timeout(120)
+    except Exception as exc:
+        if browser_closed_error(exc):
+            raise
+    app_route_failures[0] += 1
+    print(f"✗ فتح التغريدة داخل صفحة X لم يعمل ({app_route_failures[0]})، فتُحمَّل كاملة", flush=True)
+    return False
+
+
 def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tuple[str | None, str]:
     """Open a tweet. With skip_if_on, return (path, "already_on") the moment the
     tweet's buttons show every listed action already on, without waiting for the
@@ -6772,10 +6822,11 @@ def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tup
     if quick and status_id:
         page.on("requestfinished", on_finished)
     try:
-        try:
-            page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
-        except Exception:
-            return None, "fail"
+        if not app_route(page, target, status_id):
+            try:
+                page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
+            except Exception:
+                return None, "fail"
         revealed = False
         deadline = time.monotonic() + (12 if quick else 8)
         while time.monotonic() < deadline:
