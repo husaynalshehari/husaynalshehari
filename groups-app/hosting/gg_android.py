@@ -525,9 +525,33 @@ def install_what_is_needed() -> None:
     say("   ✓ جاهز (النواة " + kernel + ")")
 
 
+def inside(command: str, seconds: float = 20) -> str:
+    """One command in the Android, through Docker itself (it works before adb does)."""
+    return run(["docker", "exec", CONTAINER, "sh", "-c", command], seconds).stdout.strip()
+
+
+def diagnose() -> str:
+    """What is known of the Android when it does not come up: for its owner to send."""
+    parts = ["الحاوية: " + (run(["docker", "ps", "-a", "--filter", f"name={CONTAINER}", "--format", "{{.Image}} {{.Status}}"], 20).stdout.strip() or "غير موجودة")]
+    parts.append("الإقلاع: boot_completed=" + (inside("getprop sys.boot_completed") or "؟") + " · bootanim=" + (inside("getprop init.svc.bootanim") or "؟")
+                 + " · zygote=" + (inside("getprop init.svc.zygote") or "؟") + " · system_server=" + (inside("pidof system_server") or "لا"))
+    parts.append("adb: " + run([ADB, "devices"], 20).stdout.strip().replace("\n", " | "))
+    parts.append("binder: " + run(["sh", "-c", "grep binder /proc/filesystems; lsmod | grep -E 'binder|ashmem'"], 20).stdout.strip().replace("\n", " | "))
+    errors = inside("logcat -d -b all 2>/dev/null | grep -E ' (F|E) ' | grep -viE 'netd|wifi|bluetooth|audio|camera|thermal|vibrator|sensor|gnss|nfc' | tail -25", 40)
+    parts.append("أخطاء أندرويد:\n" + (errors or "(لا شيء)"))
+    kernel = run(["sh", "-c", "dmesg 2>/dev/null | grep -iE 'binder|redroid|apparmor=.DENIED|oom' | tail -12"], 20).stdout.strip()
+    parts.append("النواة:\n" + (kernel or "(لا شيء)"))
+    return "\n".join(parts)
+
+
 def start_android(image: str) -> None:
-    say(f"٢) تشغيل أندرويد ({image}). تنزيله أول مرة يأخذ دقائق…")
     DATA.mkdir(parents=True, exist_ok=True)
+    running = run(["docker", "inspect", "-f", "{{.State.Running}} {{.Config.Image}}", CONTAINER], 20).stdout.strip()
+    if running == f"true {image}" and (inside("getprop sys.boot_completed") == "1" or connect()):
+        connect()
+        say(f"٢) أندرويد يعمل من قبل ({image})")
+        return
+    say(f"٢) تشغيل أندرويد ({image}). تنزيله أول مرة يأخذ دقائق…")
     run(["docker", "rm", "-f", CONTAINER], 120)
     width, height, dpi = SCREEN
     done = subprocess.run(["docker", "run", "-d", "--name", CONTAINER, "--restart", "unless-stopped", "--privileged",
@@ -537,17 +561,27 @@ def start_android(image: str) -> None:
                           capture_output=True, text=True, timeout=1800)
     if done.returncode != 0:
         stop("لم يبدأ أندرويد.", done.stderr)
-    end = time.time() + 300
+    started = time.time()
+    end = started + 900
+    told = 0.0
     while time.time() < end:
+        if inside("getprop sys.boot_completed") == "1" and not connect():
+            # (the Android is up, adb is not reached yet: a moment more)
+            time.sleep(3)
+            connect()
         if connect():
             say("   ✓ أندرويد يعمل (الإصدار " + shell("getprop ro.build.version.release", 15) + "، WebView "
                 + (re.search(r"versionName=(\S+)", shell("dumpsys package com.android.webview | grep versionName", 20)) or [0, "؟"])[1] + ")")
             return
         state = run(["docker", "inspect", "-f", "{{.State.Running}}", CONTAINER], 20).stdout.strip()
         if state != "true":
-            stop("توقف أندرويد بعد بدئه.", run(["docker", "logs", "--tail", "40", CONTAINER], 30).stdout + run(["dmesg"], 20).stdout[-800:])
+            stop("توقف أندرويد بعد بدئه.", diagnose())
+        if time.time() - told >= 60:
+            told = time.time()
+            say(f"   … يقلع ({int(time.time() - started)} ث): zygote=" + (inside("getprop init.svc.zygote") or "لم يبدأ")
+                + " · system_server=" + ("يعمل" if inside("pidof system_server") else "لم يبدأ"))
         time.sleep(5)
-    stop("أندرويد لم يكمل إقلاعه خلال خمس دقائق.", run(["docker", "logs", "--tail", "40", CONTAINER], 30).stdout)
+    stop("أندرويد لم يكمل إقلاعه خلال ربع ساعة.", diagnose())
 
 
 def install_app() -> None:
@@ -588,6 +622,7 @@ def main() -> None:
     parser.add_argument("--setup", action="store_true", help="install everything, start the Android and the app, print the link")
     parser.add_argument("--link", action="store_true", help="print the door's link")
     parser.add_argument("--log", action="store_true", help="print the app's own log")
+    parser.add_argument("--check", action="store_true", help="print what is known of the Android, to send when it does not come up")
     parser.add_argument("--update", action="store_true", help="install the app's newest version")
     parser.add_argument("--restart", action="store_true", help="start the Android and the app afresh")
     parser.add_argument("--new-link", action="store_true", help="a new secret: the old link stops working")
@@ -601,6 +636,9 @@ def main() -> None:
         return
     if args.log:
         say(app_log())
+        return
+    if args.check:
+        say(diagnose())
         return
     if os.geteuid() != 0:
         raise SystemExit("شغّله بصلاحية root.")
