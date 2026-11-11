@@ -13,6 +13,7 @@ import base64
 import gzip
 import hashlib
 import hmac
+import http.client
 import concurrent.futures
 import importlib.util
 import itertools
@@ -26,9 +27,11 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import traceback
+import unicodedata
 import threading
 import time
 import urllib.error
@@ -904,7 +907,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
               <label class="choice"><input type="radio" name="reply-voice" value="neutral"><span class="choice-title">عام</span></label>
             </div>
             {% if owner_copy %}<button id="show-gemini" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Gemini</button>
-            {% if claude_here %}<button id="show-claude" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Claude</button>
+            {% if in_app %}<button id="show-server" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">سيرفر التعليقات</button>
+            <span id="comments-by-grok" class="engine-note" hidden>التعليقات يكتبها سيرفرك، بالرابط المحفوظ في «سيرفر التعليقات».</span>
+            {% elif claude_here %}<button id="show-claude" class="btn btn-ghost gemini-edit" type="button" aria-expanded="false">مفتاح Claude</button>
             <span id="comments-by-grok" class="engine-note" hidden>التعليقات بواسطة Claude، بالمفتاح المحفوظ في «مفتاح Claude».</span>
             {% else %}<span id="comments-by-grok" class="engine-note" data-text="التعليقات بواسطة {engine}، كما اخترت للمستخدمين في «توزيع البرنامج»." hidden>التعليقات بواسطة Grok، كما اخترت للمستخدمين في «توزيع البرنامج».</span>{% endif %}{% endif %}
           </div>
@@ -925,7 +930,19 @@ EMBEDDED_PAGE = r'''<!doctype html>
             </div>
             <p class="hint">يُحفظ المفتاح واسم النموذج على هذا الخادم بعد أول إدخال، ويظهران تلقائيًا حتى بعد إغلاق الصفحة أو إعادة تشغيل السكربت.</p>
           </div>
-          {% if claude_here %}<div id="claude-fields" class="gemini-fields" hidden>
+          {% if in_app %}<div id="server-fields" class="gemini-fields" hidden>
+            <div style="grid-column: 1 / -1">
+              <label class="field-label" for="server-link">رابط سيرفر التعليقات</label>
+              <input id="server-link" type="password" maxlength="400" autocomplete="off" autocapitalize="off" spellcheck="false" dir="ltr"
+                     placeholder="https://…" aria-label="رابط سيرفر التعليقات">
+            </div>
+            <div class="claude-actions" style="grid-column: 1 / -1">
+              <button id="save-server" class="btn btn-ghost gemini-edit" type="button">حفظ واتصال</button>
+              <button id="delete-server" class="btn btn-ghost gemini-edit" type="button" hidden>حذف</button>
+              <span id="server-now" class="claude-now">لم يُحفظ رابط بعد: التعليقات لا تُكتب بدونه.</span>
+            </div>
+            <p class="hint" style="grid-column: 1 / -1">هو رابط تطبيق «تعليقات» نفسه، يطبعه السيرفر بالأمر: <span dir="ltr">python3 comments_server.py --link</span>. مفتاح النموذج يبقى في السيرفر، ولا يُحفظ في الجوال إلا هذا الرابط.</p>
+          </div>{% elif claude_here %}<div id="claude-fields" class="gemini-fields" hidden>
             <div>
               <label class="field-label" for="claude-key">مفتاح Claude</label>
               <input id="claude-key" type="password" maxlength="260" autocomplete="off" spellcheck="false" placeholder="المفتاح" aria-label="مفتاح Claude API">
@@ -1134,13 +1151,30 @@ EMBEDDED_PAGE = r'''<!doctype html>
   // (Grok or Claude, chosen in «توزيع البرنامج»: no Gemini key is asked for then.)
   let commentsByOther = false;
   const engineNote = document.getElementById("comments-by-grok");
+  const inApp = {{ in_app|tojson }};
   function showCommentsEngine(engine) {
-    commentsByOther = engine === "grok" || engine === "claude";
+    commentsByOther = engine === "grok" || engine === "claude" || engine === "server";
     if (!engineNote) return;
     engineNote.hidden = !commentsByOther;
     if (commentsByOther && engineNote.dataset.text) {
       engineNote.textContent = engineNote.dataset.text.replace("{engine}", engine === "claude" ? "Claude" : "Grok");
     }
+  }
+  // In the app the comments are written on the owner's server: the panel keeps that server's link.
+  const serverFields = document.getElementById("server-fields");
+  const showServer = document.getElementById("show-server");
+  function showCommentsServer(data) {
+    if (!serverFields) return;
+    const saved = data.comments_server || "";
+    document.getElementById("server-now").textContent = saved
+      ? "محفوظ: " + saved + (data.comments_model ? " · النموذج في السيرفر: " + data.comments_model : "") + " — التعليقات تُكتب فيه."
+      : "لم يُحفظ رابط بعد: التعليقات لا تُكتب بدونه.";
+    document.getElementById("delete-server").hidden = !saved;
+  }
+  function openServer(open) {
+    if (!serverFields) return;
+    serverFields.hidden = !open;
+    showServer.setAttribute("aria-expanded", open ? "true" : "false");
   }
   // A copy with no «توزيع البرنامج»: its own «مفتاح Claude», typed here, writes its comments when saved.
   const claudeFields = document.getElementById("claude-fields");
@@ -1546,6 +1580,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       renderSessions();
       showCommentsEngine(data.comments_engine);
       showOwnClaude(data);
+      showCommentsServer(data);
       if (geminiByOwner) {
         geminiKey.value = data.gemini_api_key || "";
         geminiModel.value = data.gemini_model || "";
@@ -1607,6 +1642,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     replyVoice.hidden = !commentToggle.checked;
     if (!commentToggle.checked) {
       openGemini(false);
+      openServer(false);
       if (claudeFields) { claudeFields.hidden = true; showClaude.setAttribute("aria-expanded", "false"); }
     }
   }
@@ -1758,6 +1794,44 @@ EMBEDDED_PAGE = r'''<!doctype html>
 
   commentToggle.addEventListener("change", syncGemini);
   if (showGemini) showGemini.addEventListener("click", () => openGemini(geminiFields.hidden));
+  if (serverFields) {
+    const serverLink = document.getElementById("server-link");
+    const saveServer = document.getElementById("save-server");
+    showServer.addEventListener("click", () => {
+      openServer(serverFields.hidden);
+      if (!serverFields.hidden) serverLink.focus();
+    });
+    saveServer.addEventListener("click", async () => {
+      saveServer.disabled = true;
+      showNotice("جارٍ الاتصال بسيرفر التعليقات…", true);
+      try {
+        const data = await postJson("/comments-server", {link: serverLink.value.trim()});
+        showNotice(data.message || "تعذّر حفظ رابط السيرفر.", Boolean(data.success));
+        if (data.success) {
+          serverLink.value = "";
+          showCommentsServer(data);
+          showCommentsEngine(data.comments_engine);
+        }
+      } catch (_) {
+        showNotice("تعذّر حفظ رابط السيرفر.", false);
+      } finally {
+        saveServer.disabled = false;
+      }
+    });
+    document.getElementById("delete-server").addEventListener("click", async () => {
+      if (!window.confirm("حذف رابط سيرفر التعليقات؟ لا تُكتب التعليقات بدونه.")) return;
+      try {
+        const data = await postJson("/comments-server/delete", {});
+        showNotice(data.message || "تعذّر حذف رابط السيرفر.", Boolean(data.success));
+        if (data.success) {
+          showCommentsServer(data);
+          showCommentsEngine(data.comments_engine);
+        }
+      } catch (_) {
+        showNotice("تعذّر حذف رابط السيرفر.", false);
+      }
+    });
+  }
   if (claudeFields) {
     const claudeKey = document.getElementById("claude-key");
     const claudeModel = document.getElementById("claude-model");
@@ -1982,6 +2056,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
       repostButton.disabled = true;          // (not sent twice while it asks)
       await loadCommentsEngine();
       repostButton.disabled = false;
+      if (inApp && !commentsByOther) {
+        openServer(true);
+        showNotice("ضع رابط سيرفر التعليقات أولًا، ثم اضغط «حفظ واتصال».", false);
+        document.getElementById("server-link").focus();
+        return;
+      }
       if (!commentsByOther) {
         if (!geminiKey.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل مفتاح Gemini.", false); geminiKey.focus(); return; }
         if (!geminiModel.value.trim()) { openGemini(true); lockGemini(false); showNotice("أدخل اسم النموذج.", false); geminiModel.focus(); return; }
@@ -3667,12 +3747,16 @@ replies_by_tweet: dict[str, list[str]] = {}
 replies_memory_lock = threading.Lock()
 
 
+def reply_manner_number(account: str) -> int:
+    """Which manner is the account's own (always the same one for an account)."""
+    if not account:
+        return random.randrange(len(REPLY_MANNERS))
+    return int(hashlib.sha256(("reply-manner:" + account).encode("utf-8")).hexdigest()[:8], 16) % len(REPLY_MANNERS)
+
+
 def reply_manner(account: str) -> str:
     """The account's own manner of writing (always the same one for an account)."""
-    if not account:
-        return random.choice(REPLY_MANNERS)
-    drawn = int(hashlib.sha256(("reply-manner:" + account).encode("utf-8")).hexdigest()[:8], 16)
-    return REPLY_MANNERS[drawn % len(REPLY_MANNERS)]
+    return REPLY_MANNERS[reply_manner_number(account)]
 
 
 def remember_reply(account: str, tweet_id: str, text: str) -> None:
@@ -3886,7 +3970,12 @@ def owner_comments_choice() -> dict:
 
 def comments_writer() -> tuple[str, str, str]:
     """Who writes this copy's comments: ("grok" | "claude", key, model), or ("gemini", "", "") — the owner's
-    choice in «توزيع البرنامج», for users' copies (from their check-ins) and for the owner's own copy alike."""
+    choice in «توزيع البرنامج», for users' copies (from their check-ins) and for the owner's own copy alike. In the
+    app: ("server", the server's link, "") when the link is saved in the panel, else ("none", "", ""): there the
+    comments are written on the owner's server only, never from the phone."""
+    if IN_APP:
+        link = saved_server_link()
+        return ("server", link, "") if link else ("none", "", "")
     if is_owner_copy() and not key_typed_here():
         choice = owner_comments_choice()
     else:
@@ -4078,6 +4167,155 @@ def own_claude_shown() -> dict:
     return {"claude_key": f"{key[:7]}…{key[-4:]}" if key else "", "claude_model": model or CLAUDE_DEFAULT_MODEL}
 
 
+# In the app the comments are written on the owner's server (comments_server.py, the server the «تعليقات» app
+# uses), not from the phone: the panel keeps only that server's link, as comments_server.py prints it:
+#     https://address:port/secret#fingerprint
+# The connection is encrypted and the server is known by its certificate's fingerprint, which the link carries.
+# The server reads the tweet, asks the model with the key kept there, and answers with the finished reply. No
+# model key is on the phone.
+COMMENTS_SERVER_PATH = DATA_DIR / "comments_server.json"
+SERVER_LINK = re.compile(r"https://(\[[0-9A-Fa-f:]{2,39}\]|[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?)(?::(\d{1,5}))?/([A-Za-z0-9_\-]{16,64})/?#([0-9a-fA-F]{64})")
+SERVER_CONNECT_SECONDS = 15
+SERVER_COMMENT_SECONDS = 300          # (the server reads the tweet, then the model may think before it writes)
+SERVER_RETRY_WAITS = (1.5, 4.0)       # a connection that did not reach the server is tried again, a little later
+OWNER_LINK = " (يطبعه السيرفر: python3 comments_server.py --link)"
+NO_SERVER_LINK = "ضع رابط سيرفر التعليقات أولًا: إعداد التعليقات ← «سيرفر التعليقات»."
+comments_server_lock = threading.Lock()
+comments_server = {"link": "", "model": ""}
+
+
+class ServerNotReached(RuntimeError):
+    """The connection did not reach the server: it may be tried again."""
+
+
+def tidy_server_link(text: str) -> str:
+    """The link as pasted, without the spaces and the unseen marks a paste may carry."""
+    return "".join(ch for ch in str(text or "") if not ch.isspace() and unicodedata.category(ch) != "Cf")
+
+
+def parse_server_link(link: str) -> tuple[str, int, str, str] | None:
+    """(address, port, secret, fingerprint) of a server link, or None when it is not one."""
+    match = SERVER_LINK.fullmatch(link or "")
+    if not match:
+        return None
+    port = int(match.group(2) or 443)
+    if not 0 < port < 65536:
+        return None
+    return match.group(1), port, match.group(3), match.group(4).lower()
+
+
+def server_shown(link: str) -> str:
+    """Where the server is, without its secret."""
+    parsed = parse_server_link(link)
+    return f"{parsed[0]}:{parsed[1]}" if parsed else ""
+
+
+def saved_server_link() -> str:
+    with comments_server_lock:
+        return comments_server["link"]
+
+
+def load_comments_server() -> None:
+    loaded = read_private_json(COMMENTS_SERVER_PATH) or {}
+    link = open_key(loaded.get("link_sealed")).strip() if loaded.get("link_sealed") else ""
+    with comments_server_lock:
+        comments_server.update(link=link if parse_server_link(link) else "", model="")
+
+
+def remember_comments_server(link: str, model: str = "") -> None:
+    """The server's link (none: forgotten), kept sealed as the keys are."""
+    with comments_server_lock:
+        comments_server.update(link=link, model=model if link else "")
+        if link:
+            write_private_json(COMMENTS_SERVER_PATH, {"version": 1, "link_sealed": seal_key(link)})
+        else:
+            try:
+                COMMENTS_SERVER_PATH.unlink()
+            except OSError:
+                pass
+
+
+def server_exchange(link: str, action: str, body: dict | None = None, seconds: float = 30) -> dict:
+    """One request to the comments server. Its certificate is checked against the link's fingerprint before
+    anything is sent (the secret is in the request). What it answers, or RuntimeError with words for the user."""
+    parsed = parse_server_link(link)
+    if not parsed:
+        raise RuntimeError("رابط السيرفر غير صحيح. انسخه كاملًا كما هو" + OWNER_LINK + ".")
+    host, port, token, pin = parsed
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE              # (the certificate is known by its fingerprint instead, below)
+    connection = http.client.HTTPSConnection(host, port, timeout=SERVER_CONNECT_SECONDS, context=context)
+    try:
+        try:
+            connection.connect()
+        except ssl.SSLError:
+            raise RuntimeError("لم يتم الاتصال الآمن بالسيرفر: على هذا العنوان والمنفذ برنامج آخر. راجع الرابط.") from None
+        except OSError:
+            raise ServerNotReached("تعذّر الوصول إلى سيرفر التعليقات. تأكد من اتصال الجوال بالإنترنت ومن أن السيرفر يعمل.") from None
+        seen = hashlib.sha256(connection.sock.getpeercert(binary_form=True) or b"").hexdigest()
+        if not hmac.compare_digest(seen, pin):
+            raise RuntimeError("شهادة السيرفر لا تطابق الرابط. خذ الرابط الحالي" + OWNER_LINK + ".")
+        connection.sock.settimeout(seconds)
+        sent = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
+        headers = {"Accept": "application/json", "Connection": "close"}
+        if sent is not None:
+            headers["Content-Type"] = "application/json; charset=utf-8"
+        try:
+            connection.request("POST" if sent is not None else "GET", f"/{token}/{action}", body=sent, headers=headers)
+            answer = connection.getresponse()
+            status, raw = answer.status, answer.read(1 << 20)
+        except (socket.timeout, TimeoutError):
+            raise RuntimeError("طال انتظار سيرفر التعليقات ولم يرد. أعد المحاولة.") from None
+        except (OSError, http.client.HTTPException):
+            raise RuntimeError("انقطع الاتصال بسيرفر التعليقات قبل أن يرد. أعد المحاولة.") from None
+    finally:
+        connection.close()
+    if status == 404:
+        raise RuntimeError("رابط السيرفر قديم أو ناقص. خذ الرابط الحالي" + OWNER_LINK + ".")
+    try:
+        data = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        raise RuntimeError("رد غير مفهوم من سيرفر التعليقات." if status == 200 else f"ردّ سيرفر التعليقات برمز {status}. أعد المحاولة.")
+    if not data.get("ok"):
+        raise RuntimeError(str(data.get("error") or "").strip() or f"ردّ سيرفر التعليقات برمز {status}. أعد المحاولة.")
+    return data
+
+
+def ask_server(link: str, action: str, body: dict | None = None, seconds: float = 30) -> dict:
+    """server_exchange, tried again when the connection did not reach the server."""
+    for attempt in range(len(SERVER_RETRY_WAITS) + 1):
+        try:
+            return server_exchange(link, action, body, seconds)
+        except ServerNotReached:
+            if attempt >= len(SERVER_RETRY_WAITS):
+                raise
+            time.sleep(SERVER_RETRY_WAITS[attempt])
+    raise ServerNotReached("تعذّر الوصول إلى سيرفر التعليقات.")
+
+
+def server_comment(link: str, tweet_id: str, voice: str, account: str) -> str:
+    """One reply to a tweet, written on the comments server: it is told the tweet's number, the voice, this
+    account's manner, and this copy's last replies (the new one must not look like them)."""
+    if not re.fullmatch(r"\d{1,25}", tweet_id or ""):
+        raise RuntimeError("لم يُعرف رقم التغريدة، فلم يُطلب تعليقها من السيرفر.")
+    with replies_memory_lock:
+        before = list(replies_by_account.get(account, []))[-6:] if account else []
+        before += [text for text in replies_by_tweet.get(tweet_id, []) if text not in before][-4:]
+    body = {"id": tweet_id, "voice": {"male": 0, "female": 1, "neutral": 2}.get(voice, 0),
+            "manner": reply_manner_number(account), "before": before[-8:]}
+    text = polish_comment(clean_comment(str(ask_server(link, "comment", body, SERVER_COMMENT_SECONDS).get("comment") or "")))
+    if not text:
+        raise RuntimeError("لم يصل تعليق من السيرفر. أعد المحاولة.")
+    if len(text) > REPLY_MAX_CHARS:
+        text = fit_comment(text)
+    record_comment_generated()
+    remember_reply(account, tweet_id, text)
+    return text
+
+
 def claude_answer_text(answer: dict) -> str:
     """The text of a Messages API answer: its text blocks (it may begin with thinking blocks)."""
     parts = [str(block.get("text") or "") for block in answer.get("content") or []
@@ -4204,6 +4442,10 @@ def write_comment(api_key: str, model: str, image: bytes | None, tweet_text: str
     if not is_owner_copy() and not wait_for_owner_keys():
         raise RuntimeError(no_keys_message())
     engine, key, engine_model = comments_writer()
+    if engine == "server":
+        return server_comment(key, tweet_id, voice, account)       # (whole, plain and within the limit already)
+    if engine == "none":
+        raise RuntimeError(NO_SERVER_LINK)
     if engine == "gemini" and not api_key:
         with gemini_lock:
             api_key = str(saved_gemini.get("api_key") or "")
@@ -8759,6 +9001,8 @@ def group_run_endpoint(access_path: str):
         gemini_api_key, gemini_model = "", ""
     if "comment" in requested_actions and not is_owner_copy():
         wait_for_owner_keys()                  # (a copy just started gets them now)
+    if "comment" in requested_actions and IN_APP and comments_writer()[0] != "server":
+        return jsonify(success=False, message=NO_SERVER_LINK), 400
     if "comment" in requested_actions and gemini_writes_comments():
         if not gemini_api_key:
             gemini_api_key = saved_gemini.get("api_key") or ""
@@ -8936,10 +9180,14 @@ def list_sessions_endpoint(access_path: str):
     # told when Grok writes them (chosen in «توزيع البرنامج»), and then asks for no Gemini key.
     writer = comments_writer()[0]
     comments_ready = writer != "gemini" or valid_gemini_key(saved_gemini.get("api_key") or "")
+    if IN_APP:
+        comments_ready = writer == "server"
     engine = writer if is_owner_copy() else ""
     if not comments_ready and not is_owner_copy() and not owner_sync_state["ok"] and time.monotonic() - owner_sync_state["at"] > 5:
         threading.Thread(target=sync_with_owner, name="owner-sync", daemon=True).start()   # (no keys yet: ask now)
     own = own_claude_shown() if key_typed_here() else {"claude_key": "", "claude_model": ""}
+    with comments_server_lock:
+        own.update(comments_server=server_shown(comments_server["link"]), comments_model=comments_server["model"])
     return jsonify(success=True, sessions=rows, gemini_api_key=gemini_key, gemini_model=gemini_model, comments_ready=comments_ready,
                    comments_engine=engine, **own)
 
@@ -9011,6 +9259,49 @@ def save_gemini_endpoint(access_path: str):
         return jsonify(success=True, message="لا يوجد ما يُحفظ.")
     remember_gemini(api_key, model or "")
     return jsonify(success=True, message="حُفظ مفتاح Gemini.")
+
+
+@app.post("/<access_path>/comments-server")
+def save_comments_server_endpoint(access_path: str):
+    """«سيرفر التعليقات» in the app's panel: the link is tried (the server must answer, with the certificate the
+    link names), then kept. With no link sent, the saved one is tried again."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة."), 400
+    if not IN_APP:
+        return jsonify(success=False, message="سيرفر التعليقات يُضبط داخل التطبيق."), 403
+    link = tidy_server_link(data.get("link")) or saved_server_link()
+    if not link:
+        return jsonify(success=False, message="الصق رابط سيرفر التعليقات."), 400
+    if not parse_server_link(link):
+        return jsonify(success=False, message="رابط السيرفر غير صحيح. انسخه كاملًا كما هو" + OWNER_LINK + "."), 400
+    try:
+        answer = ask_server(link, "ping", None, 20)
+    except RuntimeError as exc:
+        trace_click(f"سيرفر التعليقات {server_shown(link)}: تعذّر الاتصال: {exc}")
+        return jsonify(success=False, message=str(exc)), 502
+    model = str(answer.get("model") or "")[:60]
+    remember_comments_server(link, model)
+    remember_own_claude("", "")            # (a model key typed in this panel before is no longer kept on the phone)
+    print(f"سيرفر التعليقات {server_shown(link)}: متصل (النموذج {model or '؟'})", flush=True)
+    return jsonify(success=True, comments_engine="server", comments_server=server_shown(link), comments_model=model,
+                   message="تم الاتصال بسيرفر التعليقات" + (f" (النموذج فيه: {model})" if model else "") + ". التعليقات تُكتب فيه الآن.")
+
+
+@app.post("/<access_path>/comments-server/delete")
+def delete_comments_server_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة."), 400
+    if not IN_APP:
+        return jsonify(success=False, message="سيرفر التعليقات يُضبط داخل التطبيق."), 403
+    remember_comments_server("")
+    return jsonify(success=True, comments_engine="none", comments_server="", comments_model="",
+                   message="حُذف رابط السيرفر: التعليقات لا تُكتب إلى أن تضع رابطًا.")
 
 
 @app.post("/<access_path>/claude")
@@ -9172,6 +9463,7 @@ load_group_ids()
 load_done_history()
 load_gemini()
 load_panel_key()
+load_comments_server()
 load_gemini_usage()
 load_action_counts()
 load_jobs()
