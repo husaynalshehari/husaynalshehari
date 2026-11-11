@@ -53,7 +53,10 @@ UNIT = Path("/etc/systemd/system") / (SERVICE + ".service")
 CONTAINER = "gg-android"
 PACKAGE = "app.tg.groups"
 RAW = "https://raw.githubusercontent.com/husaynalshehari/husaynalshehari/ccr-695f6c04-mlgxcr/groups-app/"
-DEFAULT_IMAGE = "redroid/redroid:16.0.0_64only-latest"
+# The Androids tried, newest first: on a server with no graphics card the newer ones' screen service may not start
+# (their software drawing needs what some processors lack), so the next one is tried until one boots.
+IMAGES = ("redroid/redroid:14.0.0_64only-latest", "redroid/redroid:13.0.0_64only-latest", "redroid/redroid:12.0.0_64only-latest")
+DEFAULT_IMAGE = IMAGES[0]
 DEFAULT_PORT = 8444
 ADB = os.environ.get("GG_ADB") or "adb"
 DEVICE = os.environ.get("GG_ANDROID_DEVICE") or "127.0.0.1:5555"
@@ -519,6 +522,8 @@ def install_what_is_needed() -> None:
         Path("/etc/modprobe.d/gg-android.conf").write_text("options binder_linux devices=binder,hwbinder,vndbinder\n")
     except OSError:
         pass
+    for module in ("iptable_raw", "ip6table_raw", "iptable_mangle", "ip6table_mangle"):
+        run(["modprobe", module], 30)              # (the Android's own network rules use these tables)
     run(["systemctl", "enable", "--now", "docker"], 120)
     if run(["docker", "info"], 60).returncode != 0:
         stop("Docker لا يعمل.", run(["systemctl", "status", "docker", "--no-pager"], 30).stdout)
@@ -544,44 +549,72 @@ def diagnose() -> str:
     return "\n".join(parts)
 
 
-def start_android(image: str) -> None:
-    DATA.mkdir(parents=True, exist_ok=True)
-    running = run(["docker", "inspect", "-f", "{{.State.Running}} {{.Config.Image}}", CONTAINER], 20).stdout.strip()
-    if running == f"true {image}" and (inside("getprop sys.boot_completed") == "1" or connect()):
-        connect()
-        say(f"٢) أندرويد يعمل من قبل ({image})")
-        return
-    say(f"٢) تشغيل أندرويد ({image}). تنزيله أول مرة يأخذ دقائق…")
-    run(["docker", "rm", "-f", CONTAINER], 120)
-    width, height, dpi = SCREEN
-    done = subprocess.run(["docker", "run", "-d", "--name", CONTAINER, "--restart", "unless-stopped", "--privileged",
-                           "-v", f"{DATA}:/data", "-p", "127.0.0.1:5555:5555", image,
-                           f"androidboot.redroid_width={width}", f"androidboot.redroid_height={height}", f"androidboot.redroid_dpi={dpi}",
-                           "androidboot.redroid_gpu_mode=guest", "androidboot.use_memfd=true"],
-                          capture_output=True, text=True, timeout=1800)
-    if done.returncode != 0:
-        stop("لم يبدأ أندرويد.", done.stderr)
+def booted(image: str, budget: float) -> str:
+    """Wait for the Android just started: "ok", "crash" (its screen service keeps failing: this Android does not run
+    on this server), "stopped", or "slow"."""
     started = time.time()
-    end = started + 900
     told = 0.0
-    while time.time() < end:
-        if inside("getprop sys.boot_completed") == "1" and not connect():
-            # (the Android is up, adb is not reached yet: a moment more)
-            time.sleep(3)
-            connect()
-        if connect():
-            say("   ✓ أندرويد يعمل (الإصدار " + shell("getprop ro.build.version.release", 15) + "، WebView "
-                + (re.search(r"versionName=(\S+)", shell("dumpsys package com.android.webview | grep versionName", 20)) or [0, "؟"])[1] + ")")
-            return
-        state = run(["docker", "inspect", "-f", "{{.State.Running}}", CONTAINER], 20).stdout.strip()
-        if state != "true":
-            stop("توقف أندرويد بعد بدئه.", diagnose())
+    while time.time() - started < budget:
+        if inside("getprop sys.boot_completed") == "1":
+            for _ in range(10):
+                if connect():
+                    return "ok"
+                time.sleep(3)
+        if run(["docker", "inspect", "-f", "{{.State.Running}}", CONTAINER], 20).stdout.strip() != "true":
+            return "stopped"
+        crashes = len(list((DATA / "tombstones").glob("tombstone_*"))) if (DATA / "tombstones").is_dir() else 0
+        if crashes >= 4 and not inside("pidof system_server"):
+            return "crash"
         if time.time() - told >= 60:
             told = time.time()
             say(f"   … يقلع ({int(time.time() - started)} ث): zygote=" + (inside("getprop init.svc.zygote") or "لم يبدأ")
+                + " · الشاشة=" + (inside("getprop init.svc.surfaceflinger") or "لم تبدأ")
                 + " · system_server=" + ("يعمل" if inside("pidof system_server") else "لم يبدأ"))
         time.sleep(5)
-    stop("أندرويد لم يكمل إقلاعه خلال ربع ساعة.", diagnose())
+    return "slow"
+
+
+def start_android(data: dict, chosen: bool) -> None:
+    """The Android running and booted: the one that worked here before, else each of IMAGES in turn (only the one
+    asked for, with --image)."""
+    images = [data["image"]] if chosen else list(dict.fromkeys([data.get("image_ok") or IMAGES[0], *IMAGES]))
+    running = run(["docker", "inspect", "-f", "{{.State.Running}} {{.Config.Image}}", CONTAINER], 20).stdout.strip()
+    for index, image in enumerate(images):
+        if running == f"true {image}" and (inside("getprop sys.boot_completed") == "1" or connect()):
+            connect()
+            say(f"٢) أندرويد يعمل من قبل ({image})")
+            data.update(image_ok=image, data_image=image)
+            save_config(data)
+            return
+        say(f"٢) تشغيل أندرويد ({image}). تنزيله أول مرة يأخذ دقائق…")
+        run(["docker", "rm", "-f", CONTAINER], 120)
+        if data.get("data_image") != image and DATA.exists():
+            shutil.rmtree(DATA, ignore_errors=True)      # (another Android's data: this one cannot use it)
+        DATA.mkdir(parents=True, exist_ok=True)
+        width, height, dpi = SCREEN
+        done = subprocess.run(["docker", "run", "-d", "--name", CONTAINER, "--restart", "unless-stopped", "--privileged",
+                               "-v", f"{DATA}:/data", "-p", "127.0.0.1:5555:5555", image,
+                               f"androidboot.redroid_width={width}", f"androidboot.redroid_height={height}", f"androidboot.redroid_dpi={dpi}",
+                               "androidboot.redroid_gpu_mode=guest", "androidboot.use_memfd=true"],
+                              capture_output=True, text=True, timeout=1800)
+        data["data_image"] = image
+        save_config(data)
+        if done.returncode != 0:
+            stop("لم يبدأ أندرويد.", done.stderr)
+        last = index == len(images) - 1
+        result = booted(image, 900 if last else 480)
+        if result == "ok":
+            say("   ✓ أندرويد يعمل (الإصدار " + shell("getprop ro.build.version.release", 15) + "، WebView "
+                + (re.search(r"versionName=(\S+)", shell("dumpsys package com.android.webview | grep versionName", 20)) or [0, "؟"])[1] + ")")
+            data["image_ok"] = image
+            save_config(data)
+            return
+        why = {"crash": "خدمة الشاشة فيه تتوقف كل مرة على هذا السيرفر", "stopped": "توقف بعد بدئه",
+               "slow": "لم يكمل إقلاعه في وقته"}[result]
+        if last:
+            stop(f"أندرويد ({image}): {why}، ولم يبقَ إصدار آخر يُجرَّب.", diagnose())
+        say(f"   ✗ {why}. يُجرَّب إصدار أقدم…")
+        running = ""
 
 
 def install_app() -> None:
@@ -626,7 +659,7 @@ def main() -> None:
     parser.add_argument("--update", action="store_true", help="install the app's newest version")
     parser.add_argument("--restart", action="store_true", help="start the Android and the app afresh")
     parser.add_argument("--new-link", action="store_true", help="a new secret: the old link stops working")
-    parser.add_argument("--image", help=f"another Android ({DEFAULT_IMAGE} by default)")
+    parser.add_argument("--image", help="one Android image only (else the ones in IMAGES are tried in turn)")
     parser.add_argument("--port", type=int, help=f"another port for the door ({DEFAULT_PORT} by default)")
     parser.add_argument("--host", help="the address in the link, when the one found is wrong")
     args = parser.parse_args()
@@ -646,6 +679,7 @@ def main() -> None:
         data["port"] = args.port
     if args.host:
         data["host"] = args.host.strip()
+    chosen = bool(args.image)
     if args.image:
         data["image"] = args.image.strip()
     data.setdefault("port", DEFAULT_PORT)
@@ -656,7 +690,7 @@ def main() -> None:
     ready = True
     if args.setup:
         install_what_is_needed()
-        start_android(data["image"])
+        start_android(data, chosen)
         install_app()
         ready = wait_for_app()
     elif args.update:
