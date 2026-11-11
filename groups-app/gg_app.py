@@ -5078,6 +5078,8 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path, viewport: dic
         context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
+    else:
+        context.add_init_script(CHAT_PAGES_JS)
     block_media(context)
     if auth_token:
         context.add_cookies([{
@@ -6400,6 +6402,124 @@ CHAT_TICK_JS = r"""
 """
 
 
+# In the app: X's page loads a group's chat a few messages at a time (each of its GetConversationPageQuery asks
+# brings a handful, and each takes half a second or more on a phone's network), and decrypts them itself. This,
+# put in the page before X's own code, asks X for bigger pages instead: where the page's own ask names how many to
+# bring (a number named like count or limit), it asks for CHAT_PAGE_SIZE, and X's page decrypts and shows them as
+# ever. If X refuses a bigger page, its own ask is sent as it was, and no other ask is changed again. What it saw
+# (the ask's fields, never their content) is read back for the log.
+CHAT_PAGE_SIZE = 60
+CHAT_PAGES_JS = r"""
+(() => {
+  if (window.__ggChatPages) return;
+  const state = window.__ggChatPages = {seen: 0, changed: 0, off: false, failed: "", fields: "", how: ""};
+  const WANT = __WANT__;
+  const isPage = (url) => /\/GetConversationPageQuery(\?|$)/.test(String(url || ""));
+  const COUNT = /^(count|limit|page_?size|max_?(events|messages|count|results)|num_?(events|messages)|size|first|last)$/i;
+  const describe = (value, depth) => {
+    if (depth > 3) return "…";
+    if (Array.isArray(value)) return "[" + (value.length ? describe(value[0], depth + 1) : "") + "]";
+    if (value && typeof value === "object") return "{" + Object.keys(value).slice(0, 16).map((k) => k + ":" + describe(value[k], depth + 1)).join(",") + "}";
+    if (typeof value === "number") return String(value);
+    if (typeof value === "string") return "str" + value.length;
+    return typeof value;
+  };
+  const bigger = (vars) => {
+    let touched = "";
+    const walk = (obj, depth) => {
+      if (!obj || typeof obj !== "object" || depth > 3) return;
+      for (const key of Object.keys(obj)) {
+        const value = obj[key];
+        if (typeof value === "number" && COUNT.test(key) && value > 0 && value < WANT) {
+          obj[key] = WANT;
+          touched += key + ":" + value + "→" + WANT + " ";
+        } else if (value && typeof value === "object") walk(value, depth + 1);
+      }
+    };
+    walk(vars, 0);
+    return touched.trim();
+  };
+  // The ask with bigger pages: its new address (and body), or null when there is nothing to change.
+  const remake = (url, body) => {
+    if (state.off) return null;
+    try {
+      const address = new URL(String(url), location.href);
+      const raw = address.searchParams.get("variables");
+      if (raw) {
+        const vars = JSON.parse(raw);
+        if (!state.fields) state.fields = describe(vars, 0);
+        const touched = bigger(vars);
+        if (!touched) return null;
+        state.how = touched;
+        address.searchParams.set("variables", JSON.stringify(vars));
+        return {url: address.toString(), body};
+      }
+      if (typeof body === "string" && body.charAt(0) === "{") {
+        const data = JSON.parse(body);
+        const vars = data.variables || data;
+        if (!state.fields) state.fields = describe(vars, 0);
+        const touched = bigger(vars);
+        if (!touched) return null;
+        state.how = touched;
+        return {url: String(url), body: JSON.stringify(data)};
+      }
+    } catch (error) {}
+    return null;
+  };
+  const refused = (why) => { state.off = true; state.failed = String(why).slice(0, 160); };
+  const realFetch = window.fetch;
+  if (realFetch) {
+    window.fetch = async function (input, init) {
+      const url = typeof input === "string" ? input : (input && input.url) || String(input || "");
+      if (!isPage(url)) return realFetch.apply(this, arguments);
+      state.seen++;
+      const plainBody = init && typeof init.body === "string" ? init.body : null;
+      const made = (typeof input === "string" || input instanceof URL || plainBody !== null) ? remake(url, plainBody) : null;
+      if (!made) return realFetch.apply(this, arguments);
+      try {
+        const nextInit = Object.assign({}, init || {});
+        if (made.body !== null && made.body !== undefined) nextInit.body = made.body;
+        const answer = await realFetch.call(this, typeof input === "string" || input instanceof URL ? made.url : new Request(made.url, input), nextInit);
+        if (answer.ok) {
+          const data = await answer.clone().json().catch(() => null);
+          if (data && !data.errors) { state.changed++; return answer; }
+          refused("errors: " + ((data && data.errors && data.errors[0] && data.errors[0].message) || "?"));
+        } else refused("HTTP " + answer.status);
+      } catch (error) { refused(error); }
+      return realFetch.apply(this, arguments);
+    };
+  }
+  const open = XMLHttpRequest.prototype.open, send = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    this.__ggPage = isPage(url) ? {method: String(method || "GET").toUpperCase(), url: String(url)} : null;
+    if (this.__ggPage) {
+      state.seen++;
+      const made = this.__ggPage.method === "GET" ? remake(url, null) : null;
+      if (made) {
+        arguments[1] = made.url;
+        this.__ggPage.changed = true;
+      }
+    }
+    return open.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function (body) {
+    const page = this.__ggPage;
+    if (page && page.method !== "GET") {
+      const made = remake(page.url, typeof body === "string" ? body : null);
+      if (made) { body = made.body; page.changed = true; }
+    }
+    if (page && page.changed) {
+      this.addEventListener("loadend", () => {
+        if (this.status === 200) state.changed++;
+        else refused("HTTP " + this.status);
+      });
+    }
+    return send.call(this, body);
+  };
+})();
+""".replace("__WANT__", str(CHAT_PAGE_SIZE))
+
+
 def json_shape(value, depth: int = 0):
     """A JSON answer's fields and sizes, without what is in them."""
     if depth > 5:
@@ -6496,8 +6616,13 @@ class CollectProbe:
             total = dict(self.total)
         top = sorted(kinds.items(), key=lambda item: -item[1][1])[:8]
         net = "، ".join(f"{name}×{row[0]} {row[1] // 1024}KB {int(row[2] / max(1, row[0]))}ms" for name, row in top) or "لا شيء"
+        try:
+            pages = self.page.evaluate("() => window.__ggChatPages || null")
+        except Exception:
+            pages = None
         print(f"قياس الجمع ({seconds} ث): جُمع {self.found_now()} · المحادثة {json.dumps(chat, ensure_ascii=False)} · "
-              f"الشبكة في آخر فترة: {net} · منذ البداية {total['count']} طلب {total['bytes'] // 1024}KB", flush=True)
+              f"الشبكة في آخر فترة: {net} · منذ البداية {total['count']} طلب {total['bytes'] // 1024}KB · "
+              f"صفحات المحادثة {json.dumps(pages, ensure_ascii=False)[:600]}", flush=True)
 
     def every(self) -> None:
         while not self.stopped.wait(10):
@@ -7530,7 +7655,9 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     publish_job(job_id, status="done", success=False, message="فشل التحقق: الجلسة غير مسجّلة الدخول.")
                     return
                 accept_cookies(page)
-                handle = read_session_username(page)
+                # (In the app the account's name is read only when it is not known yet: on a phone's X page it is
+                # not shown, and reading it from the settings costs a page and seconds at each task.)
+                handle = (IN_APP and saved_username(auth_token)) or read_session_username(page)
                 if handle:
                     remember_session(auth_token, handle, pin)
                 publish_job(job_id, phase="login", message="إدخال رمز الدردشة…")
@@ -8803,6 +8930,16 @@ def load_sessions() -> None:
         })
     cleaned.sort(key=lambda item: item["verified_at"], reverse=True)
     saved_sessions = cleaned[:50]
+
+
+def saved_username(auth_token: str) -> str:
+    """The account's name saved with this session, or ""."""
+    token = (auth_token or "").strip()
+    with sessions_lock:
+        for row in saved_sessions:
+            if row.get("token") == token and row.get("username"):
+                return str(row["username"])
+    return ""
 
 
 def remember_session(auth_token: str, username: str, chat_pin: str = "") -> None:
