@@ -6651,13 +6651,28 @@ function (Hz, how) {
       return v === undefined || v === null ? "none" : String(v) === "9223372036854775807" ? "newest" : "older";
     };
     var hash = function (s) { var h = 5381; s = String(s); for (var i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); };
+    // Every "encoded_message_events" array anywhere in a response (so the group's own page, the first page of the
+    // whole chat, and the inbox are all read the same way, whatever their shape).
+    var findEvents = function (node, out, depth) {
+      if (!node || depth > 9) return;
+      if (Array.isArray(node)) { for (var i = 0; i < node.length; i++) findEvents(node[i], out, depth + 1); return; }
+      if (typeof node === "object") {
+        for (var key in node) {
+          if (key === "encoded_message_events" && Array.isArray(node[key])) { for (var j = 0; j < node[key].length; j++) out.push(node[key][j]); }
+          else if (node[key] && typeof node[key] === "object") findEvents(node[key], out, depth + 1);
+        }
+      }
+    };
+    var moreOf = function (data) { var p = data && data.data && data.data.get_conversation_page; return p ? !!p.has_more : null; };
+    // Each message's number (its sequence id, 1) kept by the mark of its sealed body (the 16 bytes after the 24-byte
+    // nonce: the body's own tag, the same bytes the chat code passes to the open call). The text is never read here.
     C.absorb = function (url, raw) {
       var data = null;
-      try { data = JSON.parse(raw); } catch (x) { C.log("page-unread", "len=" + (raw ? raw.length : 0)); return; }
-      var pg = data && data.data && data.data.get_conversation_page;
-      var events = (pg && pg.encoded_message_events) || [];
+      try { data = JSON.parse(raw); } catch (x) { C.log("page-unread", opOf(url) + " len=" + (raw ? raw.length : 0)); return; }
+      var events = []; findEvents(data, events, 0);
+      if (!events.length) { C.log("absorb", opOf(url) + " no-events len=" + (raw ? raw.length : 0)); return; }
       var vars = varsOf(url);
-      var msgs = 0, bad = 0, parts = [], seqs = [], starts = [], at = 0;
+      var msgs = 0, bad = 0, added = 0;
       for (var k = 0; k < events.length; k++) {
         try {
           var b = bytesOf(atob(events[k]));
@@ -6667,36 +6682,26 @@ function (Hz, how) {
           var body = d7[1] && d7[1][100];
           if (!seq || !body || body.e - body.s < 40) continue;
           msgs++;
-          var whole = latin(b, body.s, body.e);
-          var key = whole.slice(24, 40);
+          var key = latin(b, body.s + 24, body.s + 40);
           if (!C.seqOf.has(key)) {
             C.seqOf.set(key, seq);
             C.keys.push(key);
-            if (C.keys.length > 8000) C.seqOf.delete(C.keys.shift());
+            if (C.keys.length > 30000) C.seqOf.delete(C.keys.shift());
+            added++;
           }
-          starts.push(at); seqs.push(seq); parts.push(whole); at += whole.length;
         } catch (x) { bad++; }
       }
-      C.recent.push({s: parts.join(""), starts: starts, seqs: seqs});
-      if (C.recent.length > 4) C.recent.shift();
       C.events += events.length;
       C.batches++;
-      C.out("batch", {n: events.length, msgs: msgs, bad: bad, more: !!(pg && pg.has_more), at: C.opens,
-                      cid: hash(vars.conversation_id || ""), from: fromOf(vars), limit: limitOf(url)});
+      C.out("batch", {n: events.length, msgs: msgs, bad: bad, added: added, seqn: C.seqOf.size, more: moreOf(data), at: C.opens,
+                      cid: hash(vars.conversation_id || ""), from: fromOf(vars), limit: limitOf(url), op: opOf(url)});
     };
-    C.seqFor = function (tag) {
-      if (!tag) return "";
-      if (C.seqOf.has(tag)) return C.seqOf.get(tag);
-      for (var r = C.recent.length - 1; r >= 0; r--) {
-        var R = C.recent[r], pos = R.s.indexOf(tag);
-        if (pos < 0) continue;
-        var lo = 0, hi = R.starts.length - 1;
-        while (lo < hi) { var mid = (lo + hi + 1) >> 1; if (R.starts[mid] <= pos) lo = mid; else hi = mid - 1; }
-        return R.seqs[lo] || "";
-      }
-      return "";
-    };
+    C.seqForTag = function (tag) { return tag && C.seqOf.has(tag) ? C.seqOf.get(tag) : ""; };
+    var opOf = function (u) { var m = String(u).match(/\/graphql\/[^/]+\/([A-Za-z0-9_]+)/); return m ? m[1] : "?"; };
     var isPageAsk = function (u) { return String(u).indexOf("GetConversationPageQuery") >= 0; };
+    // Other responses that carry the group's messages, read for the numbers only (not made bigger): the first page
+    // of the whole chat on open, and the inbox.
+    var wantsRead = function (u) { return /GetInitialXChatPageQuery|GetInboxPageRequestQuery|GetConversationEntryDetailsQuery/.test(String(u)); };
     var asked = function (via, url, next) {
       C.log(via + "-page", "limit " + limitOf(url) + (next !== url ? "->" + limitOf(next) : " (as is)") + " from=" + fromOf(varsOf(url)));
     };
@@ -6704,19 +6709,26 @@ function (Hz, how) {
       var nativeFetch = G.fetch;
       var hooked = function (input, init) {
         var url = typeof input === "string" ? input : (input && typeof input.url === "string") ? input.url : String(input || "");
-        if (!isPageAsk(url)) return nativeFetch.apply(this, arguments);
-        var go = function () {
-          var next = widen(url);
-          asked("fetch", url, next);
-          var req = input;
-          if (next !== url) {
-            try { req = (typeof input === "string" || !input || typeof input.url !== "string") ? next : new Request(next, input); } catch (x) { req = next; }
-          }
-          return nativeFetch.call(G, req, init).then(function (r) {
+        if (isPageAsk(url)) {
+          var go = function () {
+            var next = widen(url);
+            asked("fetch", url, next);
+            var req = input;
+            if (next !== url) {
+              try { req = (typeof input === "string" || !input || typeof input.url !== "string") ? next : new Request(next, input); } catch (x) { req = next; }
+            }
+            return nativeFetch.call(G, req, init).then(function (r) {
+              return r.clone().text().then(function (t) { try { C.absorb(url, t); } catch (x) {} return r; }, function () { return r; });
+            });
+          };
+          return C.worker && C.set.gen === undefined ? C.ready.then(go) : go();
+        }
+        if (wantsRead(url)) {   // (read for the numbers only, not made bigger)
+          return nativeFetch.apply(this, arguments).then(function (r) {
             return r.clone().text().then(function (t) { try { C.absorb(url, t); } catch (x) {} return r; }, function () { return r; });
           });
-        };
-        return C.worker && C.set.gen === undefined ? C.ready.then(go) : go();
+        }
+        return nativeFetch.apply(this, arguments);
       };
       hooked.__gg = 1;
       G.fetch = hooked;
@@ -6727,10 +6739,13 @@ function (Hz, how) {
         var raw = String(url || "");
         var xhr = this;
         xhr.__ggAsk = "";
-        if (isPageAsk(raw)) {
-          var next = widen(raw);
-          asked("xhr", raw, next);
-          arguments[1] = next;
+        var page = isPageAsk(raw);
+        if (page || wantsRead(raw)) {
+          if (page) {
+            var next = widen(raw);
+            asked("xhr", raw, next);
+            arguments[1] = next;
+          }
           xhr.__ggAsk = raw;
           if (!xhr.__ggListen) {
             xhr.__ggListen = 1;
@@ -6777,7 +6792,7 @@ function (Hz, how) {
               var len = spec[2] >= 0 ? (arguments[spec[1]] | 0) - spec[2] : u32(h, arguments[spec[1]]);
               if (len > 0 && len < 400000) {
                 var found = C.tweets(h.HEAPU8.slice(out, out + len));
-                if (found.length) C.out("msg", {ids: found, seq: C.seqFor(tag), s: C.opens, fn: short});
+                if (found.length) C.out("msg", {ids: found, seq: C.seqForTag(tag), tag: tag, s: C.opens, fn: short});
                 else if (C.opens <= 15 || C.opens % 100 === 0) C.log("decrypt", short + " #" + C.opens + " len=" + len + " no-tweet");
               }
             } else if (C.opens <= 15) C.log("call", short + " rc=" + rc);
@@ -6823,14 +6838,13 @@ FAST_COLLECT_JS = r"""
       const w = String(d.w || "?");
       const src = globalThis.__src[w] || (globalThis.__src[w] = {recs: [], batches: []});
       if (d.k === "msg") {
-        src.recs.push([d.ids || [], String(d.seq || ""), d.s || 0]);
+        src.recs.push([d.ids || [], String(d.seq || ""), d.s || 0, String(d.tag || "")]);
         const n = src.recs.length;
         if (n <= 5 || n % 100 === 0) glog(w + " msg", "#" + n + " tweets=" + (d.ids || []).length + " seq=" + (d.seq ? "yes" : "NO") + " " + d.fn + " open#" + d.s);
-        if (!d.seq) { src.unmatched = (src.unmatched || 0) + 1; if (src.unmatched <= 5) glog(w + " msg-unmatched", "open#" + d.s); }
       } else if (d.k === "batch") {
-        src.batches.push({n: d.n, msgs: d.msgs, bad: d.bad, more: !!d.more, at: d.at, cid: d.cid, from: d.from, limit: d.limit});
-        glog(w + " batch", "#" + src.batches.length + " events=" + d.n + " msgs=" + d.msgs + " bad=" + d.bad + " more=" + d.more
-             + " from=" + d.from + " limit=" + d.limit + " cid=" + d.cid + " at-open#" + d.at);
+        src.batches.push({n: d.n, msgs: d.msgs, bad: d.bad, added: d.added, seqn: d.seqn, more: d.more, at: d.at, cid: d.cid, from: d.from, limit: d.limit, op: d.op});
+        glog(w + " batch", "#" + src.batches.length + " op=" + d.op + " events=" + d.n + " msgs=" + d.msgs + " added=" + d.added
+             + " seqن=" + d.seqn + " more=" + d.more + " from=" + d.from + " limit=" + d.limit + " cid=" + d.cid + " at-open#" + d.at);
       } else {
         glog(w + " " + String(d.e || d.k), String(d.d || "") + (w !== "page" && d.t !== undefined ? " (@" + d.t + ")" : ""));
       }
@@ -7253,19 +7267,27 @@ def reset_fast_collect(page, limit: int, cap: int, through: bool = False) -> Non
 
 FAST_SUMMARY_JS = r"""
 (stop) => {
+  // First fill in any message number that was not known when the message was decrypted but whose response has
+  // since come (the number is kept by the mark of the sealed body: see GG_CORE_JS). Then the state of each source.
+  const core = globalThis.__ggCore;
+  const seqForTag = core && core.seqForTag ? (t) => core.seqForTag(t) : () => "";
+  let filled = 0;
   const out = {};
   for (const [w, s] of Object.entries(globalThis.__src || {})) {
-    let matched = 0, hasStop = false, tweets = 0;
+    let matched = 0, hasStop = false, tweets = 0, stopMatched = false;
     for (const r of s.recs) {
+      if (!r[1] && r[3]) { const q = seqForTag(r[3]); if (q) { r[1] = String(q); filled++; } }
       if (r[1]) matched++;
       tweets += r[0].length;
-      if (stop && r[0].some((pair) => pair[0] === stop)) hasStop = true;
+      if (stop && r[0].some((pair) => pair[0] === stop)) { hasStop = true; if (r[1]) stopMatched = true; }
     }
     const last = s.batches[s.batches.length - 1];
-    out[w] = {recs: s.recs.length, matched: matched, tweets: tweets, hasStop: hasStop, batches: s.batches.length,
+    out[w] = {recs: s.recs.length, matched: matched, unmatched: s.recs.length - matched, tweets: tweets,
+              hasStop: hasStop, stopMatched: stopMatched, batches: s.batches.length,
               events: s.batches.reduce((a, b) => a + (b.n || 0), 0), msgs: s.batches.reduce((a, b) => a + (b.msgs || 0), 0),
-              more: last ? !!last.more : true};
+              seqn: core ? core.seqOf.size : 0, more: last ? last.more !== false : true};
   }
+  out.__filled = filled;
   return out;
 }
 """
@@ -7276,6 +7298,8 @@ def fast_summary(page, stop_id: str) -> dict:
         payload = page.evaluate(FAST_SUMMARY_JS, stop_id or "") or {}
     except Exception:
         payload = {}
+    if isinstance(payload, dict):
+        payload.pop("__filled", None)
     return payload if isinstance(payload, dict) else {}
 
 
@@ -7299,29 +7323,34 @@ def fast_records(page, source: str) -> list:
     return rows if isinstance(rows, list) else []
 
 
-def ordered_messages(records: list) -> list | None:
+def ordered_messages(records: list) -> tuple[list, int, list[str]]:
     """The messages that carry tweets, newest first, by their number in the group (X's sequence id, from the open
-    envelope each message comes in): [(sequence, [(status id, link), …]), …]. None when even one of them could not
-    be matched to its number: then its place is not known, and nothing is guessed."""
+    envelope each message comes in): ([(sequence, [(status id, link), …]), …], how many could not be numbered, the
+    tweets of those). A message whose number is not known has no place, so it is not guessed."""
     rows: dict[int, list] = {}
+    unmatched = 0
+    unmatched_ids: list[str] = []
     for record in records or []:
-        try:
-            pairs, seq = record[0], str(record[1] or "")
-        except (TypeError, IndexError):
-            return None
-        if not seq.isdigit():
-            return None
+        if not isinstance(record, list) or not record:
+            continue
+        pairs = record[0] or []
+        seq = str(record[1] or "") if len(record) > 1 else ""
         tweets = []
-        for pair in pairs or []:
+        for pair in pairs:
             try:
                 status_id, link = str(pair[0]), str(pair[1] or "")
             except (TypeError, IndexError):
                 continue
             if status_id.isdigit():
                 tweets.append((status_id, link))
-        if tweets:
+        if not tweets:
+            continue
+        if seq.isdigit():
             rows.setdefault(int(seq), tweets)        # (a message opened twice counts once)
-    return sorted(rows.items(), key=lambda item: -item[0])
+        else:
+            unmatched += 1
+            unmatched_ids.extend(status_id for status_id, _ in tweets)
+    return sorted(rows.items(), key=lambda item: -item[0]), unmatched, unmatched_ids
 
 
 def pick_tweets(messages: list, stop_id: str, limit: int) -> tuple[list[dict], bool, list[str]]:
@@ -7420,94 +7449,97 @@ def dump_fast_log(page, label: str) -> None:
         print("  خطوة· " + str(line), flush=True)
 
 
-def wait_fast(page, stop_id: str, should_stop, seconds: float, until=None) -> tuple[str, dict]:
-    """Wait for the messages X reads (seconds at most): until anything has come and no more comes for 1.5 s, or
-    until(info) holds. (where, its counts), or ("", {}) when nothing came."""
-    started = time.monotonic()
-    last = None
-    calm = 0.0
-    source, info = "", {}
-    while time.monotonic() - started < seconds:
-        if should_stop and should_stop():
-            raise JobStopped
-        page.wait_for_timeout(500)
-        source, info = pick_source(fast_summary(page, stop_id))
-        if not source:
-            continue
-        if until is not None and until(info):
-            return source, info
-        now = (info.get("recs"), info.get("batches"), info.get("events"))
-        if now == last and (info.get("recs") or info.get("batches")):
-            calm += 0.5
-            if calm >= 1.5:
-                return source, info
-        else:
-            calm = 0.0
-        last = now
-    return source, info
+# How long the fast reading is given at most, and how long it waits for X's messages' numbers to catch up on a slow
+# line before it gives up (X's first XChat load alone can take seconds on 4G).
+FAST_DEADLINE = 220
+FAST_FIRST_WAIT = 55
 
 
 def collect_decrypted_messages(page, limit: int, stop_id: str, should_stop, say) -> tuple[list[dict], bool]:
     """The fast collecting, once the group is open (see FAST_COLLECT_JS): (the tweets, True), or ([], False) when it
-    could not be done with certainty, and the group is then collected by scrolling."""
+    could not be done with certainty, and the group is then collected by scrolling. Every message read must have its
+    number before the result is trusted (its place in the group), the chosen tweet must be among them, and the
+    newest messages must match what the chat shows."""
     started = time.monotonic()
     say(f"قراءة آخر الرسائل ({FAST_PAGE} في كل دفعة) كما يفكّها X…")
-    source, info = wait_fast(page, stop_id, should_stop, 20)
-    print(f"جمع سريع: أول دفعة من {source or 'لا مكان'}: {json.dumps(info, ensure_ascii=False)}", flush=True)
-    if not source or not info.get("recs"):
-        print("✗ جمع سريع: لم يُقرأ أي رابط من رسائل القروب خلال 20 ث، فيُجمع بالتمرير", flush=True)
-        return [], False
-    # The newest messages the chat shows, before anything is moved: the first ones read must be these.
+    deadline = started + FAST_DEADLINE
+    source, info = "", {}
     shown: list[str] = []
-    for _ in range(10):
-        shown = visible_newest(page)
-        if shown:
+    last_key = None
+    stall = 0.0
+    nudged_at = 0.0
+
+    def enough() -> bool:
+        if not info:
+            return False
+        if int(info.get("unmatched") or 0) > 0:
+            return False      # some message's number still not known: wait, do not finish
+        if stop_id:
+            return bool(info.get("stopMatched"))
+        return int(info.get("matched") or 0) >= limit
+
+    while time.monotonic() < deadline:
+        if should_stop and should_stop():
+            raise JobStopped
+        page.wait_for_timeout(700)
+        source, info = pick_source(fast_summary(page, stop_id))
+        if not shown:
+            shown = visible_newest(page)
+        if not source or not info.get("recs"):
+            if time.monotonic() - started > FAST_FIRST_WAIT:
+                print(f"✗ جمع سريع: لم يُقرأ أي رابط من رسائل القروب خلال {FAST_FIRST_WAIT} ث، فيُجمع بالتمرير", flush=True)
+                return [], False
+            continue
+        if enough():
             break
-        page.wait_for_timeout(500)
-    print(f"جمع سريع: أحدث ما تعرضه الدردشة {shown[:6]}", flush=True)
-    idle = 0
-    while True:
-        if (stop_id and info.get("hasStop")) or (not stop_id and int(info.get("tweets") or 0) >= limit + 20):
-            break
-        if not info.get("more"):
-            print("جمع سريع: لا رسائل أقدم في القروب", flush=True)
-            break
-        if int(info.get("events") or 0) >= FAST_COLLECT_FIRST:
-            print(f"جمع سريع: بلغ {FAST_COLLECT_FIRST} رسالة", flush=True)
-            break
-        if time.monotonic() - started > 150 or idle >= 2:
-            print(f"جمع سريع: توقّف طلب الأقدم (مرات بلا جديد={idle}، {int(time.monotonic() - started)} ث)", flush=True)
-            break
-        before = int(info.get("batches") or 0)
-        say(f"التغريدة المحددة ليست ضمن آخر {info.get('events') or 0} رسالة: طلب الأقدم…")
-        nudge_older_page(page)
-        source2, info2 = wait_fast(page, stop_id, should_stop, 15, lambda row: int(row.get("batches") or 0) > before)
-        if source2 == source and int(info2.get("batches") or 0) > before:
-            source, info = wait_fast(page, stop_id, should_stop, 10)
-            if source != source2:
-                source, info = source2, info2
-            idle = 0
-            print(f"جمع سريع: دفعة أقدم: {json.dumps(info, ensure_ascii=False)}", flush=True)
+        key = (int(info.get("recs") or 0), int(info.get("matched") or 0), int(info.get("batches") or 0), int(info.get("seqn") or 0))
+        if key != last_key:
+            stall = 0.0
+            last_key = key
+            print(f"جمع سريع [{source}]: {json.dumps(info, ensure_ascii=False)} ({int(time.monotonic() - started)} ث)", flush=True)
         else:
-            idle += 1
-            info = info2 if source2 == source else info
+            stall += 0.7
+        need_more = (stop_id and not info.get("hasStop")) or (not stop_id and int(info.get("matched") or 0) < limit)
+        can_more = info.get("more") and int(info.get("events") or 0) < FAST_COLLECT_FIRST
+        # Still messages whose number is awaited (envelopes on their way): keep waiting, do not ask for older yet.
+        if int(info.get("unmatched") or 0) > 0 and stall < 12:
+            continue
+        if need_more and can_more and time.monotonic() - nudged_at > 3 and stall >= 2.1:
+            say(f"التغريدة المحددة ليست ضمن آخر {info.get('events') or 0} رسالة: طلب الأقدم…")
+            nudge_older_page(page)
+            nudged_at = time.monotonic()
+            stall = 0.0
+            continue
+        if stall >= 20 or (not can_more and stall >= 7) or (not need_more and stall >= 5):
+            break
+
+    if not source or not info.get("recs"):
+        print("✗ جمع سريع: لم يُقرأ شيء، فيُجمع بالتمرير", flush=True)
+        return [], False
     records = fast_records(page, source)
-    messages = ordered_messages(records)
-    if messages is None:
-        unmatched = sum(1 for row in records if not (isinstance(row, list) and len(row) > 1 and str(row[1] or "").isdigit()))
-        print(f"✗ جمع سريع: {unmatched} من {len(records)} رسالة لم يُعرف رقمها في القروب، فيُجمع بالتمرير", flush=True)
+    messages, unmatched, unmatched_ids = ordered_messages(records)
+    print(f"جمع سريع: {len(messages)} رسالة مرقّمة، {unmatched} بلا رقم، من {source}", flush=True)
+    if unmatched > 0:
+        # Some messages were read but X's response that carries their number never arrived: their place in the group
+        # is unknown, so the result cannot be trusted. The group is collected by scrolling instead.
+        print(f"✗ جمع سريع: {unmatched} رسالة لم يصل رقمها (منها تغريدات {unmatched_ids[:5]})، فيُجمع بالتمرير", flush=True)
         return [], False
     tweets, reached, order = pick_tweets(messages, stop_id, limit)
     if stop_id and not reached:
         print(f"✗ جمع سريع: لم تظهر التغريدة المحددة ضمن {info.get('events') or 0} رسالة، فيُجمع بالتمرير", flush=True)
         return [], False
-    if shown:
+    if not tweets:
+        print("✗ جمع سريع: لم تُستخرج تغريدات، فيُجمع بالتمرير", flush=True)
+        return [], False
+    # The newest messages the chat shows must be the first ones read (a guard against a wrong order). The chat shows
+    # few bubbles at once (it keeps only what is near the screen), so the check runs only when it shows enough.
+    if len(shown) >= 3:
         newest = order[:max(8, len(shown[:4]) + 4)]
-        if shown[0] not in order[:3] or any(status_id not in newest for status_id in shown[:4]):
-            print(f"✗ جمع سريع: أحدث ما في الدردشة {shown[:4]} ليس أول ما قُرئ {order[:8]}، فيُجمع بالتمرير", flush=True)
+        if shown[0] not in order[:3] or sum(1 for status_id in shown[:4] if status_id not in newest) > 1:
+            print(f"✗ جمع سريع: أحدث ما في الدردشة {shown[:4]} لا يوافق أول ما قُرئ {order[:8]}، فيُجمع بالتمرير", flush=True)
             return [], False
     else:
-        print("جمع سريع: لم تُقرأ الدردشة على الشاشة للمقارنة (الترتيب من أرقام الرسائل نفسها)", flush=True)
+        print(f"جمع سريع: الدردشة تعرض {len(shown)} تغريدة فقط للمقارنة (الترتيب من أرقام X نفسها)", flush=True)
     print(f"✓ جمع سريع: {len(tweets)} تغريدة من {len(messages)} رسالة فيها تغريدات، من {source}، "
           f"في {int(time.monotonic() - started)} ث", flush=True)
     return tweets, True
