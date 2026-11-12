@@ -5079,7 +5079,7 @@ def open_x_profile(playwright, auth_token: str, profile_dir: Path, viewport: dic
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
     else:
-        context.add_init_script(CHAT_PAGES_JS)
+        install_fast_collect(context)
     block_media(context)
     if auth_token:
         context.add_cookies([{
@@ -6402,137 +6402,6 @@ CHAT_TICK_JS = r"""
 """
 
 
-# In the app: X's page loads a group's chat a few messages at a time (each of its GetConversationPageQuery asks
-# brings a handful, and each takes half a second or more on a phone's network), and decrypts them itself. This,
-# put in the page before X's own code, asks X for far bigger pages instead: where the page's own ask names how many
-# to bring (conversation_event_limit, or another number named like a limit or a count), it asks for the first of
-# CHAT_PAGE_SIZES; the first ask of the group then brings its last 1000 messages at once, and X's page decrypts and
-# shows them as ever. If X refuses that size, the next one down is asked at once; if it refuses them all, its own
-# ask is sent as it was, and no ask is changed again. What it saw (the ask's fields, never their content) is read
-# back for the log.
-CHAT_PAGE_SIZES = (1000, 300, 100)
-CHAT_PAGES_JS = r"""
-(() => {
-  if (window.__ggChatPages) return;
-  const state = window.__ggChatPages = {seen: 0, changed: 0, off: false, failed: "", fields: "", how: "", size: 0};
-  const SIZES = __SIZES__;
-  let step = 0;
-  const isPage = (url) => /\/GetConversationPageQuery(\?|$)/.test(String(url || ""));
-  const COUNT = /^(?:[a-z_]*_)?(?:event_limit|limit|count|page_?size|max_?(?:events|messages|count|results)|num_?(?:events|messages)|size|first|last)$/i;
-  const describe = (value, depth) => {
-    if (depth > 3) return "…";
-    if (Array.isArray(value)) return "[" + (value.length ? describe(value[0], depth + 1) : "") + "]";
-    if (value && typeof value === "object") return "{" + Object.keys(value).slice(0, 16).map((k) => k + ":" + describe(value[k], depth + 1)).join(",") + "}";
-    if (typeof value === "number") return String(value);
-    if (typeof value === "string") return "str" + value.length;
-    return typeof value;
-  };
-  const bigger = (vars) => {
-    let touched = "";
-    const WANT = SIZES[step];
-    const walk = (obj, depth) => {
-      if (!obj || typeof obj !== "object" || depth > 3) return;
-      for (const key of Object.keys(obj)) {
-        const value = obj[key];
-        if (typeof value === "number" && COUNT.test(key) && value > 0 && value < WANT) {
-          obj[key] = WANT;
-          touched += key + ":" + value + "→" + WANT + " ";
-        } else if (value && typeof value === "object") walk(value, depth + 1);
-      }
-    };
-    walk(vars, 0);
-    return touched.trim();
-  };
-  // The ask with bigger pages: its new address (and body), or null when there is nothing to change.
-  const remake = (url, body) => {
-    if (state.off || step >= SIZES.length) return null;
-    try {
-      const address = new URL(String(url), location.href);
-      const raw = address.searchParams.get("variables");
-      if (raw) {
-        const vars = JSON.parse(raw);
-        if (!state.fields) state.fields = describe(vars, 0);
-        const touched = bigger(vars);
-        if (!touched) return null;
-        state.how = touched;
-        address.searchParams.set("variables", JSON.stringify(vars));
-        return {url: address.toString(), body};
-      }
-      if (typeof body === "string" && body.charAt(0) === "{") {
-        const data = JSON.parse(body);
-        const vars = data.variables || data;
-        if (!state.fields) state.fields = describe(vars, 0);
-        const touched = bigger(vars);
-        if (!touched) return null;
-        state.how = touched;
-        return {url: String(url), body: JSON.stringify(data)};
-      }
-    } catch (error) {}
-    return null;
-  };
-  // X refused this size: the next one down, or (none left) X's own asks as they are, from now on.
-  const refused = (why) => {
-    state.failed = (state.failed ? state.failed + " | " : "") + SIZES[step] + ": " + String(why).slice(0, 120);
-    step++;
-    if (step >= SIZES.length) state.off = true;
-  };
-  const realFetch = window.fetch;
-  if (realFetch) {
-    window.fetch = async function (input, init) {
-      const url = typeof input === "string" ? input : (input && input.url) || String(input || "");
-      if (!isPage(url)) return realFetch.apply(this, arguments);
-      state.seen++;
-      const plainBody = init && typeof init.body === "string" ? init.body : null;
-      const changeable = typeof input === "string" || input instanceof URL || plainBody !== null;
-      while (changeable && !state.off) {
-        const made = remake(url, plainBody);
-        if (!made) break;
-        try {
-          const nextInit = Object.assign({}, init || {});
-          if (made.body !== null && made.body !== undefined) nextInit.body = made.body;
-          const answer = await realFetch.call(this, typeof input === "string" || input instanceof URL ? made.url : new Request(made.url, input), nextInit);
-          if (answer.ok) {
-            const data = await answer.clone().json().catch(() => null);
-            if (data && !data.errors) { state.changed++; state.size = SIZES[step]; return answer; }
-            refused("errors: " + ((data && data.errors && data.errors[0] && data.errors[0].message) || "?"));
-          } else refused("HTTP " + answer.status);
-        } catch (error) { refused(error); }
-      }
-      return realFetch.apply(this, arguments);
-    };
-  }
-  const open = XMLHttpRequest.prototype.open, send = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function (method, url) {
-    this.__ggPage = isPage(url) ? {method: String(method || "GET").toUpperCase(), url: String(url)} : null;
-    if (this.__ggPage) {
-      state.seen++;
-      const made = this.__ggPage.method === "GET" ? remake(url, null) : null;
-      if (made) {
-        arguments[1] = made.url;
-        this.__ggPage.changed = true;
-      }
-    }
-    return open.apply(this, arguments);
-  };
-  XMLHttpRequest.prototype.send = function (body) {
-    const page = this.__ggPage;
-    if (page && page.method !== "GET") {
-      const made = remake(page.url, typeof body === "string" ? body : null);
-      if (made) { body = made.body; page.changed = true; }
-    }
-    if (page && page.changed) {
-      const asked = step;
-      this.addEventListener("loadend", () => {
-        if (this.status === 200) { state.changed++; state.size = SIZES[asked]; }
-        else if (asked === step) refused("HTTP " + this.status);
-      });
-    }
-    return send.call(this, body);
-  };
-})();
-""".replace("__SIZES__", json.dumps(list(CHAT_PAGE_SIZES)))
-
-
 def json_shape(value, depth: int = 0):
     """A JSON answer's fields and sizes, without what is in them."""
     if depth > 5:
@@ -6629,13 +6498,8 @@ class CollectProbe:
             total = dict(self.total)
         top = sorted(kinds.items(), key=lambda item: -item[1][1])[:8]
         net = "، ".join(f"{name}×{row[0]} {row[1] // 1024}KB {int(row[2] / max(1, row[0]))}ms" for name, row in top) or "لا شيء"
-        try:
-            pages = self.page.evaluate("() => window.__ggChatPages || null")
-        except Exception:
-            pages = None
         print(f"قياس الجمع ({seconds} ث): جُمع {self.found_now()} · المحادثة {json.dumps(chat, ensure_ascii=False)} · "
-              f"الشبكة في آخر فترة: {net} · منذ البداية {total['count']} طلب {total['bytes'] // 1024}KB · "
-              f"صفحات المحادثة {json.dumps(pages, ensure_ascii=False)[:600]}", flush=True)
+              f"الشبكة في آخر فترة: {net} · منذ البداية {total['count']} طلب {total['bytes'] // 1024}KB", flush=True)
 
     def every(self) -> None:
         while not self.stopped.wait(10):
@@ -6655,6 +6519,314 @@ class CollectProbe:
         except Exception:
             pass
         print(f"قياس الجمع: انتهى بعد {int(time.monotonic() - self.started)} ث", flush=True)
+
+
+# The fast collecting, in the app (the way of the owner's trial app «groups 1.3 batch»): once the group is open,
+# X's page's own ask for the chat's messages (GetConversationPageQuery) is changed before it leaves to bring the
+# last 1000 at once (conversation_event_limit), and its next asks are held back; X's page decrypts them as ever,
+# and the decrypted text is read where the page decrypts it (libsodium's crypto_secretbox_open_easy, wrapped when
+# X's chat code hands over its libsodium: in the copy of that code the app serves, see BrowserHost, or when it is
+# set as .libsodium on an object). Every link with status/<number> in it is a tweet of the group. No scrolling and
+# no waiting. If the stop tweet is not among them, one more ask goes up to 1500. If nothing could be read this way
+# (X changed its code), the group is opened again and collected by scrolling, as before.
+FAST_COLLECT_FIRST = 1000
+FAST_COLLECT_MAX = 1500
+FAST_COLLECT_JS = r"""
+(() => {
+  if (globalThis.__fastCollect) return;
+  globalThis.__fastCollect = true;
+  let saved = {};
+  try { saved = JSON.parse(sessionStorage.getItem("gg-fast") || "{}"); } catch (error) {}
+  globalThis.__msgCap = saved.cap || 1000;
+  globalThis.__msgLimit = saved.limit || 1000;
+  globalThis.__holdAt = saved.holdAt || 1000;
+  globalThis.__hold = saved.hold !== false;
+  globalThis.__pass = !!saved.pass;
+  globalThis.__msgEvents = 0;
+  globalThis.__inflight = false;
+  globalThis.__batches = [];
+  globalThis.__opens = 0;
+  globalThis.__urls = [];
+  globalThis.__wrapped = "";
+  const EMPTY = '{"data":{"get_conversation_page":{"encoded_message_events":[],"has_more":false}}}';
+  const withLimit = (url, limit) => String(url)
+    .replace(/(conversation_event_limit%22%3A)\d+/g, "$1" + limit)
+    .replace(/(conversation_event_limit%22:)\d+/g, "$1" + limit)
+    .replace(/(conversation_event_limit":)\d+/g, "$1" + limit);
+  globalThis.__takePage = (url) => {
+    if (globalThis.__pass) return url;
+    const cap = globalThis.__msgCap || 1000;
+    const events = globalThis.__msgEvents || 0;
+    if (events >= cap) return "";
+    if (globalThis.__hold && events >= (globalThis.__holdAt || 1000)) return "";
+    if (globalThis.__inflight) return "";
+    globalThis.__inflight = true;
+    const room = Math.max(1, cap - events);
+    const limit = Math.max(1, Math.min(globalThis.__msgLimit || 1000, room));
+    return withLimit(url, limit);
+  };
+  const note = (raw) => {
+    let count = 0;
+    try {
+      const data = JSON.parse(raw);
+      const events = data && data.data && data.data.get_conversation_page && data.data.get_conversation_page.encoded_message_events;
+      count = (events && events.length) || 0;
+    } catch (error) {}
+    globalThis.__msgEvents = (globalThis.__msgEvents || 0) + count;
+    (globalThis.__batches || (globalThis.__batches = [])).push(count);
+    globalThis.__inflight = false;
+  };
+  globalThis.__wrapSodium = (Hz, how) => {
+    const fn = Hz && Hz._crypto_secretbox_open_easy;
+    if (typeof fn !== "function" || Hz.__wrapped) return;
+    Hz.__wrapped = true;
+    globalThis.__wrapped = how || "patched";
+    Hz._crypto_secretbox_open_easy = function (out, cipher, clen) {
+      const rc = fn.apply(this, arguments);
+      globalThis.__opens = (globalThis.__opens || 0) + 1;
+      try {
+        const length = (clen | 0) - 16;
+        if ((rc === 0 || rc === 0n) && Hz.HEAPU8 && length > 0 && length < 200000) {
+          const bytes = Hz.HEAPU8.subarray(out | 0, (out | 0) + length);
+          let text = "";
+          for (let i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
+          const found = text.match(/https?:\/\/(?:x|twitter)\.com\/[A-Za-z0-9_]+\/status\/\d{10,}/g) || [];
+          for (const url of found) (globalThis.__urls || (globalThis.__urls = [])).push(url.split("?")[0]);
+        }
+      } catch (error) {}
+      return rc;
+    };
+  };
+  // (Also where X's chat code hands its libsodium over as .libsodium on an object, without the served copy.)
+  try {
+    Object.defineProperty(Object.prototype, "libsodium", {
+      configurable: true,
+      get() { return undefined; },
+      set(value) {
+        Object.defineProperty(this, "libsodium", {value, writable: true, configurable: true, enumerable: true});
+        try { globalThis.__wrapSodium(value, "property"); } catch (error) {}
+      }
+    });
+  } catch (error) {}
+  const urlOf = (input) => {
+    if (typeof input === "string") return input;
+    if (input && typeof input.url === "string") return input.url;
+    return "";
+  };
+  const origFetch = window.fetch;
+  if (typeof origFetch === "function") {
+    window.fetch = function (input, init) {
+      const url = urlOf(input);
+      if (url.indexOf("GetConversationPageQuery") < 0 || globalThis.__pass) return origFetch.apply(this, arguments);
+      const next = globalThis.__takePage(url);
+      if (!next) return Promise.resolve(new Response(EMPTY, {status: 200, headers: {"content-type": "application/json"}}));
+      return origFetch.call(this, next, init).then((response) => {
+        response.clone().text().then(note).catch(() => { globalThis.__inflight = false; });
+        return response;
+      }, (error) => {
+        globalThis.__inflight = false;
+        throw error;
+      });
+    };
+  }
+  const origOpen = XMLHttpRequest.prototype.open;
+  const origSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    const raw = String(url || "");
+    this.__ggBlock = false;
+    this.__ggCount = false;
+    if (raw.indexOf("GetConversationPageQuery") >= 0 && !globalThis.__pass) {
+      const next = globalThis.__takePage(raw);
+      if (!next) this.__ggBlock = true;
+      else {
+        url = next;
+        this.__ggCount = true;
+      }
+    }
+    return origOpen.call(this, method, url);
+  };
+  XMLHttpRequest.prototype.send = function () {
+    if (this.__ggBlock) {
+      const self = this;
+      setTimeout(() => {
+        try {
+          Object.defineProperty(self, "readyState", {configurable: true, get: () => 4});
+          Object.defineProperty(self, "status", {configurable: true, get: () => 200});
+          Object.defineProperty(self, "responseText", {configurable: true, get: () => EMPTY});
+          Object.defineProperty(self, "response", {configurable: true, get: () => EMPTY});
+        } catch (error) {}
+        self.dispatchEvent(new Event("load"));
+        self.dispatchEvent(new Event("loadend"));
+      }, 0);
+      return;
+    }
+    if (this.__ggCount) this.addEventListener("load", () => note(String(this.responseText || "")));
+    return origSend.apply(this, arguments);
+  };
+})();
+"""
+
+
+def install_fast_collect(context) -> None:
+    """Put FAST_COLLECT_JS in each page the browser opens, before X's own code."""
+    if getattr(context, "_fast_collect", False):
+        return
+    context._fast_collect = True
+    try:
+        context.add_init_script(FAST_COLLECT_JS)
+    except Exception:
+        pass
+
+
+def reset_fast_collect(page, cap: int, limit: int, hold: bool, through: bool = False) -> None:
+    """The fast collecting's settings for the next pages of this tab (through: X's asks are left as they are)."""
+    page.evaluate(
+        """({cap, limit, hold, through}) => {
+          const opts = {cap: cap, limit: limit, hold: hold, holdAt: 1000, pass: through};
+          try { sessionStorage.setItem("gg-fast", JSON.stringify(opts)); } catch (error) {}
+          globalThis.__msgCap = cap;
+          globalThis.__msgLimit = limit;
+          globalThis.__holdAt = 1000;
+          globalThis.__hold = hold;
+          globalThis.__pass = through;
+          globalThis.__msgEvents = 0;
+          globalThis.__inflight = false;
+          globalThis.__batches = [];
+          globalThis.__opens = 0;
+          globalThis.__urls = [];
+        }""",
+        {"cap": cap, "limit": limit, "hold": hold, "through": through},
+    )
+
+
+def fast_snapshot(page) -> dict:
+    try:
+        payload = page.evaluate(
+            """() => ({
+              opens: globalThis.__opens || 0,
+              events: globalThis.__msgEvents || 0,
+              batches: globalThis.__batches || [],
+              urls: globalThis.__urls || [],
+              wrapped: globalThis.__wrapped || ""
+            })"""
+        ) or {}
+    except Exception:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def wait_fast_decrypt(page, should_stop, min_events: int) -> dict:
+    """Wait until this batch has been decrypted (what was decrypted stays the same for 3 s), or, when nothing is
+    decrypted this way, not long: 15 s once the messages came, 25 s when none came."""
+    last_opens = -1
+    stable = 0
+    snap: dict = {}
+    started = time.monotonic()
+    while time.monotonic() - started < 50:
+        if should_stop and should_stop():
+            raise JobStopped
+        page.wait_for_timeout(1000)
+        snap = fast_snapshot(page)
+        opens = int(snap.get("opens") or 0)
+        events = int(snap.get("events") or 0)
+        waited = time.monotonic() - started
+        if opens == 0 and ((events > 0 and waited > 15) or waited > 25):
+            return snap
+        if opens == last_opens and opens > 0 and (events >= min_events or events > 0):
+            stable += 1
+            if stable >= 3:
+                return snap
+        else:
+            stable = 0
+        last_opens = opens
+    return snap
+
+
+def tweets_from_urls(urls, stop_id: str, limit: int) -> tuple[list[dict], bool]:
+    """The tweets of the links read from the messages, newest first: down to the stop tweet, or the number asked."""
+    seen: set[str] = set()
+    ids: list[str] = []
+    raw_by_id: dict[str, str] = {}
+    for raw in urls or []:
+        match = re.search(r"status/(\d{6,25})", str(raw))
+        if not match:
+            continue
+        status_id = match.group(1)
+        if status_id in seen:
+            continue
+        seen.add(status_id)
+        ids.append(status_id)
+        raw_by_id[status_id] = str(raw)
+    ids.sort(key=int, reverse=True)
+    reached = not stop_id or stop_id in seen
+    if stop_id:
+        if not reached:
+            return [], False
+        ids = [status_id for status_id in ids if int(status_id) >= int(stop_id)]
+    elif limit > 0:
+        ids = ids[:limit]
+    tweets = []
+    for status_id in ids:
+        url = tweet_url(raw_by_id.get(status_id, ""), status_id)
+        if tweet_is_ignored(url):
+            continue
+        tweets.append({"url": url, "text": "تغريدة"})
+    return tweets, reached
+
+
+def nudge_older_page(page) -> None:
+    """One more ask, for the older messages (up to FAST_COLLECT_MAX). Not a scroll through the group."""
+    try:
+        page.evaluate(
+            """(most) => {
+              globalThis.__hold = false;
+              globalThis.__msgCap = most;
+              globalThis.__msgLimit = 500;
+              globalThis.__inflight = false;
+              const scope = document.querySelector('[data-dm-message-list-scope]')
+                || document.querySelector('[data-testid="dm-message-scroller"]');
+              if (!scope) return;
+              scope.scrollTop = 0;
+              try { scope.dispatchEvent(new Event('scroll', {bubbles: true})); } catch (error) {}
+            }""",
+            FAST_COLLECT_MAX,
+        )
+    except Exception:
+        pass
+
+
+def collect_decrypted_messages(page, limit: int, stop_id: str, should_stop, say) -> tuple[list[dict], bool, str, bool]:
+    """The fast collecting, once the group is open: (tweets, the stop tweet reached, why none, whether anything
+    was read this way at all)."""
+    say(f"طلب آخر {FAST_COLLECT_FIRST} رسالة وفكها…")
+    snap = wait_fast_decrypt(page, should_stop, 1)
+    events = int(snap.get("events") or 0)
+    opened = int(snap.get("opens") or 0)
+    print(f"جمع سريع: رسائل={events} فك={opened} دفعات={snap.get('batches') or []} روابط={len(snap.get('urls') or [])} "
+          f"الربط={snap.get('wrapped') or 'لم يتم'}", flush=True)
+    if not opened:
+        return [], False, "", False
+    tweets, reached = tweets_from_urls(snap.get("urls") or [], stop_id, limit)
+    if stop_id and not reached and events < FAST_COLLECT_MAX:
+        say(f"التغريدة ليست ضمن آخر {events} رسالة. المتابعة حتى {FAST_COLLECT_MAX}…")
+        before = events
+        nudge_older_page(page)
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline:
+            if should_stop and should_stop():
+                raise JobStopped
+            page.wait_for_timeout(1000)
+            if int(fast_snapshot(page).get("events") or 0) > before:
+                break
+        snap = wait_fast_decrypt(page, should_stop, before + 1)
+        events = int(snap.get("events") or 0)
+        print(f"جمع سريع حتى {FAST_COLLECT_MAX}: رسائل={events} فك={snap.get('opens') or 0}", flush=True)
+        tweets, reached = tweets_from_urls(snap.get("urls") or [], stop_id, limit)
+    if not tweets:
+        if stop_id and not reached:
+            return [], False, f"لم تُوجد التغريدة المحددة ضمن آخر {min(events, FAST_COLLECT_MAX)} رسالة.", True
+        return [], False, "لم تُستخرج تغريدات من رسائل القروب.", True
+    return tweets, True, "", True
 
 
 def collect_group_tweets(page, limit: int, on_progress=None, stop_id: str = "", should_stop=None) -> tuple[list[dict], bool]:
@@ -7679,17 +7851,36 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                 if error:
                     publish_job(job_id, status="done", success=False, message=error)
                     return
-                opened_name = open_group_for_task(
-                    page, pin, group_name, group_wait_s,
-                    lambda text: publish_job(job_id, phase="login", message=text),
-                )
+                fast = IN_APP
+                say_login = lambda text: publish_job(job_id, phase="login", message=text)
+                if fast:
+                    reset_fast_collect(page, FAST_COLLECT_FIRST, FAST_COLLECT_FIRST, True)
+                opened_name = open_group_for_task(page, pin, group_name, 0 if fast else group_wait_s, say_login)
                 if opened_name != group_name:
                     publish_job(job_id, phase="login", message=f"تغيّر اسم القروب إلى «{opened_name}» وفُتح.")
-                if group_wait_s > 0:
-                    publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث، مع التحريك للأعلى والأسفل ثم العودة للأسفل…")
-                    sway_group_while_waiting(page, group_wait_s, lambda: job_cancelled(job_id))
                 cap = MAX_REPOSTS_REQUEST if stop_id else requested_count
-                items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
+                items, reached = [], False
+                if fast:
+                    items, reached, reason, decrypted = collect_decrypted_messages(
+                        page, cap, stop_id, lambda: job_cancelled(job_id),
+                        lambda text: publish_job(job_id, phase="collect", message=text))
+                    if decrypted and not items:
+                        publish_job(job_id, status="done", success=False, message=reason or "لم تُستخرج تغريدات.")
+                        return
+                    if not decrypted:
+                        # X's code was not reached this way: the group again, collected by scrolling as before.
+                        print("✗ الجمع السريع لم يقرأ أي رسالة، فيُجمع القروب بالتمرير كما كان", flush=True)
+                        reset_fast_collect(page, 10 ** 9, 10 ** 9, False, through=True)
+                        opened_name = open_group_for_task(page, pin, group_name, group_wait_s, say_login)
+                        fast = False
+                    elif items:
+                        publish_job(job_id, phase="collect", collected=len(items), requested=len(items),
+                                    message=f"جُمعت {len(items)} تغريدة من آخر الرسائل دون تمرير.")
+                if not fast:
+                    if group_wait_s > 0:
+                        publish_job(job_id, phase="login", message=f"فُتح القروب. انتظار {group_wait_s} ث، مع التحريك للأعلى والأسفل ثم العودة للأسفل…")
+                        sway_group_while_waiting(page, group_wait_s, lambda: job_cancelled(job_id))
+                    items, reached = collect_group_tweets(page, cap, on_progress, stop_id, lambda: job_cancelled(job_id))
                 # Drop tweets by ignored accounts here, before anything is opened: they leave no trace
                 # in the counts or the result, as if the group never carried them.
                 items = [item for item in items if not tweet_is_ignored(str(item.get("url") or ""))]
