@@ -6888,10 +6888,16 @@ def collect_decrypted_messages(page, limit: int, stop_id: str, should_stop, say)
     snap = wait_fast_decrypt(page, should_stop, 1)
     events = int(snap.get("events") or 0)
     opened = int(snap.get("opens") or 0)
-    print(f"جمع سريع: رسائل={events} فك={opened} دفعات={snap.get('batches') or []} روابط={len(snap.get('urls') or [])} "
+    urls_now = len(snap.get("urls") or [])
+    print(f"جمع سريع: رسائل={events} فك={opened} دفعات={snap.get('batches') or []} روابط={urls_now} "
           f"الربط={snap.get('wrapped') or 'لم يتم'}", flush=True)
     dump_fast_log(page, "بعد أول طلب")
-    if not opened:
+    # The fast path worked only if the group's messages actually passed through the page (a GetConversationPageQuery
+    # response was read, or tweet links were found). On some X builds the messages are fetched and decrypted in a
+    # background worker the page cannot see (events=0, no links): then this is not used, and the group is collected
+    # by scrolling, as before.
+    if events <= 0 and urls_now == 0:
+        print("✗ جمع سريع: لم تمر رسائل القروب عبر الصفحة (يفكّها X في خيط خلفي)، فيُجمع بالتمرير", flush=True)
         return [], False, "", False
     tweets, reached = tweets_from_messages(snap.get("seq") or [], stop_id, limit)
     if stop_id and not reached and events < FAST_COLLECT_MAX:
