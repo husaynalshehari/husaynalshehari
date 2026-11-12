@@ -236,6 +236,21 @@ def record_comment(code_id: str, account: str, name: str) -> None:
         write_private_json(USAGE_PATH, usage)
 
 
+def reset_usage(code_id: str) -> None:
+    """تصفير تكلفة رمز واحد."""
+    with LOCK:
+        usage = load_usage()
+        if code_id in usage:
+            usage.pop(code_id, None)
+            write_private_json(USAGE_PATH, usage)
+
+
+def reset_all_usage() -> None:
+    """تصفير كل التكاليف."""
+    with LOCK:
+        write_private_json(USAGE_PATH, {})
+
+
 def usage_of(code_id: str) -> dict:
     row = load_usage().get(code_id) or {"total": 0, "accounts": {}}
     accounts = sorted(
@@ -707,6 +722,7 @@ button.gray{background:#475569}button.red{background:#b91c1c}input,select{paddin
 <div class="card"><h2>رموز الدخول</h2>
 <form class="row" method="post" action="/{{admin}}/code/new" style="margin-bottom:6px">
 <input name="label" placeholder="اسم المستخدم (اختياري)" style="flex:1;min-width:160px"><button>+ رمز جديد</button></form>
+{% if codes %}<form method="post" action="/{{admin}}/reset-cost-all" onsubmit="return confirm('تصفير كل التكاليف لكل الرموز؟')" style="margin-bottom:10px"><button class="gray">تصفير كل التكاليف</button></form>{% endif %}
 {% for c in codes %}
 <div class="code-card">
   <div class="row" style="justify-content:space-between">
@@ -723,6 +739,7 @@ button.gray{background:#475569}button.red{background:#b91c1c}input,select{paddin
   <div class="row" style="margin-top:10px">
     <form method="post" action="/{{admin}}/code/toggle"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">{{c.active and 'إيقاف' or 'تشغيل'}}</button></form>
     {% if c.bound_device %}<form method="post" action="/{{admin}}/code/release" onsubmit="return confirm('تحرير الرمز من جهازه الحالي؟ يقدر يُفعّل على جوال آخر.')"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">تحرير الجهاز</button></form>{% endif %}
+    {% if c.usage.total %}<form method="post" action="/{{admin}}/code/reset-cost" onsubmit="return confirm('تصفير تكلفة هذا الرمز؟')"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">تصفير التكلفة</button></form>{% endif %}
     <form method="post" action="/{{admin}}/code/delete" onsubmit="return confirm('حذف الرمز نهائيًا؟')"><input type="hidden" name="id" value="{{c.id}}"><button class="red">حذف</button></form>
   </div>
 </div>{% endfor %}
@@ -823,6 +840,22 @@ def code_release():
             if row.get("id") == code_id:
                 row["bound_device"] = ""
         save_codes(codes)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/code/reset-cost")
+def code_reset_cost():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    reset_usage(request.form.get("id"))
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/reset-cost-all")
+def reset_cost_all():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    reset_all_usage()
     return redirect(f"/{ADMIN}")
 
 
