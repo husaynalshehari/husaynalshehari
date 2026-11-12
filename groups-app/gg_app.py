@@ -6547,6 +6547,7 @@ FAST_COLLECT_JS = r"""
   globalThis.__batches = [];
   globalThis.__opens = 0;
   globalThis.__urls = [];
+  globalThis.__seq = [];
   globalThis.__wrapped = "";
   const EMPTY = '{"data":{"get_conversation_page":{"encoded_message_events":[],"has_more":false}}}';
   const withLimit = (url, limit) => String(url)
@@ -6591,7 +6592,10 @@ FAST_COLLECT_JS = r"""
           let text = "";
           for (let i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
           const found = text.match(/https?:\/\/(?:x|twitter)\.com\/[A-Za-z0-9_]+\/status\/\d{10,}/g) || [];
-          for (const url of found) (globalThis.__urls || (globalThis.__urls = [])).push(url.split("?")[0]);
+          for (const url of found) {
+            (globalThis.__urls || (globalThis.__urls = [])).push(url.split("?")[0]);
+            (globalThis.__seq || (globalThis.__seq = [])).push([globalThis.__opens, url.split("?")[0]]);
+          }
         }
       } catch (error) {}
       return rc;
@@ -6694,6 +6698,7 @@ def reset_fast_collect(page, cap: int, limit: int, hold: bool, through: bool = F
           globalThis.__batches = [];
           globalThis.__opens = 0;
           globalThis.__urls = [];
+          globalThis.__seq = [];
         }""",
         {"cap": cap, "limit": limit, "hold": hold, "through": through},
     )
@@ -6707,6 +6712,7 @@ def fast_snapshot(page) -> dict:
               events: globalThis.__msgEvents || 0,
               batches: globalThis.__batches || [],
               urls: globalThis.__urls || [],
+              seq: globalThis.__seq || [],
               wrapped: globalThis.__wrapped || ""
             })"""
         ) or {}
@@ -6742,32 +6748,51 @@ def wait_fast_decrypt(page, should_stop, min_events: int) -> dict:
     return snap
 
 
-def tweets_from_urls(urls, stop_id: str, limit: int) -> tuple[list[dict], bool]:
-    """The tweets of the links read from the messages, newest first: down to the stop tweet, or the number asked."""
-    seen: set[str] = set()
-    ids: list[str] = []
-    raw_by_id: dict[str, str] = {}
-    for raw in urls or []:
-        match = re.search(r"status/(\d{6,25})", str(raw))
-        if not match:
+def oldest_first(numbers: list[int]) -> bool:
+    """Whether a batch of messages came oldest first: most of the tweets they carry are newer than the one before
+    (a tweet shared in a group is mostly newer than those shared before it, not always)."""
+    up = sum(1 for a, b in zip(numbers, numbers[1:]) if b > a)
+    down = sum(1 for a, b in zip(numbers, numbers[1:]) if b < a)
+    return up > down
+
+
+def tweets_from_messages(seq, stop_id: str, limit: int, boundary: int = 0) -> tuple[list[dict], bool]:
+    """The tweets of the links read from the messages, in the group's order, newest first: from the newest message
+    down to the one with the stop tweet (that one included), or the number asked. seq: [decryption number, link],
+    as decrypted; boundary: the decryption number where the second (older) batch begins, 0 when there is one.
+    (A tweet's own number does not tell where it was shared: an old tweet shared today is a message of today.)"""
+    batches: list[list[tuple[int, str]]] = [[], []]
+    for row in seq or []:
+        try:
+            number, raw = int(row[0]), str(row[1])
+        except (TypeError, ValueError, IndexError):
             continue
-        status_id = match.group(1)
+        match = re.search(r"status/(\d{6,25})", raw)
+        if match:
+            batches[1 if boundary and number > boundary else 0].append((match.group(1), raw))
+    ordered: list[tuple[str, str]] = []
+    for batch in batches:
+        if oldest_first([int(status_id) for status_id, _ in batch]):
+            batch = list(reversed(batch))
+        ordered.extend(batch)
+    seen: set[str] = set()
+    picked: list[tuple[str, str]] = []
+    reached = not stop_id
+    for status_id, raw in ordered:
         if status_id in seen:
             continue
         seen.add(status_id)
-        ids.append(status_id)
-        raw_by_id[status_id] = str(raw)
-    ids.sort(key=int, reverse=True)
-    reached = not stop_id or stop_id in seen
-    if stop_id:
-        if not reached:
-            return [], False
-        ids = [status_id for status_id in ids if int(status_id) >= int(stop_id)]
-    elif limit > 0:
-        ids = ids[:limit]
+        picked.append((status_id, raw))
+        if stop_id and status_id == stop_id:
+            reached = True
+            break
+        if not stop_id and limit > 0 and len(picked) >= limit:
+            break
+    if stop_id and not reached:
+        return [], False
     tweets = []
-    for status_id in ids:
-        url = tweet_url(raw_by_id.get(status_id, ""), status_id)
+    for status_id, raw in picked:
+        url = tweet_url(raw, status_id)
         if tweet_is_ignored(url):
             continue
         tweets.append({"url": url, "text": "تغريدة"})
@@ -6806,10 +6831,11 @@ def collect_decrypted_messages(page, limit: int, stop_id: str, should_stop, say)
           f"الربط={snap.get('wrapped') or 'لم يتم'}", flush=True)
     if not opened:
         return [], False, "", False
-    tweets, reached = tweets_from_urls(snap.get("urls") or [], stop_id, limit)
+    tweets, reached = tweets_from_messages(snap.get("seq") or [], stop_id, limit)
     if stop_id and not reached and events < FAST_COLLECT_MAX:
         say(f"التغريدة ليست ضمن آخر {events} رسالة. المتابعة حتى {FAST_COLLECT_MAX}…")
         before = events
+        boundary = opened
         nudge_older_page(page)
         deadline = time.monotonic() + 25
         while time.monotonic() < deadline:
@@ -6821,7 +6847,7 @@ def collect_decrypted_messages(page, limit: int, stop_id: str, should_stop, say)
         snap = wait_fast_decrypt(page, should_stop, before + 1)
         events = int(snap.get("events") or 0)
         print(f"جمع سريع حتى {FAST_COLLECT_MAX}: رسائل={events} فك={snap.get('opens') or 0}", flush=True)
-        tweets, reached = tweets_from_urls(snap.get("urls") or [], stop_id, limit)
+        tweets, reached = tweets_from_messages(snap.get("seq") or [], stop_id, limit, boundary)
     if not tweets:
         if stop_id and not reached:
             return [], False, f"لم تُوجد التغريدة المحددة ضمن آخر {min(events, FAST_COLLECT_MAX)} رسالة.", True
