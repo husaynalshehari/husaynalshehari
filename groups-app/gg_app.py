@@ -6558,10 +6558,14 @@ FAST_COLLECT_JS = r"""
     try {
       const L = globalThis.__ggLog;
       L.push(Math.round(performance.now()) + " " + ev + (detail === undefined ? "" : " " + detail));
-      if (L.length > 700) L.splice(0, L.length - 700);
+      if (L.length > 4000) L.splice(0, L.length - 4000);
     } catch (error) {}
   };
-  glog("init", "hold=" + globalThis.__hold + " cap=" + globalThis.__msgCap + " limit=" + globalThis.__msgLimit + " pass=" + globalThis.__pass);
+  globalThis.__ggGlog = glog;
+  // The lines not yet written to the log (ChatTracer takes them every 2 s; dump_fast_log takes what is left).
+  globalThis.__ggDrain = () => { const L = globalThis.__ggLog || []; globalThis.__ggLog = []; return L; };
+  glog("init", "hold=" + globalThis.__hold + " cap=" + globalThis.__msgCap + " limit=" + globalThis.__msgLimit + " pass=" + globalThis.__pass
+       + " path=" + String(location.pathname).replace(/\d{5,}/g, "#").slice(0, 60) + " vis=" + document.visibilityState);
   const limitIn = (url) => { const m = String(url).match(/conversation_event_limit(?:%22(?:%3A|:)|":)(\d+)/); return m ? m[1] : "?"; };
   const EMPTY = '{"data":{"get_conversation_page":{"encoded_message_events":[],"has_more":false}}}';
   const withLimit = (url, limit) => String(url)
@@ -6595,11 +6599,83 @@ FAST_COLLECT_JS = r"""
     globalThis.__inflight = false;
     glog("note", (ok ? "events=" + count : "parse-fail len=" + (raw ? raw.length : 0)) + " total=" + globalThis.__msgEvents);
   };
+  // Every other function of libsodium that opens or decrypts something is counted too (which one X uses for the
+  // group's messages, and whether what comes out holds tweet links): the links found this way are only counted and
+  // kept apart (__otherUrls), the collecting itself still reads crypto_secretbox_open_easy only.
+  globalThis.__ggFns = {};
+  globalThis.__otherUrls = [];
+  const LINK = /https?:\/\/(?:x|twitter)\.com\/[A-Za-z0-9_]+\/status\/\d{10,}/g;
+  const heapText = (Hz, ptr, length) => {
+    if (!Hz.HEAPU8 || !(length > 0) || length > 200000) return null;
+    const bytes = Hz.HEAPU8.subarray(ptr >>> 0, (ptr >>> 0) + length);
+    let text = "";
+    for (let i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
+    return text;
+  };
+  const heapU32 = (Hz, ptr) => { try { return new DataView(Hz.HEAPU8.buffer).getUint32(ptr >>> 0, true); } catch (error) { return -1; } };
+  // Where each one writes what it opened, and how long it is (Emscripten's arguments, 64-bit lengths as their low half).
+  const OUT = {
+    _crypto_box_open_easy: (a) => [a[0], (a[2] | 0) - 16],
+    _crypto_box_open_easy_afternm: (a) => [a[0], (a[2] | 0) - 16],
+    _crypto_box_seal_open: (a) => [a[0], (a[2] | 0) - 48],
+    _crypto_secretbox_open_detached: (a) => [a[0], a[3] | 0],
+    _crypto_box_open_detached: (a) => [a[0], a[3] | 0],
+    _crypto_stream_xchacha20_xor: (a) => [a[0], a[2] | 0],
+    _crypto_stream_chacha20_xor: (a) => [a[0], a[2] | 0],
+    _crypto_stream_chacha20_ietf_xor: (a) => [a[0], a[2] | 0],
+  };
+  const OUT_BY_POINTER = {   // (the length is written at a pointer)
+    _crypto_aead_xchacha20poly1305_ietf_decrypt: [0, 1],
+    _crypto_aead_chacha20poly1305_ietf_decrypt: [0, 1],
+    _crypto_aead_chacha20poly1305_decrypt: [0, 1],
+    _crypto_aead_aes256gcm_decrypt: [0, 1],
+    _crypto_secretstream_xchacha20poly1305_pull: [1, 2],
+  };
+  const wrapOthers = (Hz, how) => {
+    let names = [];
+    try { names = Object.keys(Hz).filter((name) => /^_crypto_/.test(name) && /open|decrypt|pull|_xor/.test(name) && name !== "_crypto_secretbox_open_easy"); } catch (error) {}
+    glog("sodium-fns", how + " " + names.length + ": " + names.join(",").slice(0, 600));
+    for (const name of names) {
+      const orig = Hz[name];
+      if (typeof orig !== "function" || orig.__ggWrapped) continue;
+      const wrapped = function () {
+        const rc = orig.apply(this, arguments);
+        try {
+          const s = globalThis.__ggFns[name] || (globalThis.__ggFns[name] = {calls: 0, ok: 0, withUrl: 0, urls: 0});
+          s.calls++;
+          const good = rc === 0 || rc === 0n;
+          if (good) s.ok++;
+          let spot = null;
+          if (OUT[name]) spot = OUT[name](arguments);
+          else if (OUT_BY_POINTER[name]) { const p = OUT_BY_POINTER[name]; spot = [arguments[p[0]], heapU32(Hz, arguments[p[1]])]; }
+          let detail = "rc=" + String(rc);
+          if (good && spot) {
+            const text = heapText(Hz, spot[0], spot[1]);
+            if (text !== null) {
+              const found = text.match(LINK) || [];
+              detail += " len=" + text.length + " status/=" + (text.indexOf("status/") >= 0) + " urls=" + found.length;
+              if (found.length) {
+                s.withUrl++;
+                s.urls += found.length;
+                for (const url of found) globalThis.__otherUrls.push(url.split("?")[0]);
+              }
+            } else detail += " len=?" + spot[1];
+          }
+          if (s.calls <= 6) glog("fn " + name.replace(/^_crypto_/, ""), detail);
+        } catch (error) {}
+        return rc;
+      };
+      wrapped.__ggWrapped = true;
+      try { Hz[name] = wrapped; } catch (error) { glog("fn-wrap-fail", name); }
+    }
+  };
   globalThis.__wrapSodium = (Hz, how) => {
     globalThis.__ggStats.wrapCalls++;
     const fn = Hz && Hz._crypto_secretbox_open_easy;
     const hasHeap = !!(Hz && Hz.HEAPU8);
     glog("wrap-call", (how || "?") + " fn=" + typeof fn + " heap=" + hasHeap + " done=" + (Hz && Hz.__wrapped ? "yes" : "no"));
+    if (!Hz) return;
+    if (!Hz.__ggOthers) { try { Hz.__ggOthers = true; wrapOthers(Hz, how || "patched"); } catch (error) {} }
     if (typeof fn !== "function" || Hz.__wrapped) return;
     Hz.__wrapped = true;
     globalThis.__wrapped = how || "patched";
@@ -6616,9 +6692,9 @@ FAST_COLLECT_JS = r"""
           for (let i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
           globalThis.__ggStats.decTextOk++;
           const found = text.match(/https?:\/\/(?:x|twitter)\.com\/[A-Za-z0-9_]+\/status\/\d{10,}/g) || [];
-          if (globalThis.__ggStats.probed < 4) {
+          if (globalThis.__ggStats.probed < 12 || globalThis.__ggStats.decrypts % 50 === 0) {
             globalThis.__ggStats.probed++;
-            glog("decrypt", "len=" + text.length + " status/=" + (text.indexOf("status/") >= 0) + " x.com=" + (text.indexOf("x.com") >= 0) + " urls=" + found.length);
+            glog("decrypt", "#" + globalThis.__ggStats.decrypts + " len=" + text.length + " status/=" + (text.indexOf("status/") >= 0) + " x.com=" + (text.indexOf("x.com") >= 0) + " urls=" + found.length);
           }
           if (found.length) {
             globalThis.__ggStats.decWithUrl++;
@@ -6652,25 +6728,65 @@ FAST_COLLECT_JS = r"""
     if (input && typeof input.url === "string") return input.url;
     return "";
   };
+  // Every call the page makes (fetch and XHR), each with what it asks for (the GraphQL operation and the names of
+  // its variables, with their numbers), its answer's status, size and time. Pictures and videos are left out.
+  let netId = 0;
+  const kindOf = (u) => {
+    try {
+      const x = new URL(u, location.href);
+      const op = x.pathname.match(/\/graphql\/[^/]+\/([A-Za-z0-9_]+)/);
+      if (op) return op[1];
+      return (x.host === location.host ? "" : x.host) + x.pathname.replace(/\d{5,}/g, "#").slice(0, 70);
+    } catch (error) { return String(u).slice(0, 40); }
+  };
+  const varsOf = (u) => {
+    try {
+      const x = new URL(u, location.href);
+      const v = JSON.parse(x.searchParams.get("variables") || "{}");
+      return Object.keys(v).map((k) => k + (typeof v[k] === "number" || typeof v[k] === "boolean" ? "=" + v[k]
+        : typeof v[k] === "string" ? ":s" + v[k].length : ":" + (v[k] === null ? "null" : Array.isArray(v[k]) ? "a" + v[k].length : typeof v[k]))).join(",").slice(0, 220);
+    } catch (error) { return "?"; }
+  };
+  const isMedia = (k) => /^(pbs|video|abs|ton|abs-0)\.twimg\.com/.test(k) || /\.(jpe?g|png|gif|webp|mp4|m3u8|m4s|ts|woff2?|css|svg)$/i.test(k);
+  const traceFetch = (id, kind, started, promise) => promise.then((response) => {
+    try {
+      const len = response.headers.get("content-length");
+      glog("f<-", "#" + id + " " + kind + " " + response.status + " len=" + (len === null ? "?" : len) + " " + Math.round(performance.now() - started) + "ms"
+           + (response.type && response.type !== "basic" ? " " + response.type : ""));
+    } catch (error) {}
+    return response;
+  }, (error) => { glog("f-x", "#" + id + " " + kind + " " + String(error).slice(0, 90)); throw error; });
   const origFetch = window.fetch;
   if (typeof origFetch === "function") {
     window.fetch = function (input, init) {
       const url = urlOf(input);
-      if (url.indexOf("GetConversationPageQuery") < 0) return origFetch.apply(this, arguments);
+      const kind = kindOf(url);
+      const media = isMedia(kind);
+      const id = ++netId;
+      const started = performance.now();
+      if (!media) {
+        let method = "GET";
+        try { method = String((init && init.method) || (input && input.method) || "GET"); } catch (error) {}
+        glog("f->", "#" + id + " " + method + " " + kind + (url.indexOf("/graphql/") >= 0 ? " vars{" + varsOf(url) + "}" : ""));
+      }
+      if (url.indexOf("GetConversationPageQuery") < 0) {
+        const answer = origFetch.apply(this, arguments);
+        return media ? answer : traceFetch(id, kind, started, answer);
+      }
       globalThis.__ggStats.pageFetch++;
-      if (globalThis.__pass) { globalThis.__ggStats.passed++; glog("fetch-page", "pass limit=" + limitIn(url)); return origFetch.apply(this, arguments); }
+      if (globalThis.__pass) { globalThis.__ggStats.passed++; glog("fetch-page", "pass limit=" + limitIn(url)); return traceFetch(id, kind, started, origFetch.apply(this, arguments)); }
       const next = globalThis.__takePage(url);
       if (!next) { globalThis.__ggStats.blocked++; glog("fetch-page", "blocked"); return Promise.resolve(new Response(EMPTY, {status: 200, headers: {"content-type": "application/json"}})); }
       globalThis.__ggStats.modified++;
       glog("fetch-page", "was=" + limitIn(url) + " now=" + limitIn(next));
-      return origFetch.call(this, next, init).then((response) => {
+      return traceFetch(id, kind, started, origFetch.call(this, next, init).then((response) => {
         response.clone().text().then(note).catch(() => { globalThis.__inflight = false; });
         return response;
       }, (error) => {
         globalThis.__inflight = false;
         glog("fetch-page", "error " + error);
         throw error;
-      });
+      }));
     };
   }
   const origOpen = XMLHttpRequest.prototype.open;
@@ -6679,6 +6795,11 @@ FAST_COLLECT_JS = r"""
     const raw = String(url || "");
     this.__ggBlock = false;
     this.__ggCount = false;
+    try {
+      const kind = kindOf(raw);
+      this.__ggTrace = isMedia(kind) ? null : {id: ++netId, kind: kind, started: 0};
+      if (this.__ggTrace) glog("x->", "#" + this.__ggTrace.id + " " + String(method) + " " + kind + (raw.indexOf("/graphql/") >= 0 ? " vars{" + varsOf(raw) + "}" : ""));
+    } catch (error) { this.__ggTrace = null; }
     if (raw.indexOf("GetConversationPageQuery") >= 0) {
       globalThis.__ggStats.pageXhr++;
       if (globalThis.__pass) { globalThis.__ggStats.passed++; glog("xhr-page", "pass limit=" + limitIn(raw)); }
@@ -6706,8 +6827,278 @@ FAST_COLLECT_JS = r"""
       return;
     }
     if (this.__ggCount) this.addEventListener("load", () => note(String(this.responseText || "")));
+    const trace = this.__ggTrace;
+    if (trace) {
+      trace.started = performance.now();
+      const xhr = this;
+      this.addEventListener("loadend", () => {
+        try {
+          let size = "?";
+          if (xhr.responseType === "" || xhr.responseType === "text") size = String((xhr.responseText || "").length);
+          else if (xhr.response && xhr.response.byteLength !== undefined) size = String(xhr.response.byteLength);
+          glog("x<-", "#" + trace.id + " " + trace.kind + " " + xhr.status + " len=" + size + " " + Math.round(performance.now() - trace.started) + "ms");
+        } catch (error) {}
+      });
+    }
     return origSend.apply(this, arguments);
   };
+""" + r"""
+  // ---- Everything else the chat could use, each noted where it happens (shapes and counts, never content).
+  // The shape of a value: its type, its keys (names only), lengths and sizes.
+  const shapeOf = (v, depth) => {
+    try {
+      if (v === null) return "null";
+      if (v === undefined) return "undef";
+      const t = typeof v;
+      if (t === "string") return "s" + v.length;
+      if (t === "number" || t === "boolean" || t === "bigint") return t[0];
+      if (t === "function") return "fn";
+      if (v instanceof ArrayBuffer) return "ab" + v.byteLength;
+      if (ArrayBuffer.isView(v)) return (v.constructor && v.constructor.name || "view").slice(0, 6) + v.byteLength;
+      if (typeof Blob !== "undefined" && v instanceof Blob) return "blob" + v.size;
+      if (typeof MessagePort !== "undefined" && v instanceof MessagePort) return "port";
+      if (Array.isArray(v)) return "[" + v.length + (v.length && depth > 0 ? ":" + shapeOf(v[0], depth - 1) : "") + "]";
+      const keys = Object.keys(v);
+      if (depth <= 0) return "{" + keys.length + "}";
+      return "{" + keys.slice(0, 10).map((k) => k.slice(0, 18) + ":" + shapeOf(v[k], depth - 1)).join(",") + (keys.length > 10 ? ",+" + (keys.length - 10) : "") + "}";
+    } catch (error) { return "?"; }
+  };
+  const short = (u) => {
+    try {
+      const s = String(u);
+      if (s.startsWith("blob:") || s.startsWith("data:")) return s.slice(0, 5) + "(" + s.length + ")";
+      const x = new URL(s, location.href);
+      return (x.host === location.host ? "" : x.host) + x.pathname.replace(/\d{5,}/g, "#").slice(-70);
+    } catch (error) { return "?"; }
+  };
+  const counts = globalThis.__ggCounts = {};
+  const tally = (key, limit) => { counts[key] = (counts[key] || 0) + 1; return counts[key] <= limit || counts[key] % 100 === 0; };
+  // Background workers: each one made, and what goes to it and comes back.
+  const watchWorker = (w, label) => {
+    try {
+      const post = w.postMessage;
+      w.postMessage = function (data, more) {
+        try {
+          if (tally("to " + label, 25)) glog("to-" + label, "#" + counts["to " + label] + " " + shapeOf(data, 2) + (more ? " transfer=" + (Array.isArray(more) ? more.length : shapeOf(more, 1)) : ""));
+        } catch (error) {}
+        return post.apply(this, arguments);
+      };
+      w.addEventListener("message", (event) => {
+        try { if (tally("from " + label, 25)) glog("from-" + label, "#" + counts["from " + label] + " " + shapeOf(event.data, 2) + (event.ports && event.ports.length ? " ports=" + event.ports.length : "")); } catch (error) {}
+      });
+      w.addEventListener("error", (event) => { try { glog("err-" + label, String(event.message || "").slice(0, 120) + " " + short(event.filename || "") + ":" + (event.lineno || 0)); } catch (error) {} });
+      w.addEventListener("messageerror", () => glog("msgerr-" + label));
+    } catch (error) {}
+  };
+  let workerN = 0;
+  for (const name of ["Worker", "SharedWorker"]) {
+    const Original = globalThis[name];
+    if (typeof Original !== "function") continue;
+    try {
+      globalThis[name] = new Proxy(Original, {
+        construct(target, args, newTarget) {
+          const made = Reflect.construct(target, args, newTarget);
+          try {
+            const label = (name === "Worker" ? "w" : "sw") + (++workerN);
+            glog("new-" + name, label + " " + short(args[0]) + " opts=" + shapeOf(args[1], 1) + (args[1] && args[1].type ? " type=" + args[1].type : "") + (args[1] && args[1].name ? " name=" + String(args[1].name).slice(0, 30) : ""));
+            if (name === "Worker") watchWorker(made, label);
+            else if (made.port) { glog("sw-port", label); }
+          } catch (error) {}
+          return made;
+        }
+      });
+    } catch (error) { glog("wrap-fail", name); }
+  }
+  // Message channels and broadcast channels.
+  try {
+    const portPost = MessagePort.prototype.postMessage;
+    MessagePort.prototype.postMessage = function (data) {
+      try { if (tally("port", 15)) glog("port-post", "#" + counts.port + " " + shapeOf(data, 2)); } catch (error) {}
+      return portPost.apply(this, arguments);
+    };
+  } catch (error) {}
+  // (the channel the workers' own trace comes back by, see BrowserHost: made before BroadcastChannel is watched)
+  try {
+    const back = new BroadcastChannel("gg-trace");
+    back.onmessage = (event) => {
+      try {
+        const d = event.data || {};
+        glog("W " + String(d.e || "?"), String(d.d || "") + (d.t !== undefined ? " (w@" + d.t + ")" : ""));
+        if (d.urls && d.urls.length) for (const url of d.urls) (globalThis.__workerUrls || (globalThis.__workerUrls = [])).push(String(url));
+      } catch (error) {}
+    };
+  } catch (error) {}
+  try {
+    const OriginalBC = globalThis.BroadcastChannel;
+    globalThis.BroadcastChannel = new Proxy(OriginalBC, {
+      construct(target, args, newTarget) {
+        const made = Reflect.construct(target, args, newTarget);
+        try {
+          const name = String(args[0]).slice(0, 40);
+          glog("new-BroadcastChannel", name);
+          const post = made.postMessage;
+          made.postMessage = function (data) {
+            try { if (tally("bc " + name, 10)) glog("bc-post", name + " #" + counts["bc " + name] + " " + shapeOf(data, 2)); } catch (error) {}
+            return post.apply(this, arguments);
+          };
+          made.addEventListener("message", (event) => { try { if (tally("bc-in " + name, 10)) glog("bc-in", name + " " + shapeOf(event.data, 2)); } catch (error) {} });
+        } catch (error) {}
+        return made;
+      }
+    });
+  } catch (error) {}
+  // Direct connections (WebSocket, EventSource).
+  try {
+    const OriginalWS = globalThis.WebSocket;
+    let wsN = 0;
+    globalThis.WebSocket = new Proxy(OriginalWS, {
+      construct(target, args, newTarget) {
+        const made = Reflect.construct(target, args, newTarget);
+        try {
+          const label = "ws" + (++wsN);
+          glog("new-WebSocket", label + " " + short(args[0]));
+          const send = made.send;
+          made.send = function (data) {
+            try { if (tally("send " + label, 15)) glog("ws-send", label + " " + shapeOf(data, 1)); } catch (error) {}
+            return send.apply(this, arguments);
+          };
+          made.addEventListener("open", () => glog("ws-open", label));
+          made.addEventListener("close", (event) => glog("ws-close", label + " code=" + event.code));
+          made.addEventListener("error", () => glog("ws-error", label));
+          made.addEventListener("message", (event) => { try { if (tally("recv " + label, 15)) glog("ws-recv", label + " " + shapeOf(event.data, 1)); } catch (error) {} });
+        } catch (error) {}
+        return made;
+      }
+    });
+  } catch (error) {}
+  try {
+    const OriginalES = globalThis.EventSource;
+    if (typeof OriginalES === "function") {
+      globalThis.EventSource = new Proxy(OriginalES, {
+        construct(target, args, newTarget) { glog("new-EventSource", short(args[0])); return Reflect.construct(target, args, newTarget); }
+      });
+    }
+  } catch (error) {}
+  // The page's own databases (IndexedDB): each one opened, each transaction, and each read and write, with how many
+  // records came back and their shape. The totals by database, store and kind are in __ggIdb.
+  const idb = globalThis.__ggIdb = {};
+  let idbDetail = 0;
+  try {
+    const open = IDBFactory.prototype.open;
+    IDBFactory.prototype.open = function (name, version) {
+      const req = open.apply(this, arguments);
+      try {
+        const started = performance.now();
+        glog("idb-open", String(name).slice(0, 40) + " v=" + (version === undefined ? "-" : version));
+        req.addEventListener("upgradeneeded", (event) => glog("idb-upgrade", String(name).slice(0, 40) + " " + event.oldVersion + "->" + event.newVersion));
+        req.addEventListener("success", () => {
+          try {
+            const db = req.result;
+            glog("idb-opened", String(name).slice(0, 40) + " v=" + db.version + " " + Math.round(performance.now() - started) + "ms stores=" + Array.from(db.objectStoreNames).join("|").slice(0, 300));
+          } catch (error) {}
+        });
+        req.addEventListener("error", () => glog("idb-open-error", String(name).slice(0, 40)));
+        req.addEventListener("blocked", () => glog("idb-blocked", String(name).slice(0, 40)));
+      } catch (error) {}
+      return req;
+    };
+    const del = IDBFactory.prototype.deleteDatabase;
+    IDBFactory.prototype.deleteDatabase = function (name) { glog("idb-delete", String(name).slice(0, 40)); return del.apply(this, arguments); };
+    const transaction = IDBDatabase.prototype.transaction;
+    IDBDatabase.prototype.transaction = function (stores, mode) {
+      try {
+        const key = this.name + " tx " + (mode || "readonly");
+        if (tally(key, 12)) glog("idb-tx", this.name.slice(0, 30) + " " + (mode || "readonly") + " [" + (Array.isArray(stores) ? stores.join("|") : String(stores)).slice(0, 120) + "] #" + counts[key]);
+      } catch (error) {}
+      return transaction.apply(this, arguments);
+    };
+    const nameOf = (target) => {
+      try {
+        if (target instanceof IDBIndex) return target.objectStore.transaction.db.name.slice(0, 30) + "." + target.objectStore.name + "/" + target.name;
+        return target.transaction.db.name.slice(0, 30) + "." + target.name;
+      } catch (error) { return "?"; }
+    };
+    const watchIdb = (proto, ops) => {
+      for (const op of ops) {
+        const orig = proto[op];
+        if (typeof orig !== "function") continue;
+        proto[op] = function () {
+          const req = orig.apply(this, arguments);
+          try {
+            const key = nameOf(this) + " " + op;
+            const sum = idb[key] || (idb[key] = {calls: 0, rows: 0, err: 0, ms: 0});
+            sum.calls++;
+            const detail = idbDetail < 150 && sum.calls <= 4;
+            if (detail) idbDetail++;
+            const written = (op === "put" || op === "add") ? " value=" + shapeOf(arguments[0], 2) : "";
+            const started = performance.now();
+            let first = true;
+            req.addEventListener("success", () => {
+              try {
+                const r = req.result;
+                let rows = 0;
+                let shape = "";
+                if (op === "openCursor" || op === "openKeyCursor") {
+                  if (r) { rows = 1; if (first && detail) shape = op === "openCursor" ? shapeOf(r.value, 2) : "key"; }
+                } else if (op === "count") { rows = 0; shape = "count=" + r; }
+                else if (Array.isArray(r)) { rows = r.length; if (detail) shape = r.length ? shapeOf(r[0], 2) : "[]"; }
+                else if (r !== undefined) { rows = 1; if (detail) shape = shapeOf(r, 2); }
+                sum.rows += rows;
+                if (first) { sum.ms += performance.now() - started; }
+                if (first && detail) glog("idb", key + " rows=" + rows + " " + Math.round(performance.now() - started) + "ms " + shape + written);
+                first = false;
+              } catch (error) {}
+            });
+            req.addEventListener("error", () => { sum.err++; if (sum.err <= 3) glog("idb-err", key); });
+          } catch (error) {}
+          return req;
+        };
+      }
+    };
+    watchIdb(IDBObjectStore.prototype, ["get", "getAll", "getAllKeys", "getKey", "put", "add", "delete", "clear", "count", "openCursor", "openKeyCursor"]);
+    watchIdb(IDBIndex.prototype, ["get", "getAll", "getAllKeys", "getKey", "count", "openCursor", "openKeyCursor"]);
+  } catch (error) { glog("idb-wrap-fail", String(error).slice(0, 80)); }
+  // The Cache API, the service worker, and what the page keeps.
+  try {
+    if (globalThis.caches && caches.open) {
+      const cacheOpen = caches.open.bind(caches);
+      caches.open = function (name) { glog("cache-open", String(name).slice(0, 40)); return cacheOpen(name); };
+    }
+  } catch (error) {}
+  setTimeout(() => {
+    try { if (indexedDB.databases) indexedDB.databases().then((list) => glog("idb-list", list.map((d) => d.name + ":" + d.version).join(" ").slice(0, 400))).catch(() => {}); } catch (error) {}
+    try {
+      if (navigator.serviceWorker) {
+        glog("sw-controller", String(!!navigator.serviceWorker.controller));
+        navigator.serviceWorker.getRegistrations().then((regs) => glog("sw-regs", regs.length + " " + regs.map((r) => short(r.scope)).join(" "))).catch(() => {});
+      }
+    } catch (error) {}
+    try { if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then((e) => glog("storage", "used=" + Math.round((e.usage || 0) / 1024) + "KB " + shapeOf(e.usageDetails || {}, 1))).catch(() => {}); } catch (error) {}
+    try { if (globalThis.caches) caches.keys().then((keys) => glog("caches", keys.length + " " + keys.join("|").slice(0, 200))).catch(() => {}); } catch (error) {}
+    try { glog("storage-keys", "local=" + localStorage.length + " session=" + sessionStorage.length); } catch (error) {}
+  }, 300);
+  // The page's errors, its moves (history), whether it is seen, and when it is frozen or let go.
+  try {
+    addEventListener("error", (event) => {
+      try { glog("page-error", String(event.message || (event.target && event.target.tagName) || "").slice(0, 140) + " " + short(event.filename || (event.target && (event.target.src || event.target.href)) || "") + ":" + (event.lineno || 0)); } catch (error) {}
+    }, true);
+    addEventListener("unhandledrejection", (event) => {
+      try { glog("page-rejection", String(event.reason && (event.reason.stack || event.reason.message) || event.reason).replace(/\s+/g, " ").slice(0, 160)); } catch (error) {}
+    });
+    for (const name of ["pushState", "replaceState"]) {
+      const orig = history[name];
+      history[name] = function (state, title, url) {
+        try { glog("history-" + name, String(url === undefined ? "" : url).replace(/\d{5,}/g, "#").slice(0, 80)); } catch (error) {}
+        return orig.apply(this, arguments);
+      };
+    }
+    addEventListener("popstate", () => glog("popstate", location.pathname.replace(/\d{5,}/g, "#")));
+    document.addEventListener("visibilitychange", () => glog("visibility", document.visibilityState));
+    document.addEventListener("freeze", () => glog("freeze"));
+    document.addEventListener("resume", () => glog("resume"));
+    addEventListener("pagehide", () => glog("pagehide"));
+    addEventListener("pageshow", (event) => glog("pageshow", "persisted=" + event.persisted));
+  } catch (error) {}
 })();
 """
 
