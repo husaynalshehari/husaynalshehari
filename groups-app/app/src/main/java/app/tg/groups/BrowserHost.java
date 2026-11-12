@@ -614,6 +614,7 @@ public final class BrowserHost {
         public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
             String url = String.valueOf(request.getUrl());
             if (url.contains("dm-core-") && url.contains(".js")) {
+                AppLog.add("ملف دردشة X يُطلب: " + url.substring(url.lastIndexOf('/') + 1));
                 byte[] body = patchedChatScript(url);
                 if (body != null) {
                     HashMap<String, String> headers = new HashMap<>();
@@ -714,13 +715,12 @@ public final class BrowserHost {
                 return patchedChatScripts.get(url);
             }
         }
-        byte[] patched = null;
+        byte[] raw;
         try {
             java.net.HttpURLConnection connection = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
             connection.setConnectTimeout(20_000);
             connection.setReadTimeout(40_000);
             connection.setRequestProperty("Accept", "*/*");
-            byte[] raw;
             try (java.io.InputStream input = connection.getInputStream(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
                 byte[] chunk = new byte[65536];
                 for (int count = input.read(chunk); count >= 0; count = input.read(chunk)) {
@@ -730,19 +730,30 @@ public final class BrowserHost {
             } finally {
                 connection.disconnect();
             }
-            // (each byte as one character, and back: the code is not changed anywhere else)
-            String code = new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1);
-            Matcher found = SODIUM_HANDOVER.matcher(code);
-            if (found.find()) {
-                String added = found.group(0) + ",globalThis.__wrapSodium&&globalThis.__wrapSodium(" + found.group(1) + ",\"patched\")";
-                patched = (code.substring(0, found.start()) + added + code.substring(found.end()))
-                    .getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
-                AppLog.add("ملف دردشة X عُدّل لقراءة الرسائل (" + found.group(0) + ")");
-            } else {
-                AppLog.error("لم يوجد في ملف دردشة X موضع تسليم libsodium: الجمع السريع يعتمد على الطريقة الأخرى");
-            }
         } catch (Exception e) {
+            // (a download that failed is not remembered, so the next load tries again)
             AppLog.error("تعذّر تنزيل ملف دردشة X لتعديله: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            return null;
+        }
+        // (each byte as one character, and back: the code is not changed anywhere else)
+        String code = new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1);
+        byte[] patched;
+        Matcher found = SODIUM_HANDOVER.matcher(code);
+        int matches = 0;
+        while (found.find()) {
+            matches++;
+        }
+        found.reset();
+        if (found.find()) {
+            String added = found.group(0) + ",globalThis.__wrapSodium&&globalThis.__wrapSodium(" + found.group(1) + ",\"patched\")";
+            patched = (code.substring(0, found.start()) + added + code.substring(found.end()))
+                .getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            AppLog.add("ملف دردشة X عُدّل لقراءة الرسائل (مطابقات=" + matches + "، حجم=" + (raw.length / 1024) + "KB): " + found.group(0));
+        } else {
+            // Served as it is (from the app, not the WebView cache) so the page's own hook (the .libsodium setter)
+            // still has its chance; the match may simply be spelled differently now.
+            patched = raw;
+            AppLog.error("لم يوجد في ملف دردشة X موضع تسليم libsodium (حجم=" + (raw.length / 1024) + "KB): يُعتمد على الطريقة الأخرى");
         }
         synchronized (patchedChatScripts) {
             patchedChatScripts.put(url, patched);

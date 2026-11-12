@@ -6549,6 +6549,20 @@ FAST_COLLECT_JS = r"""
   globalThis.__urls = [];
   globalThis.__seq = [];
   globalThis.__wrapped = "";
+  // Every step of the fast collecting, for the log. Message text is never logged, only its shape (length, and
+  // whether it holds a status link), so nothing private is written.
+  globalThis.__ggLog = [];
+  globalThis.__ggStats = {pageFetch: 0, pageXhr: 0, modified: 0, blocked: 0, passed: 0, notes: 0, noteFail: 0,
+                          propSet: 0, wrapCalls: 0, decrypts: 0, decTextOk: 0, decWithUrl: 0, urls: 0, probed: 0};
+  const glog = (ev, detail) => {
+    try {
+      const L = globalThis.__ggLog;
+      L.push(Math.round(performance.now()) + " " + ev + (detail === undefined ? "" : " " + detail));
+      if (L.length > 700) L.splice(0, L.length - 700);
+    } catch (error) {}
+  };
+  glog("init", "hold=" + globalThis.__hold + " cap=" + globalThis.__msgCap + " limit=" + globalThis.__msgLimit + " pass=" + globalThis.__pass);
+  const limitIn = (url) => { const m = String(url).match(/conversation_event_limit(?:%22(?:%3A|:)|":)(\d+)/); return m ? m[1] : "?"; };
   const EMPTY = '{"data":{"get_conversation_page":{"encoded_message_events":[],"has_more":false}}}';
   const withLimit = (url, limit) => String(url)
     .replace(/(conversation_event_limit%22%3A)\d+/g, "$1" + limit)
@@ -6568,33 +6582,51 @@ FAST_COLLECT_JS = r"""
   };
   const note = (raw) => {
     let count = 0;
+    let ok = false;
     try {
       const data = JSON.parse(raw);
       const events = data && data.data && data.data.get_conversation_page && data.data.get_conversation_page.encoded_message_events;
       count = (events && events.length) || 0;
+      ok = true;
     } catch (error) {}
+    if (ok) { globalThis.__ggStats.notes++; } else { globalThis.__ggStats.noteFail++; }
     globalThis.__msgEvents = (globalThis.__msgEvents || 0) + count;
     (globalThis.__batches || (globalThis.__batches = [])).push(count);
     globalThis.__inflight = false;
+    glog("note", (ok ? "events=" + count : "parse-fail len=" + (raw ? raw.length : 0)) + " total=" + globalThis.__msgEvents);
   };
   globalThis.__wrapSodium = (Hz, how) => {
+    globalThis.__ggStats.wrapCalls++;
     const fn = Hz && Hz._crypto_secretbox_open_easy;
+    const hasHeap = !!(Hz && Hz.HEAPU8);
+    glog("wrap-call", (how || "?") + " fn=" + typeof fn + " heap=" + hasHeap + " done=" + (Hz && Hz.__wrapped ? "yes" : "no"));
     if (typeof fn !== "function" || Hz.__wrapped) return;
     Hz.__wrapped = true;
     globalThis.__wrapped = how || "patched";
+    glog("wrap-done", how || "patched");
     Hz._crypto_secretbox_open_easy = function (out, cipher, clen) {
       const rc = fn.apply(this, arguments);
       globalThis.__opens = (globalThis.__opens || 0) + 1;
+      globalThis.__ggStats.decrypts++;
       try {
         const length = (clen | 0) - 16;
         if ((rc === 0 || rc === 0n) && Hz.HEAPU8 && length > 0 && length < 200000) {
           const bytes = Hz.HEAPU8.subarray(out | 0, (out | 0) + length);
           let text = "";
           for (let i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
+          globalThis.__ggStats.decTextOk++;
           const found = text.match(/https?:\/\/(?:x|twitter)\.com\/[A-Za-z0-9_]+\/status\/\d{10,}/g) || [];
-          for (const url of found) {
-            (globalThis.__urls || (globalThis.__urls = [])).push(url.split("?")[0]);
-            (globalThis.__seq || (globalThis.__seq = [])).push([globalThis.__opens, url.split("?")[0]]);
+          if (globalThis.__ggStats.probed < 4) {
+            globalThis.__ggStats.probed++;
+            glog("decrypt", "len=" + text.length + " status/=" + (text.indexOf("status/") >= 0) + " x.com=" + (text.indexOf("x.com") >= 0) + " urls=" + found.length);
+          }
+          if (found.length) {
+            globalThis.__ggStats.decWithUrl++;
+            globalThis.__ggStats.urls += found.length;
+            for (const url of found) {
+              (globalThis.__urls || (globalThis.__urls = [])).push(url.split("?")[0]);
+              (globalThis.__seq || (globalThis.__seq = [])).push([globalThis.__opens, url.split("?")[0]]);
+            }
           }
         }
       } catch (error) {}
@@ -6608,10 +6640,13 @@ FAST_COLLECT_JS = r"""
       get() { return undefined; },
       set(value) {
         Object.defineProperty(this, "libsodium", {value, writable: true, configurable: true, enumerable: true});
+        globalThis.__ggStats.propSet++;
+        glog("prop-set", "has-open=" + !!(value && value._crypto_secretbox_open_easy) + " has-heap=" + !!(value && value.HEAPU8));
         try { globalThis.__wrapSodium(value, "property"); } catch (error) {}
       }
     });
-  } catch (error) {}
+    glog("prop-def", "ok");
+  } catch (error) { glog("prop-def", "fail " + error); }
   const urlOf = (input) => {
     if (typeof input === "string") return input;
     if (input && typeof input.url === "string") return input.url;
@@ -6621,14 +6656,19 @@ FAST_COLLECT_JS = r"""
   if (typeof origFetch === "function") {
     window.fetch = function (input, init) {
       const url = urlOf(input);
-      if (url.indexOf("GetConversationPageQuery") < 0 || globalThis.__pass) return origFetch.apply(this, arguments);
+      if (url.indexOf("GetConversationPageQuery") < 0) return origFetch.apply(this, arguments);
+      globalThis.__ggStats.pageFetch++;
+      if (globalThis.__pass) { globalThis.__ggStats.passed++; glog("fetch-page", "pass limit=" + limitIn(url)); return origFetch.apply(this, arguments); }
       const next = globalThis.__takePage(url);
-      if (!next) return Promise.resolve(new Response(EMPTY, {status: 200, headers: {"content-type": "application/json"}}));
+      if (!next) { globalThis.__ggStats.blocked++; glog("fetch-page", "blocked"); return Promise.resolve(new Response(EMPTY, {status: 200, headers: {"content-type": "application/json"}})); }
+      globalThis.__ggStats.modified++;
+      glog("fetch-page", "was=" + limitIn(url) + " now=" + limitIn(next));
       return origFetch.call(this, next, init).then((response) => {
         response.clone().text().then(note).catch(() => { globalThis.__inflight = false; });
         return response;
       }, (error) => {
         globalThis.__inflight = false;
+        glog("fetch-page", "error " + error);
         throw error;
       });
     };
@@ -6639,12 +6679,13 @@ FAST_COLLECT_JS = r"""
     const raw = String(url || "");
     this.__ggBlock = false;
     this.__ggCount = false;
-    if (raw.indexOf("GetConversationPageQuery") >= 0 && !globalThis.__pass) {
-      const next = globalThis.__takePage(raw);
-      if (!next) this.__ggBlock = true;
+    if (raw.indexOf("GetConversationPageQuery") >= 0) {
+      globalThis.__ggStats.pageXhr++;
+      if (globalThis.__pass) { globalThis.__ggStats.passed++; glog("xhr-page", "pass limit=" + limitIn(raw)); }
       else {
-        url = next;
-        this.__ggCount = true;
+        const next = globalThis.__takePage(raw);
+        if (!next) { this.__ggBlock = true; globalThis.__ggStats.blocked++; glog("xhr-page", "blocked"); }
+        else { url = next; this.__ggCount = true; globalThis.__ggStats.modified++; glog("xhr-page", "was=" + limitIn(raw) + " now=" + limitIn(next)); }
       }
     }
     return origOpen.call(this, method, url);
@@ -6820,6 +6861,26 @@ def nudge_older_page(page) -> None:
         pass
 
 
+def dump_fast_log(page, label: str) -> None:
+    """Write the whole step-by-step trace of the fast collecting to the log (counts and structure only, never any
+    message text), so a run that read nothing can be read afterwards."""
+    try:
+        data = page.evaluate(
+            """() => ({
+              stats: globalThis.__ggStats || {},
+              wrapped: globalThis.__wrapped || "",
+              log: (globalThis.__ggLog || []).slice(-220)
+            })"""
+        ) or {}
+    except Exception as exc:
+        print(f"سجل الجمع ({label}): تعذّرت قراءته ({type(exc).__name__})", flush=True)
+        return
+    stats = data.get("stats") or {}
+    print(f"سجل الجمع ({label}): الربط={data.get('wrapped') or 'لم يتم'} · {json.dumps(stats, ensure_ascii=False)}", flush=True)
+    for line in data.get("log") or []:
+        print("  خطوة· " + str(line), flush=True)
+
+
 def collect_decrypted_messages(page, limit: int, stop_id: str, should_stop, say) -> tuple[list[dict], bool, str, bool]:
     """The fast collecting, once the group is open: (tweets, the stop tweet reached, why none, whether anything
     was read this way at all)."""
@@ -6829,6 +6890,7 @@ def collect_decrypted_messages(page, limit: int, stop_id: str, should_stop, say)
     opened = int(snap.get("opens") or 0)
     print(f"جمع سريع: رسائل={events} فك={opened} دفعات={snap.get('batches') or []} روابط={len(snap.get('urls') or [])} "
           f"الربط={snap.get('wrapped') or 'لم يتم'}", flush=True)
+    dump_fast_log(page, "بعد أول طلب")
     if not opened:
         return [], False, "", False
     tweets, reached = tweets_from_messages(snap.get("seq") or [], stop_id, limit)
@@ -6847,6 +6909,7 @@ def collect_decrypted_messages(page, limit: int, stop_id: str, should_stop, say)
         snap = wait_fast_decrypt(page, should_stop, before + 1)
         events = int(snap.get("events") or 0)
         print(f"جمع سريع حتى {FAST_COLLECT_MAX}: رسائل={events} فك={snap.get('opens') or 0}", flush=True)
+        dump_fast_log(page, "بعد الطلب الإضافي")
         tweets, reached = tweets_from_messages(snap.get("seq") or [], stop_id, limit, boundary)
     if not tweets:
         if stop_id and not reached:
