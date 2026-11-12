@@ -1,0 +1,49 @@
+--- a/script_original.py	2026-11-12 23:54:09.177775555 +0000
++++ b/script_original.py	2026-11-12 23:54:09.178862804 +0000
+@@ -1099,7 +1099,10 @@
+   const showGemini = document.getElementById("show-gemini");
+   // A user's copy: the owner sets the Gemini key and model; here they are only shown.
+   const geminiByOwner = {{ (not owner_copy)|tojson }};
+-  editGemini.hidden = geminiByOwner;
++  // وضع خادم التحكّم: المفاتيح على الخادم؛ لا يُطلب مفتاح محلي ولا تُعرض بطاقاته.
++  const controlOn = {{ control_on|tojson }};
++  editGemini.hidden = geminiByOwner || controlOn;
++  if (controlOn && showGemini) showGemini.hidden = true;
+   // The owner's copy: Grok writes its comments when it is the one chosen in «توزيع البرنامج» (as the script says).
+   // (Grok or Claude, chosen in «توزيع البرنامج»: no Gemini key is asked for then.)
+   let commentsByOther = false;
+@@ -1107,7 +1110,7 @@
+   function showCommentsEngine(engine) {
+     commentsByOther = engine === "grok" || engine === "claude";
+     if (!engineNote) return;
+-    engineNote.hidden = !commentsByOther;
++    engineNote.hidden = !commentsByOther || controlOn;
+     if (commentsByOther && engineNote.dataset.text) {
+       engineNote.textContent = engineNote.dataset.text.replace("{engine}", engine === "claude" ? "Claude" : "Grok");
+     }
+@@ -1115,6 +1118,7 @@
+   // A copy with no «توزيع البرنامج»: its own «مفتاح Claude», typed here, writes its comments when saved.
+   const claudeFields = document.getElementById("claude-fields");
+   const showClaude = document.getElementById("show-claude");
++  if (controlOn && showClaude) showClaude.hidden = true;
+   function showOwnClaude(data) {
+     if (!claudeFields) return;
+     const saved = data.claude_key || "";
+@@ -1946,7 +1950,7 @@
+       if (!stopId) { showNotice("الصق رابط التغريدة المحددة أو رقمها.", false); stopField.focus(); return; }
+     }
+     if (!actions.length) { showNotice("اختر إجراءً واحدًا على الأقل.", false); return; }
+-    if (actions.includes("comment") && geminiByOwner) {
++    if (actions.includes("comment") && (geminiByOwner || controlOn)) {
+       // (المفاتيح تأتي من المالك/خادم التحكّم عند التشغيل؛ لا يُطلب مفتاح محلي هنا.)
+     } else if (actions.includes("comment")) {
+       repostButton.disabled = true;          // (not sent twice while it asks)
+@@ -7942,7 +7946,7 @@
+         PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(), max_links=MAX_TWEET_LINKS,
+         claude_here=key_typed_here(), claude_default=CLAUDE_DEFAULT_MODEL,
+         content_ready=content_ready.is_set() or (CONTENT_FILE.is_file() if is_owner_copy() else bool(CONTENT_EMBEDDED)),
+-        tweets_in_content=content_shows_tweets, in_app=IN_APP,
++        tweets_in_content=content_shows_tweets, in_app=IN_APP, control_on=control_configured(),
+     ))
+     return response
+ 
