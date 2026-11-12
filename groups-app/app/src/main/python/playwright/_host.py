@@ -264,6 +264,7 @@ class AndroidBackend(Backend):
         self._router = None
         self._emulated = False
         self._width = 0
+        self._mobile = None
         viewport = options.get("viewport") or DEFAULT_VIEWPORT
         with AndroidBackend._open_lock:
             if AndroidBackend._slots is None:
@@ -327,6 +328,18 @@ class AndroidBackend(Backend):
             seen = [0, 0]
         return [int(seen[0] or 0), int(seen[1] or 0)]
 
+    def _real_mobile(self, page) -> bool:
+        """Whether this is really a phone, read from the browser itself — so that, where the page's height must be
+        set through the browser's own tall-page setting, the browser is still told it is the phone it is, never made
+        to look like a desktop. Read once, then kept."""
+        if self._mobile is None:
+            try:
+                self._mobile = bool(page._run(
+                    "(navigator.userAgentData && navigator.userAgentData.mobile) || /Mobile|Android/i.test(navigator.userAgent)", 10))
+            except Error:
+                self._mobile = True            # the app runs on a phone
+        return self._mobile
+
     def _settle(self, page, height: int) -> bool:
         """Whether the page became this tall (the WebView is laid out a moment after it is asked to)."""
         deadline = time.monotonic() + 4
@@ -347,7 +360,10 @@ class AndroidBackend(Backend):
             self._emulated = True
         if self._emulated:
             try:
-                page._call("Emulation.setDeviceMetricsOverride", {"width": 0, "height": height, "deviceScaleFactor": 0, "mobile": False}, 20)
+                # Only the height is set; the width (0) and the pixel density (0) stay the phone's, and the browser
+                # is told it is the phone it is (never made to look like a desktop).
+                page._call("Emulation.setDeviceMetricsOverride",
+                           {"width": 0, "height": height, "deviceScaleFactor": 0, "mobile": self._real_mobile(page)}, 20)
             except Error as exc:
                 if CLOSED_MESSAGE in str(exc):
                     raise
