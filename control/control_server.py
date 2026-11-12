@@ -672,28 +672,74 @@ def logged_in() -> bool:
 
 LOGIN_PAGE = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>لوحة التحكّم</title>
-<style>body{font:16px/1.6 system-ui,sans-serif;background:#0f172a;color:#e2e8f0;display:grid;place-items:center;height:100vh;margin:0}
-.box{background:#1e293b;padding:28px;border-radius:14px;width:min(92vw,360px);box-shadow:0 10px 40px #0006}
-h1{font-size:20px;margin:0 0 16px}input{width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;margin:6px 0}
-button{width:100%;padding:12px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-weight:700;cursor:pointer;margin-top:8px}
-.err{color:#f87171;min-height:20px;font-size:14px}</style></head><body>
-<form class="box" method="post" action="/{{admin}}/login"><h1>لوحة التحكّم</h1>
-<div class="err">{{error}}</div><input type="password" name="password" placeholder="كلمة مرور المالك" autofocus>
-<button>دخول</button></form></body></html>"""
+<style>
+:root{--surface:#fff;--line:#e6eaf1;--ink:#0f172a;--muted:#64748b;--accent:#4f46e5;--accent2:#6366f1;--danger:#e11d48}
+*{box-sizing:border-box}
+body{font:16px/1.6 "Segoe UI",system-ui,-apple-system,"Noto Sans Arabic",sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:linear-gradient(160deg,#eef2fb,#e3e9f6);color:var(--ink);padding:20px}
+.box{background:var(--surface);padding:34px 28px;border-radius:20px;width:min(92vw,375px);box-shadow:0 24px 60px rgba(15,23,42,.14);border:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:12px;margin-bottom:4px}
+.logo{width:44px;height:44px;border-radius:13px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;color:#fff;font-weight:800;font-size:22px;box-shadow:0 6px 16px rgba(79,70,229,.35)}
+h1{font-size:21px;margin:0}
+.sub{color:var(--muted);font-size:14px;margin:4px 0 22px}
+label{font-size:13px;color:var(--muted);font-weight:700}
+input{width:100%;padding:14px;border-radius:13px;border:1px solid var(--line);background:#f8fafc;color:var(--ink);margin:7px 0 0;font-size:16px}
+input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 4px rgba(79,70,229,.14);background:#fff}
+button{width:100%;padding:14px;border:0;border-radius:13px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-weight:800;cursor:pointer;margin-top:16px;font-size:16px;box-shadow:0 8px 20px rgba(79,70,229,.3)}
+button:hover{filter:brightness(1.06)}
+.err{color:var(--danger);min-height:20px;font-size:14px;margin-top:10px;text-align:center}
+</style></head><body>
+<form class="box" method="post" action="/{{admin}}/login">
+<div class="brand"><div class="logo">ق</div><h1>لوحة التحكّم</h1></div>
+<div class="sub">إدارة رموز الدخول والمفاتيح</div>
+<label>كلمة مرور المالك</label>
+<input type="password" name="password" placeholder="••••••••" autofocus>
+<button>دخول</button>
+<div class="err">{{error}}</div>
+</form></body></html>"""
 
 DASHBOARD = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>لوحة التحكّم</title>
-<style>body{font:16px/1.6 system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:18px}
-.wrap{max-width:860px;margin:0 auto}h1{font-size:22px}h2{font-size:18px;border-bottom:1px solid #334155;padding-bottom:6px;margin-top:28px}
-.card{background:#1e293b;border-radius:14px;padding:16px;margin:14px 0}
-table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #334155;text-align:right;font-size:14px}
-code{background:#0f172a;padding:3px 8px;border-radius:7px;font-size:15px;letter-spacing:1px}
-button,.btn{padding:8px 14px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-weight:700;cursor:pointer;font-size:14px}
-button.gray{background:#475569}button.red{background:#b91c1c}input,select{padding:9px;border-radius:9px;border:1px solid #334155;background:#0f172a;color:#e2e8f0}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.muted{color:#94a3b8;font-size:13px}.on{color:#34d399}.off{color:#f87171}
-.link{word-break:break-all;background:#0f172a;padding:10px;border-radius:9px;font-size:13px}.top{display:flex;justify-content:space-between;align-items:center}
-.code-card{border:1px solid #334155;border-radius:11px;padding:12px;margin:10px 0;background:#0b1424}</style></head>
-<body><div class="wrap"><div class="top"><h1>لوحة التحكّم</h1><a class="btn gray" href="/{{admin}}/logout">خروج</a></div>
+<style>
+:root{--bg1:#eef2fb;--bg2:#e6ebf6;--surface:#fff;--surface2:#f8fafc;--line:#e6eaf1;--ink:#0f172a;--muted:#64748b;
+  --accent:#4f46e5;--accent2:#6366f1;--green:#059669;--green-bg:#d1fae5;--red:#e11d48;--red-bg:#ffe4e6;--chip:#eef2ff}
+*{box-sizing:border-box}
+body{font:16px/1.6 "Segoe UI",system-ui,-apple-system,"Noto Sans Arabic",sans-serif;margin:0;color:var(--ink);
+  background:linear-gradient(170deg,var(--bg1),var(--bg2) 60%);min-height:100vh}
+.wrap{max-width:900px;margin:0 auto;padding:20px 18px 48px}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;color:#fff;font-weight:800;font-size:21px;box-shadow:0 6px 16px rgba(79,70,229,.32)}
+h1{font-size:22px;margin:0}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:20px;margin:16px 0;box-shadow:0 10px 30px rgba(15,23,42,.05)}
+h2{font-size:17px;margin:0 0 4px;display:flex;align-items:center;gap:9px}
+h2::before{content:"";width:5px;height:18px;border-radius:3px;background:linear-gradient(var(--accent),var(--accent2))}
+table{width:100%;border-collapse:collapse;margin-top:10px}
+td,th{padding:9px 10px;border-bottom:1px solid var(--line);text-align:right;font-size:14px}
+th{color:var(--muted);font-weight:700;font-size:12px}
+td{font-variant-numeric:tabular-nums}
+code{background:var(--chip);color:var(--accent);padding:5px 10px;border-radius:8px;font-size:15px;letter-spacing:1px;font-weight:700}
+button,.btn{padding:9px 15px;border:0;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-weight:700;cursor:pointer;font-size:14px;text-decoration:none;display:inline-block;box-shadow:0 4px 12px rgba(79,70,229,.22)}
+button:hover,.btn:hover{filter:brightness(1.05)}
+button.gray,.btn.gray{background:#eef1f7;color:#334155;box-shadow:none;border:1px solid var(--line)}
+button.red{background:var(--red);box-shadow:0 4px 12px rgba(225,29,72,.25)}
+input,select{padding:11px;border-radius:11px;border:1px solid var(--line);background:var(--surface2);color:var(--ink);font-size:14px}
+input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,70,229,.13);background:#fff}
+.row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+.muted{color:var(--muted);font-size:13px}
+.pill{padding:3px 11px;border-radius:999px;font-size:12px;font-weight:700;display:inline-block}
+.pill.on{background:var(--green-bg);color:var(--green)}
+.pill.off{background:var(--red-bg);color:var(--red)}
+.on{color:var(--green)}.off{color:var(--red)}
+.link{word-break:break-all;background:var(--surface2);border:1px dashed var(--line);padding:12px;border-radius:11px;font-size:13px;color:#334155}
+.stats{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.stat{background:var(--surface2);border:1px solid var(--line);border-radius:12px;padding:8px 14px;font-size:13px;color:var(--muted)}
+.stat b{display:block;font-size:19px;color:var(--ink);font-variant-numeric:tabular-nums;margin-top:2px}
+.code-card{border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0;background:var(--surface);box-shadow:0 4px 14px rgba(15,23,42,.04)}
+.ktag{min-width:74px;font-weight:800;color:var(--accent)}
+label.rad{display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--line);padding:8px 13px;border-radius:11px;cursor:pointer;font-size:14px}
+</style></head>
+<body><div class="wrap">
+<div class="bar"><div class="brand"><div class="logo">ق</div><h1>لوحة التحكّم</h1></div><a class="btn gray" href="/{{admin}}/logout">خروج</a></div>
 
 <div class="card"><h2>رابط التطبيق</h2>
 <p class="muted">انسخه كاملًا وضعه في التطبيق (إعداد الخادم). يحمل بصمة شهادة الخادم، فلا يقبل التطبيق خادمًا آخر.</p>
@@ -701,42 +747,42 @@ button.gray{background:#475569}button.red{background:#b91c1c}input,select{paddin
 
 <div class="card"><h2>المفاتيح</h2>
 <p class="muted">المفتاح يبقى على الخادم (مختوم على القرص)، ولا يُرسل للأجهزة. التطبيق يرسل نص التغريدة فيُكتب الرد هنا.</p>
-<form class="row" method="post" action="/{{admin}}/key" style="margin-bottom:10px">
+<form class="row" method="post" action="/{{admin}}/key" style="margin-top:12px">
 <input type="hidden" name="which" value="gemini">
-<b style="width:70px">Gemini</b>
+<b class="ktag">Gemini</b>
 <input name="api_key" placeholder="{{gemini_set and 'مضبوط — الصق مفتاحًا جديدًا للتبديل' or 'الصق مفتاح Gemini'}}" style="flex:1;min-width:180px">
 <input name="model" value="{{gemini_model}}" placeholder="{{gemini_default}}" style="width:160px">
 <button>حفظ</button></form>
-<form class="row" method="post" action="/{{admin}}/key">
+<form class="row" method="post" action="/{{admin}}/key" style="margin-top:10px">
 <input type="hidden" name="which" value="claude">
-<b style="width:70px">Claude</b>
+<b class="ktag">Claude</b>
 <input name="api_key" placeholder="{{claude_set and 'مضبوط — الصق مفتاحًا جديدًا للتبديل' or 'الصق مفتاح Claude (sk-ant-…)'}}" style="flex:1;min-width:180px">
 <input name="model" value="{{claude_model}}" placeholder="{{claude_default}}" style="width:160px">
 <button>حفظ</button></form>
-<form class="row" method="post" action="/{{admin}}/engine" style="margin-top:14px">
+<form class="row" method="post" action="/{{admin}}/engine" style="margin-top:16px">
 <b>الكاتب الآن:</b>
-<label><input type="radio" name="engine" value="gemini" {{engine=='gemini' and 'checked' or ''}}> Gemini {{gemini_set and '✅' or '—'}}</label>
-<label><input type="radio" name="engine" value="claude" {{engine=='claude' and 'checked' or ''}}> Claude {{claude_set and '✅' or '—'}}</label>
+<label class="rad"><input type="radio" name="engine" value="gemini" {{engine=='gemini' and 'checked' or ''}}> Gemini {{gemini_set and '✅' or '—'}}</label>
+<label class="rad"><input type="radio" name="engine" value="claude" {{engine=='claude' and 'checked' or ''}}> Claude {{claude_set and '✅' or '—'}}</label>
 <button>تفعيل</button></form></div>
 
 <div class="card"><h2>رموز الدخول</h2>
-<form class="row" method="post" action="/{{admin}}/code/new" style="margin-bottom:6px">
+<form class="row" method="post" action="/{{admin}}/code/new" style="margin:12px 0 6px">
 <input name="label" placeholder="اسم المستخدم (اختياري)" style="flex:1;min-width:160px"><button>+ رمز جديد</button></form>
-{% if codes %}<form method="post" action="/{{admin}}/reset-cost-all" onsubmit="return confirm('تصفير كل التكاليف لكل الرموز؟')" style="margin-bottom:10px"><button class="gray">تصفير كل التكاليف</button></form>{% endif %}
+{% if codes %}<form method="post" action="/{{admin}}/reset-cost-all" onsubmit="return confirm('تصفير كل التكاليف لكل الرموز؟')" style="margin-bottom:6px"><button class="gray">تصفير كل التكاليف</button></form>{% endif %}
 {% for c in codes %}
 <div class="code-card">
   <div class="row" style="justify-content:space-between">
-    <div><code>{{c.code}}</code> <b>{{c.label}}</b> <span class="{{c.active and 'on' or 'off'}}">· {{c.active and 'يعمل' or 'موقوف'}}</span></div>
+    <div class="row"><code>{{c.code}}</code> <b>{{c.label}}</b> <span class="pill {{c.active and 'on' or 'off'}}">{{c.active and 'يعمل' or 'موقوف'}}</span></div>
     <div class="muted">آخر دخول {{c.last_seen_text}}</div>
   </div>
-  <div class="row" style="margin-top:8px;gap:16px">
-    <span>الجهاز: {% if c.bound_device %}<span class="on">مربوط بجهاز</span>{% else %}<span class="muted">غير مربوط</span>{% endif %}</span>
-    <span>التعليقات: <b>{{c.usage.total}}</b></span>
-    <span>التكلفة: <b>${{'%.2f'|format(c.usage.cost)}}</b></span>
+  <div class="stats">
+    <div class="stat">الجهاز<b>{% if c.bound_device %}<span class="on">مربوط</span>{% else %}<span class="muted">غير مربوط</span>{% endif %}</b></div>
+    <div class="stat">التعليقات<b>{{c.usage.total}}</b></div>
+    <div class="stat">التكلفة<b>${{'%.2f'|format(c.usage.cost)}}</b></div>
   </div>
-  {% if c.usage.accounts %}<table style="margin-top:8px"><tr><th>حساب X</th><th>تعليقات</th><th>التكلفة</th></tr>
+  {% if c.usage.accounts %}<table><tr><th>حساب X</th><th>تعليقات</th><th>التكلفة</th></tr>
   {% for a in c.usage.accounts %}<tr><td>{{ a.name and ('@' + a.name) or ('#' + a.id[:8]) }}</td><td>{{a.n}}</td><td>${{'%.2f'|format(a.cost)}}</td></tr>{% endfor %}</table>{% endif %}
-  <div class="row" style="margin-top:10px">
+  <div class="row" style="margin-top:12px">
     <form method="post" action="/{{admin}}/code/toggle"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">{{c.active and 'إيقاف' or 'تشغيل'}}</button></form>
     {% if c.bound_device %}<form method="post" action="/{{admin}}/code/release" onsubmit="return confirm('تحرير الرمز من جهازه الحالي؟ يقدر يُفعّل على جوال آخر.')"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">تحرير الجهاز</button></form>{% endif %}
     {% if c.usage.total %}<form method="post" action="/{{admin}}/code/reset-cost" onsubmit="return confirm('تصفير تكلفة هذا الرمز؟')"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">تصفير التكلفة</button></form>{% endif %}
