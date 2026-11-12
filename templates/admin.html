@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}لوحة التحكم — {{ app_name }}{% endblock %}
+{% block content %}
+
+{% if new_invite %}
+<section class="card card-invite">
+  <div class="invite-head">
+    <h2>رمز الدعوة لـ «{{ new_invite.username }}»</h2>
+    <span class="muted">يظهر مرة واحدة فقط — انسخه الآن</span>
+  </div>
+
+  <div class="invite-code-row">
+    <code id="invite-code" class="invite-code" dir="ltr">{{ new_invite.code }}</code>
+    <button type="button" class="btn btn-primary" data-copy="invite-code">نسخ الرمز</button>
+  </div>
+
+  <p class="label">رسالة جاهزة للإرسال:</p>
+  <pre id="invite-msg" class="invite-msg">السلام عليكم،
+تمت دعوتك إلى {{ app_name }}.
+
+اسم المستخدم: {{ new_invite.username }}
+رمز الدعوة: {{ new_invite.code }}
+
+سجّل من هذا الرابط واختر كلمة مرور:
+{{ new_invite.link }}
+
+الرمز يُستخدم مرة واحدة وصالح حتى {{ new_invite.expires | localtime }}.</pre>
+  <button type="button" class="btn btn-ghost" data-copy="invite-msg">نسخ الرسالة كاملة</button>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>إضافة مستخدم</h2>
+  <form method="post" action="{{ url_for('admin_create_user') }}" class="form form-row">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label class="field">
+      <span>اسم المستخدم</span>
+      <input name="username" required minlength="3" maxlength="32"
+             autocapitalize="none" spellcheck="false" placeholder="مثال: ahmed">
+    </label>
+    <label class="field">
+      <span>ملاحظة <small class="muted">(اختياري)</small></span>
+      <input name="note" maxlength="200" placeholder="مثال: أحمد — قسم المبيعات">
+    </label>
+    <label class="field field-sm">
+      <span>صلاحية الرمز</span>
+      <select name="days">
+        {% for d, label in [(1, 'يوم'), (3, '3 أيام'), (7, 'أسبوع'), (30, 'شهر')] %}
+          <option value="{{ d }}" {% if d == default_days %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="btn btn-primary">إنشاء وإعطائي الرمز</button>
+  </form>
+</section>
+
+<section class="card">
+  <div class="section-head">
+    <h2>المستخدمون</h2>
+    <span class="muted">{{ users | length }}</span>
+  </div>
+
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>المستخدم</th>
+          <th>الحالة</th>
+          <th>آخر دخول</th>
+          <th>الإجراءات</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for u in users %}
+        {% set is_me = u.id == g.user.id %}
+        <tr>
+          <td>
+            <div class="user-name">
+              {{ u.username }}
+              {% if u.is_admin %}<span class="tag">مدير</span>{% endif %}
+              {% if is_me %}<span class="tag tag-muted">أنت</span>{% endif %}
+            </div>
+            {% if u.note %}<div class="muted small">{{ u.note }}</div>{% endif %}
+          </td>
+          <td>
+            {% if not u.is_active %}
+              <span class="badge badge-off">موقوف</span>
+            {% elif u.password_hash %}
+              <span class="badge badge-ok">مسجّل</span>
+              {% if invite_is_valid(u) %}
+                <div class="muted small">عنده رمز لإعادة تعيين كلمة المرور</div>
+              {% endif %}
+            {% elif invite_is_valid(u) %}
+              <span class="badge badge-wait">بانتظار التسجيل</span>
+              <div class="muted small">الرمز صالح حتى {{ u.invite_expires_at | localtime }}</div>
+            {% else %}
+              <span class="badge badge-off">الرمز منتهي</span>
+              <div class="muted small">أنشئ له رمزاً جديداً</div>
+            {% endif %}
+          </td>
+          <td class="small">{{ u.last_login_at | localtime }}</td>
+          <td>
+            {% if not is_me %}
+            <div class="actions">
+              <form method="post" action="{{ url_for('admin_new_invite', user_id=u.id) }}"
+                    {% if invite_is_valid(u) %}data-confirm="الرمز الحالي لـ {{ u.username }} سيتوقف. متأكد؟"{% endif %}>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="days" value="{{ default_days }}">
+                <button type="submit" class="btn btn-sm">
+                  {% if u.password_hash %}رمز لإعادة تعيين كلمة المرور{% else %}رمز جديد{% endif %}
+                </button>
+              </form>
+              {% if u.invite_hash %}
+              <form method="post" action="{{ url_for('admin_cancel_invite', user_id=u.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-sm">إلغاء الرمز</button>
+              </form>
+              {% endif %}
+              <form method="post" action="{{ url_for('admin_toggle_user', user_id=u.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-sm">{% if u.is_active %}إيقاف{% else %}تفعيل{% endif %}</button>
+              </form>
+              <form method="post" action="{{ url_for('admin_delete_user', user_id=u.id) }}"
+                    data-confirm="حذف «{{ u.username }}» نهائياً؟">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-sm btn-danger">حذف</button>
+              </form>
+            </div>
+            {% else %}
+              <span class="muted small">—</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

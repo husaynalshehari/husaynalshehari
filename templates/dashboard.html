@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>أهلاً {{ g.user.username }} 👋</h1>
+  <p class="muted">تم تسجيل دخولك. هذه الصفحة محمية ولا يراها إلا أصحاب الحسابات.</p>
+
+  {# 👇 ضع واجهة تطبيقك هنا #}
+  <div class="placeholder">
+    هنا تظهر واجهة تطبيقك.
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,7 @@
+# قاعدة البيانات ومفتاح الجلسات — لا ترفعها على GitHub أبداً
+instance/
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
