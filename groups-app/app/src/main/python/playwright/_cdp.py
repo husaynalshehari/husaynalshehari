@@ -256,7 +256,9 @@ class Session:
             if listener in table.get(event, []):
                 table[event].remove(listener)
 
-    def send(self, method: str, params: dict | None = None, timeout: float = 30.0) -> dict:
+    def send(self, method: str, params: dict | None = None, timeout: float = 30.0, session_id: str = "") -> dict:
+        """A command, and its answer. session_id: to a target attached under this page (one of its workers, see
+        Target.setAutoAttach with flatten), whose events come with «@» before their name (see on())."""
         if self.closed:
             raise ConnectionClosed(CLOSED_MESSAGE)
         slot = {"done": threading.Event(), "result": None, "error": None}
@@ -264,8 +266,11 @@ class Session:
             self._ids += 1
             number = self._ids
             self._waiting[number] = slot
+        message = {"id": number, "method": method, "params": params or {}}
+        if session_id:
+            message["sessionId"] = session_id
         try:
-            self._socket.send(json.dumps({"id": number, "method": method, "params": params or {}}))
+            self._socket.send(json.dumps(message))
         except (OSError, ConnectionClosed, Exception) as exc:
             with self._lock:
                 self._waiting.pop(number, None)
@@ -322,6 +327,10 @@ class Session:
             if not method:
                 continue
             params = message.get("params") or {}
+            if message.get("sessionId"):
+                # (an attached worker's event: kept apart from the page's own, under «@» + its name)
+                method = "@" + method
+                params = dict(params, sessionId=message["sessionId"])
             for listener in list(self._quick.get(method, ())):
                 try:
                     listener(params)

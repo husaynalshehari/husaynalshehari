@@ -26,9 +26,9 @@ import java.util.Locale;
  * tells of an error starts with ✗.
  */
 public final class AppLog {
-    static final int MAX_BYTES = 800_000;          // past this the file is cut back to its newer half
+    static final int MAX_BYTES = 3_000_000;          // past this the file is cut back to its newer half
     static final int SHOWN_CHARS = 24_000;         // on the screen, and what «نسخ» takes
-    static final int SAVED_CHARS = 150_000;        // in the file saved to the phone's Downloads
+    static final int SAVED_CHARS = 900_000;        // in the file saved to the phone's Downloads
     private static final Object LOCK = new Object();
     private static final SimpleDateFormat STAMP = new SimpleDateFormat("MM-dd HH:mm:ss", Locale.US);
     private static final List<String> early = new ArrayList<>();

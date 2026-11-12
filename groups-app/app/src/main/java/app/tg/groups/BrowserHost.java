@@ -613,6 +613,9 @@ public final class BrowserHost {
         @Override
         public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
             String url = String.valueOf(request.getUrl());
+            if (traceRequests) {
+                noteRequest(browser.id, request, url);
+            }
             if (url.contains("dm-core-") && url.contains(".js")) {
                 AppLog.add("ملف دردشة X يُطلب: " + url.substring(url.lastIndexOf('/') + 1));
                 byte[] body = patchedChatScript(url);
@@ -701,14 +704,75 @@ public final class BrowserHost {
         }
     }
 
+    // While a group is read (the script's ChatTracer), each call X's pages and workers make, as the app sees it go
+    // out: its kind (the GraphQL operation, or the path), its method, and whether it is the page itself. Pictures,
+    // videos and fonts are only counted.
+    static volatile boolean traceRequests;
+    static final int[] tracedMedia = new int[1];
+
+    /** The script's side: on while a group is read, off after (then the count of pictures and the like is noted). */
+    public static void setTrace(boolean on) {
+        if (!on && traceRequests) {
+            AppLog.add("طلبات أندرويد: صور وملفات " + tracedMedia[0]);
+        }
+        tracedMedia[0] = 0;
+        traceRequests = on;
+    }
+
+    static final Pattern GRAPHQL_OPERATION = Pattern.compile("/graphql/[^/]+/([A-Za-z0-9_]+)");
+
+    static void noteRequest(int browser, WebResourceRequest request, String url) {
+        try {
+            int query = url.indexOf('?');
+            String bare = query < 0 ? url : url.substring(0, query);
+            String lower = bare.toLowerCase(java.util.Locale.ROOT);
+            if (lower.startsWith("data:") || lower.contains("pbs.twimg.com") || lower.contains("video.twimg.com")
+                || lower.contains("abs.twimg.com/emoji") || lower.matches(".*\\.(jpe?g|png|gif|webp|mp4|m3u8|m4s|ts|woff2?|svg|css)$")) {
+                tracedMedia[0]++;
+                return;
+            }
+            Matcher operation = GRAPHQL_OPERATION.matcher(bare);
+            String kind;
+            if (operation.find()) {
+                kind = operation.group(1);
+            } else {
+                kind = bare.replaceFirst("^https?://(x\\.com|twitter\\.com)", "").replaceAll("\\d{5,}", "#");
+                if (kind.length() > 90) {
+                    kind = "…" + kind.substring(kind.length() - 90);
+                }
+            }
+            AppLog.add("طلب أندرويد " + browser + ": " + request.getMethod() + " " + kind + (request.isForMainFrame() ? " [الصفحة]" : ""));
+        } catch (RuntimeException e) {
+            // (only a note)
+        }
+    }
+
     // X's chat code («dm-core-….js»), as the app serves it to its browsers: where the code hands over its libsodium
-    // (…=e,….libsodium=…), it also hands it to the page's fast collecting (FAST_COLLECT_JS in the app's script),
-    // which then reads the messages' text as X's page decrypts them. A copy for each address, made once.
+    // (…=e,….libsodium=…), it is also handed to the script's hook (GG_CORE_JS in the app's script), in the page and
+    // in X's background workers alike (an app's own code does not run in a worker, so the hook itself is put in the
+    // copy). The hook only reads what X's code itself opens to show (the tweets in the group's messages), and makes
+    // X's asks for the group's messages bigger. The download is kept once for each address; the copy is made again
+    // when the script gives another hook.
+    static final HashMap<String, byte[]> rawChatScripts = new HashMap<>();
     static final HashMap<String, byte[]> patchedChatScripts = new HashMap<>();
+    static volatile String chatHook = "";
     static final Pattern SODIUM_HANDOVER =
         Pattern.compile("([A-Za-z_$][\\w$]*)=([A-Za-z_$][\\w$]*),([A-Za-z_$][\\w$]*)\\.libsodium=\\1(?![\\w$])");
 
-    /** The chat code with its libsodium handed to the page too, or null (X's own then loads as it is). */
+    /** The script's side gives the hook (a JavaScript function, in plain ASCII), each time it starts. */
+    public static void setChatHook(String hook) {
+        String now = hook == null ? "" : hook;
+        if (now.equals(chatHook)) {
+            return;
+        }
+        chatHook = now;
+        synchronized (patchedChatScripts) {
+            patchedChatScripts.clear();
+        }
+        AppLog.add("خطّاف دردشة X من السكربت (" + now.length() + " حرف)");
+    }
+
+    /** The chat code with the hook at its libsodium's handover, or null (X's own then loads as it is). */
     static byte[] patchedChatScript(String url) {
         synchronized (patchedChatScripts) {
             if (patchedChatScripts.containsKey(url)) {
@@ -716,27 +780,38 @@ public final class BrowserHost {
             }
         }
         byte[] raw;
-        try {
-            java.net.HttpURLConnection connection = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-            connection.setConnectTimeout(20_000);
-            connection.setReadTimeout(40_000);
-            connection.setRequestProperty("Accept", "*/*");
-            try (java.io.InputStream input = connection.getInputStream(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-                byte[] chunk = new byte[65536];
-                for (int count = input.read(chunk); count >= 0; count = input.read(chunk)) {
-                    output.write(chunk, 0, count);
+        synchronized (rawChatScripts) {
+            raw = rawChatScripts.get(url);
+        }
+        if (raw == null) {
+            long started = System.currentTimeMillis();
+            try {
+                java.net.HttpURLConnection connection = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                connection.setConnectTimeout(20_000);
+                connection.setReadTimeout(40_000);
+                connection.setRequestProperty("Accept", "*/*");
+                try (java.io.InputStream input = connection.getInputStream(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                    byte[] chunk = new byte[65536];
+                    for (int count = input.read(chunk); count >= 0; count = input.read(chunk)) {
+                        output.write(chunk, 0, count);
+                    }
+                    raw = output.toByteArray();
+                } finally {
+                    connection.disconnect();
                 }
-                raw = output.toByteArray();
-            } finally {
-                connection.disconnect();
+            } catch (Exception e) {
+                // (a download that failed is not remembered, so the next load tries again)
+                AppLog.error("تعذّر تنزيل ملف دردشة X لتعديله: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+                return null;
             }
-        } catch (Exception e) {
-            // (a download that failed is not remembered, so the next load tries again)
-            AppLog.error("تعذّر تنزيل ملف دردشة X لتعديله: " + e.getClass().getSimpleName() + ": " + e.getMessage());
-            return null;
+            AppLog.add("ملف دردشة X نُزّل (" + (raw.length / 1024) + "KB في " + (System.currentTimeMillis() - started) + "ms)");
+            synchronized (rawChatScripts) {
+                rawChatScripts.put(url, raw);
+            }
         }
         // (each byte as one character, and back: the code is not changed anywhere else)
         String code = new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1);
+        String hook = chatHook;
         byte[] patched;
         Matcher found = SODIUM_HANDOVER.matcher(code);
         int matches = 0;
@@ -745,10 +820,13 @@ public final class BrowserHost {
         }
         found.reset();
         if (found.find()) {
-            String added = found.group(0) + ",globalThis.__wrapSodium&&globalThis.__wrapSodium(" + found.group(1) + ",\"patched\")";
-            patched = (code.substring(0, found.start()) + added + code.substring(found.end()))
+            String call = hook.isEmpty()
+                ? "globalThis.__wrapSodium&&globalThis.__wrapSodium(" + found.group(1) + ",\"patched\")"
+                : "(globalThis.__wrapSodium||" + hook + ")(" + found.group(1) + ",\"patched\")";
+            patched = (code.substring(0, found.start()) + found.group(0) + "," + call + code.substring(found.end()))
                 .getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
-            AppLog.add("ملف دردشة X عُدّل لقراءة الرسائل (مطابقات=" + matches + "، حجم=" + (raw.length / 1024) + "KB): " + found.group(0));
+            AppLog.add("ملف دردشة X عُدّل (مطابقات=" + matches + "، الخطّاف " + (hook.isEmpty() ? "للصفحة فقط" : "للصفحة والخيوط الخلفية")
+                + "): " + found.group(0));
         } else {
             // Served as it is (from the app, not the WebView cache) so the page's own hook (the .libsodium setter)
             // still has its chance; the match may simply be spelled differently now.
