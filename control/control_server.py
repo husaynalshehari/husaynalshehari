@@ -48,6 +48,7 @@ DATA_DIR = Path(os.environ.get("CONTROL_DATA") or (Path(__file__).resolve().pare
 SECRETS_PATH = DATA_DIR / "secrets.json"
 CODES_PATH = DATA_DIR / "codes.json"
 KEYS_PATH = DATA_DIR / "keys.json"
+USAGE_PATH = DATA_DIR / "usage.json"
 CERT_PATH = DATA_DIR / "server.crt"
 CERT_KEY_PATH = DATA_DIR / "server.key"
 
@@ -210,6 +211,40 @@ def load_keys() -> dict:
 
 def save_keys(keys: dict) -> None:
     write_private_json(KEYS_PATH, {"version": 1, **keys})
+
+
+# ----------------------------------------------------------------------------- what each user (and account) used
+COST_PER_COMMENT = 0.01            # التكلفة لكل تعليق
+
+
+def load_usage() -> dict:
+    data = read_private_json(USAGE_PATH) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def record_comment(code_id: str, account: str, name: str) -> None:
+    """Count one written comment against this code and the X account that asked for it."""
+    account = (account or "—")[:48]
+    with LOCK:
+        usage = load_usage()
+        code = usage.setdefault(code_id, {"total": 0, "accounts": {}})
+        code["total"] = int(code.get("total") or 0) + 1
+        who = code["accounts"].setdefault(account, {"n": 0, "name": ""})
+        who["n"] = int(who.get("n") or 0) + 1
+        if name:
+            who["name"] = name[:40]
+        write_private_json(USAGE_PATH, usage)
+
+
+def usage_of(code_id: str) -> dict:
+    row = load_usage().get(code_id) or {"total": 0, "accounts": {}}
+    accounts = sorted(
+        ({"id": key, "name": value.get("name") or "", "n": int(value.get("n") or 0),
+          "cost": round(int(value.get("n") or 0) * COST_PER_COMMENT, 2)}
+         for key, value in (row.get("accounts") or {}).items()),
+        key=lambda item: -item["n"])
+    total = int(row.get("total") or 0)
+    return {"total": total, "cost": round(total * COST_PER_COMMENT, 2), "accounts": accounts}
 
 
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash"
@@ -528,35 +563,41 @@ def write_reply(tweet_text: str, image: bytes | None, voice: str, manner: int, b
 
 
 # ----------------------------------------------------------------------------- the app's unlock token
-def make_token(code_id: str) -> str:
+# The token carries the code and the one device it was bound to, signed. A copy of it on another phone is useless:
+# that phone's own device id will not match the device inside the token (and the code is bound to the first device).
+def make_token(code_id: str, device: str) -> str:
     exp = int(time.time()) + TOKEN_DAYS * 86400
-    head = f"{code_id}.{exp}"
+    head = f"{code_id}.{device}.{exp}"
     sig = hmac.new(SECRETS["token_secret"].encode("utf-8"), head.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
     return base64.urlsafe_b64encode(f"{head}.{sig}".encode("utf-8")).decode("ascii")
 
 
-def read_token(token: str) -> str:
-    """The code id a valid, unexpired token carries, or "" — the caller then checks the code is still active."""
+def read_token(token: str) -> tuple[str, str]:
+    """(code id, device) a valid, unexpired token carries, or ("", "")."""
     try:
         head_sig = base64.urlsafe_b64decode(str(token).encode("ascii")).decode("utf-8")
-        code_id, exp, sig = head_sig.rsplit(".", 2)
+        code_id, device, exp, sig = head_sig.rsplit(".", 3)
     except (ValueError, Exception):
-        return ""
-    good = hmac.new(SECRETS["token_secret"].encode("utf-8"), f"{code_id}.{exp}".encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+        return "", ""
+    good = hmac.new(SECRETS["token_secret"].encode("utf-8"), f"{code_id}.{device}.{exp}".encode("utf-8"), hashlib.sha256).hexdigest()[:32]
     if not hmac.compare_digest(sig, good):
-        return ""
+        return "", ""
     try:
         if int(exp) < int(time.time()):
-            return ""
+            return "", ""
     except ValueError:
-        return ""
-    return code_id
+        return "", ""
+    return code_id, device
 
 
-def active_code_by_id(code_id: str) -> dict | None:
+def code_from_token(token: str) -> dict | None:
+    """The active code a token belongs to, only when the token's device is the one the code is bound to."""
+    code_id, device = read_token(token)
+    if not code_id:
+        return None
     with LOCK:
         for row in load_codes():
-            if row.get("id") == code_id and row.get("active"):
+            if row.get("id") == code_id and row.get("active") and (row.get("bound_device") or "") == device:
                 return row
     return None
 
@@ -635,7 +676,8 @@ code{background:#0f172a;padding:3px 8px;border-radius:7px;font-size:15px;letter-
 button,.btn{padding:8px 14px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-weight:700;cursor:pointer;font-size:14px}
 button.gray{background:#475569}button.red{background:#b91c1c}input,select{padding:9px;border-radius:9px;border:1px solid #334155;background:#0f172a;color:#e2e8f0}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.muted{color:#94a3b8;font-size:13px}.on{color:#34d399}.off{color:#f87171}
-.link{word-break:break-all;background:#0f172a;padding:10px;border-radius:9px;font-size:13px}.top{display:flex;justify-content:space-between;align-items:center}</style></head>
+.link{word-break:break-all;background:#0f172a;padding:10px;border-radius:9px;font-size:13px}.top{display:flex;justify-content:space-between;align-items:center}
+.code-card{border:1px solid #334155;border-radius:11px;padding:12px;margin:10px 0;background:#0b1424}</style></head>
 <body><div class="wrap"><div class="top"><h1>لوحة التحكّم</h1><a class="btn gray" href="/{{admin}}/logout">خروج</a></div>
 
 <div class="card"><h2>رابط التطبيق</h2>
@@ -663,19 +705,29 @@ button.gray{background:#475569}button.red{background:#b91c1c}input,select{paddin
 <button>تفعيل</button></form></div>
 
 <div class="card"><h2>رموز الدخول</h2>
-<form class="row" method="post" action="/{{admin}}/code/new" style="margin-bottom:12px">
+<form class="row" method="post" action="/{{admin}}/code/new" style="margin-bottom:6px">
 <input name="label" placeholder="اسم المستخدم (اختياري)" style="flex:1;min-width:160px"><button>+ رمز جديد</button></form>
-<table><tr><th>الرمز</th><th>الاسم</th><th>الحالة</th><th>آخر دخول</th><th></th></tr>
-{% for c in codes %}<tr>
-<td><code>{{c.code}}</code></td><td>{{c.label}}</td>
-<td class="{{c.active and 'on' or 'off'}}">{{c.active and 'يعمل' or 'موقوف'}}</td>
-<td class="muted">{{c.last_seen_text}}</td>
-<td class="row">
-<form method="post" action="/{{admin}}/code/toggle"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">{{c.active and 'إيقاف' or 'تشغيل'}}</button></form>
-<form method="post" action="/{{admin}}/code/delete" onsubmit="return confirm('حذف الرمز نهائيًا؟')"><input type="hidden" name="id" value="{{c.id}}"><button class="red">حذف</button></form>
-</td></tr>{% endfor %}
-{% if not codes %}<tr><td colspan="5" class="muted">لا توجد رموز بعد. أنشئ رمزًا وأعطه للمستخدم.</td></tr>{% endif %}
-</table></div>
+{% for c in codes %}
+<div class="code-card">
+  <div class="row" style="justify-content:space-between">
+    <div><code>{{c.code}}</code> <b>{{c.label}}</b> <span class="{{c.active and 'on' or 'off'}}">· {{c.active and 'يعمل' or 'موقوف'}}</span></div>
+    <div class="muted">آخر دخول {{c.last_seen_text}}</div>
+  </div>
+  <div class="row" style="margin-top:8px;gap:16px">
+    <span>الجهاز: {% if c.bound_device %}<span class="on">مربوط بجهاز</span>{% else %}<span class="muted">غير مربوط</span>{% endif %}</span>
+    <span>التعليقات: <b>{{c.usage.total}}</b></span>
+    <span>التكلفة: <b>${{'%.2f'|format(c.usage.cost)}}</b></span>
+  </div>
+  {% if c.usage.accounts %}<table style="margin-top:8px"><tr><th>حساب X</th><th>تعليقات</th><th>التكلفة</th></tr>
+  {% for a in c.usage.accounts %}<tr><td>{{ a.name and ('@' + a.name) or ('#' + a.id[:8]) }}</td><td>{{a.n}}</td><td>${{'%.2f'|format(a.cost)}}</td></tr>{% endfor %}</table>{% endif %}
+  <div class="row" style="margin-top:10px">
+    <form method="post" action="/{{admin}}/code/toggle"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">{{c.active and 'إيقاف' or 'تشغيل'}}</button></form>
+    {% if c.bound_device %}<form method="post" action="/{{admin}}/code/release" onsubmit="return confirm('تحرير الرمز من جهازه الحالي؟ يقدر يُفعّل على جوال آخر.')"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">تحرير الجهاز</button></form>{% endif %}
+    <form method="post" action="/{{admin}}/code/delete" onsubmit="return confirm('حذف الرمز نهائيًا؟')"><input type="hidden" name="id" value="{{c.id}}"><button class="red">حذف</button></form>
+  </div>
+</div>{% endfor %}
+{% if not codes %}<p class="muted">لا توجد رموز بعد. أنشئ رمزًا وأعطه للمستخدم.</p>{% endif %}
+</div>
 
 </div></body></html>"""
 
@@ -699,7 +751,7 @@ def dashboard():
     keys = load_keys()
     with LOCK:
         codes = load_codes()
-    rows = [dict(c, last_seen_text=seen_text(c)) for c in codes]
+    rows = [dict(c, last_seen_text=seen_text(c), usage=usage_of(c["id"])) for c in codes]
     return render_template_string(
         DASHBOARD, admin=ADMIN, app_link=app_link(), codes=rows,
         engine=keys["engine"], gemini_set=bool(keys["gemini_sealed"]), claude_set=bool(keys["claude_sealed"]),
@@ -730,7 +782,7 @@ def code_new():
     with LOCK:
         codes = load_codes()
         codes.insert(0, {"id": secrets.token_hex(8), "code": make_code(), "label": label,
-                         "active": True, "created": int(time.time()), "last_seen": 0, "device": ""})
+                         "active": True, "created": int(time.time()), "last_seen": 0, "bound_device": ""})
         save_codes(codes)
     return redirect(f"/{ADMIN}")
 
@@ -756,6 +808,21 @@ def code_delete():
     code_id = request.form.get("id")
     with LOCK:
         save_codes([row for row in load_codes() if row.get("id") != code_id])
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/code/release")
+def code_release():
+    """Unbind a code from its phone, so the user can sign in on a new one with the same code."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    code_id = request.form.get("id")
+    with LOCK:
+        codes = load_codes()
+        for row in codes:
+            if row.get("id") == code_id:
+                row["bound_device"] = ""
+        save_codes(codes)
     return redirect(f"/{ADMIN}")
 
 
@@ -802,6 +869,9 @@ def api_err(message: str, status: int = 200):
 @app.post(f"/{API}/activate")
 def api_activate():
     body = request.get_json(silent=True) or {}
+    device = re.sub(r"[^A-Za-z0-9]", "", str(body.get("device") or ""))[:64]
+    if not device:
+        return api_err("لم يصل معرّف الجهاز. حدّث التطبيق.")
     row = find_code(body.get("code"))
     if not row:
         return api_err("الرمز غير معروف. تأكد منه أو اطلب رمزًا من صاحب البرنامج.")
@@ -809,28 +879,31 @@ def api_activate():
         return api_err("هذا الرمز موقوف. راجع صاحب البرنامج.")
     with LOCK:
         codes = load_codes()
-        for item in codes:
-            if item.get("id") == row["id"]:
-                item["last_seen"] = int(time.time())
-                item["device"] = str(body.get("device") or "")[:60]
+        target = next((item for item in codes if item.get("id") == row["id"]), None)
+        if target is None:
+            return api_err("الرمز غير معروف.")
+        bound = target.get("bound_device") or ""
+        if bound and bound != device:
+            return api_err("هذا الرمز مُستخدم على جهاز آخر. اطلب من صاحب البرنامج تحريره أو رمزًا جديدًا.")
+        target["bound_device"] = device
+        target["last_seen"] = int(time.time())
         save_codes(codes)
     engine, _, _ = active_engine()
-    return api_ok(token=make_token(row["id"]), engine=engine or "none")
+    return api_ok(token=make_token(row["id"], device), engine=engine or "none")
 
 
 @app.post(f"/{API}/check")
 def api_check():
     body = request.get_json(silent=True) or {}
-    code_id = read_token(body.get("token"))
-    return api_ok(active=bool(code_id and active_code_by_id(code_id)))
+    return api_ok(active=bool(code_from_token(body.get("token"))))
 
 
 @app.post(f"/{API}/comment")
 def api_comment():
     body = request.get_json(silent=True) or {}
-    code_id = read_token(body.get("token"))
-    if not code_id or not active_code_by_id(code_id):
-        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز. أعد إدخال الرمز.", 200)
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
     tweet_text = str(body.get("text") or "")[:4000]
     image = None
     raw_image = body.get("image")
@@ -857,6 +930,7 @@ def api_comment():
         comment = write_reply(tweet_text, image, voice, manner, before)
     except RuntimeError as exc:
         return api_err(str(exc))
+    record_comment(row["id"], str(body.get("account") or ""), str(body.get("name") or ""))
     return api_ok(comment=comment)
 
 
