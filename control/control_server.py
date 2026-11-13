@@ -737,6 +737,31 @@ input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 
 .code-card{border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0;background:var(--surface);box-shadow:0 4px 14px rgba(15,23,42,.04)}
 .ktag{min-width:74px;font-weight:800;color:var(--accent)}
 label.rad{display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--line);padding:8px 13px;border-radius:11px;cursor:pointer;font-size:14px}
+/* الجوال: تكديس عمودي وأزرار كبيرة للمس */
+@media(max-width:560px){
+  body{font-size:15px}
+  .wrap{padding:14px 12px 40px}
+  .card{padding:15px;border-radius:14px;margin:12px 0}
+  h1{font-size:19px}h2{font-size:16px}
+  .bar{margin-bottom:4px}
+  .row{gap:8px}
+  form.row{width:100%}
+  .row input,.row select{flex:1 1 100%;width:100%;min-width:0;font-size:16px;padding:13px}
+  .ktag{flex:1 1 100%;min-width:0}
+  form.row>button{flex:1 1 100%;width:100%;padding:14px;font-size:15px}
+  label.rad{flex:1 1 100%;justify-content:center;padding:12px}
+  .stats{gap:8px}
+  .stat{flex:1 1 calc(33.333% - 6px);text-align:center;padding:9px 6px}
+  .stat b{font-size:17px}
+  .code-card{padding:14px}
+  .code-card>.row:first-child{flex-direction:column;align-items:flex-start;gap:7px}
+  .code-card .row:last-child{gap:8px}
+  .code-card .row:last-child form{flex:1 1 calc(50% - 4px)}
+  .code-card .row:last-child button{width:100%;padding:12px}
+  .link{font-size:12px;padding:11px}
+  table td,table th{padding:7px 6px;font-size:13px}
+  .btn.gray{padding:11px 14px}
+}
 </style></head>
 <body><div class="wrap">
 <div class="bar"><div class="brand"><div class="logo">ق</div><h1>لوحة التحكّم</h1></div><a class="btn gray" href="/{{admin}}/logout">خروج</a></div>
