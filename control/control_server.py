@@ -202,8 +202,13 @@ def load_keys() -> dict:
     data = read_private_json(KEYS_PATH) or {}
     return {
         "engine": data.get("engine") if data.get("engine") in ("gemini", "claude") else "gemini",
+        # Gemini goes either straight to Google ("google", the default) or through OpenRouter ("openrouter")
+        # with the owner's OpenRouter key and an OpenRouter model id.
+        "gemini_provider": data.get("gemini_provider") if data.get("gemini_provider") in ("google", "openrouter") else "google",
         "gemini_sealed": data.get("gemini_sealed") or "",
         "gemini_model": data.get("gemini_model") or "",
+        "openrouter_sealed": data.get("openrouter_sealed") or "",
+        "openrouter_model": data.get("openrouter_model") or "",
         "claude_sealed": data.get("claude_sealed") or "",
         "claude_model": data.get("claude_model") or "",
     }
@@ -285,17 +290,30 @@ def usage_by_account(code_id: str) -> dict:
 
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash"
 CLAUDE_DEFAULT_MODEL = "claude-haiku-5-5"
+OPENROUTER_DEFAULT_MODEL = "google/gemini-2.5-flash"
 
 
-def active_engine() -> tuple[str, str, str]:
-    """(engine, key, model) of the engine chosen to write, or ("", "", "") when it has no key yet."""
+def gemini_ready(keys: dict) -> bool:
+    """Whether the Gemini engine has a usable key for its chosen provider (Google's key, or OpenRouter's)."""
+    if keys.get("gemini_provider") == "openrouter":
+        return bool(keys.get("openrouter_sealed"))
+    return bool(keys.get("gemini_sealed"))
+
+
+def active_engine() -> tuple[str, str, str, str]:
+    """(engine, key, model, provider) of the engine chosen to write, or ("", "", "", "") when it has no key
+    yet. engine is "gemini"/"claude" (for the app's display); provider is "openrouter" when Gemini is routed
+    through OpenRouter, else "" (Claude, or Gemini straight to Google)."""
     keys = load_keys()
     engine = keys["engine"]
     if engine == "claude":
         key = open_key(keys["claude_sealed"])
-        return ("claude", key, keys["claude_model"] or CLAUDE_DEFAULT_MODEL) if key else ("", "", "")
+        return ("claude", key, keys["claude_model"] or CLAUDE_DEFAULT_MODEL, "") if key else ("", "", "", "")
+    if keys.get("gemini_provider") == "openrouter":
+        key = open_key(keys.get("openrouter_sealed") or "")
+        return ("gemini", key, keys.get("openrouter_model") or OPENROUTER_DEFAULT_MODEL, "openrouter") if key else ("", "", "", "")
     key = open_key(keys["gemini_sealed"])
-    return ("gemini", key, keys["gemini_model"] or GEMINI_DEFAULT_MODEL) if key else ("", "", "")
+    return ("gemini", key, keys["gemini_model"] or GEMINI_DEFAULT_MODEL, "") if key else ("", "", "", "")
 
 
 # ----------------------------------------------------------------------------- writing one reply (ported from the app)
@@ -585,11 +603,79 @@ def claude_comment(api_key: str, model: str, image: bytes | None, tweet_text: st
     return ""
 
 
+# Gemini through OpenRouter (https://openrouter.ai): its OpenAI-style chat endpoint, with the owner's
+# OpenRouter key and an OpenRouter model id (e.g. google/gemini-2.5-flash). The reply comes out the same.
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def openrouter_comment(api_key: str, model: str, image: bytes | None, tweet_text: str, voice: str, manner: int, before: list) -> str:
+    prompt = reply_prompt(voice, manner, before)
+    if image:
+        prompt = "Look at the tweet in the image. " + prompt
+    if tweet_text:
+        prompt += "\n\nTweet text:\n" + tweet_text[:REPLY_TWEET_TEXT]
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    if image:
+        content.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")}})
+    body = {"model": model, "messages": [{"role": "user", "content": content}], "temperature": 1.0, "max_tokens": 2048}
+    busy_waits = (5, 12, 20, 30)
+    best, saw_busy = "", False
+    for try_index in range(len(busy_waits) + 1):
+        req = urllib.request.Request(
+            OPENROUTER_URL, data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key,
+                     "X-Title": "qroobat"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=45) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                parsed = json.loads(exc.read().decode("utf-8", "replace")[:800])
+                detail = str(((parsed.get("error") or {}).get("message") or ""))[:160]
+            except Exception:
+                detail = ""
+            if api_key and api_key in detail:
+                detail = ""
+            if exc.code in (401, 403):
+                raise RuntimeError("مفتاح OpenRouter غير صالح أو بلا صلاحية. راجع صاحب البرنامج.") from None
+            if gemini_is_busy(getattr(exc, "code", 0) or 0, detail):
+                saw_busy = True
+                if try_index < len(busy_waits):
+                    time.sleep(busy_waits[try_index]); continue
+                break
+            raise RuntimeError(detail or "رفض OpenRouter الطلب") from None
+        except Exception as exc:
+            if try_index < 2:
+                time.sleep(busy_waits[try_index]); continue
+            raise RuntimeError("تعذر الاتصال بـ OpenRouter") from exc
+        choice = (payload.get("choices") or [{}])[0]
+        raw = (choice.get("message") or {}).get("content")
+        if isinstance(raw, list):
+            raw = " ".join(str(part.get("text") or "") for part in raw if isinstance(part, dict))
+        text = clean_comment(str(raw or ""))
+        if comment_is_complete(text):
+            return text
+        if len(text) > len(best):
+            best = text
+        break
+    if comment_is_complete(best):
+        return best
+    if saw_busy:
+        raise RuntimeError("OpenRouter مشغول مؤقتًا بعد عدة محاولات. أعد المحاولة بعد قليل.")
+    return ""
+
+
 def write_reply(tweet_text: str, image: bytes | None, voice: str, manner: int, before: list) -> str:
-    engine, key, model = active_engine()
+    engine, key, model, provider = active_engine()
     if not engine:
         raise RuntimeError("لم يُفعّل أي مفتاح على الخادم بعد. أخبر صاحب البرنامج.")
-    writer = claude_comment if engine == "claude" else gemini_comment
+    if engine == "claude":
+        writer = claude_comment
+    elif provider == "openrouter":
+        writer = openrouter_comment
+    else:
+        writer = gemini_comment
     text = polish_comment(writer(key, model, image, tweet_text, voice, manner, before))
     if not text:
         raise RuntimeError("لم يُكتب تعليق. أعد المحاولة.")
@@ -1084,9 +1170,15 @@ main{padding-bottom:56px}
 <label class="opt"><input type="radio" name="engine" value="claude" {{ 'checked' if engine=='claude' else '' }} onchange="this.form.requestSubmit()"><span class="pi" aria-hidden="true">C</span><span><b>Claude</b><small>{{ 'المفتاح مضبوط' if claude_set else 'لا يوجد مفتاح' }}</small></span><span class="ck">{{ic('check')}}</span></label>
 <noscript><button class="btn">تفعيل</button></noscript></form>
 {% if nokey %}<div class="note" role="status">{{ic('alert')}}<p>الكاتب المختار بلا مفتاح، فلن تُكتب أي تعليقات. أضف مفتاحه في الأسفل أو اختر الكاتب الآخر.</p></div>{% endif %}
+<p style="margin:14px 2px 6px;font-weight:700;font-size:14px">اتصال Gemini</p>
+<form class="eng" method="post" action="/{{admin}}/gemini-provider" data-toast="تم تغيير اتصال Gemini">
+<label class="opt"><input type="radio" name="provider" value="google" {{ 'checked' if gemini_provider=='google' else '' }} onchange="this.form.requestSubmit()"><span class="pi" aria-hidden="true">G</span><span><b>مباشر Google</b><small>{{ 'المفتاح مضبوط' if google_set else 'لا يوجد مفتاح' }}</small></span><span class="ck">{{ic('check')}}</span></label>
+<label class="opt"><input type="radio" name="provider" value="openrouter" {{ 'checked' if gemini_provider=='openrouter' else '' }} onchange="this.form.requestSubmit()"><span class="pi" aria-hidden="true">R</span><span><b>عبر OpenRouter</b><small>{{ 'المفتاح مضبوط' if openrouter_set else 'لا يوجد مفتاح' }}</small></span><span class="ck">{{ic('check')}}</span></label>
+<noscript><button class="btn">تطبيق</button></noscript></form>
+{% if engine=='gemini' and gemini_provider=='openrouter' and not openrouter_set %}<div class="note" role="status">{{ic('alert')}}<p>اخترت «عبر OpenRouter» دون مفتاح OpenRouter. أضف المفتاح في الأسفل.</p></div>{% endif %}
 </div>
 <div class="g2">
-{% for k in [('gemini','Gemini',gemini_set,gemini_model,gemini_default,'G','الصق مفتاح Gemini'),('claude','Claude',claude_set,claude_model,claude_default,'C','الصق مفتاح Claude (sk-ant-…)')] %}
+{% for k in [('gemini','Gemini',google_set,gemini_model,gemini_default,'G','الصق مفتاح Gemini'),('claude','Claude',claude_set,claude_model,claude_default,'C','الصق مفتاح Claude (sk-ant-…)')] %}
 <form class="card pad" method="post" action="/{{admin}}/key" data-toast="تم حفظ إعدادات {{k[1]}}"><input type="hidden" name="which" value="{{k[0]}}">
 <div class="ph"><span class="pi" aria-hidden="true">{{k[5]}}</span><div><h3>{{k[1]}}</h3><span class="b {{ 'on' if k[2] else 'off' }}">{{ 'المفتاح مضبوط' if k[2] else 'لا يوجد مفتاح' }}</span></div>{% if engine==k[0] %}<span class="tag">الكاتب الحالي</span>{% endif %}</div>
 <label class="l" for="k-{{k[0]}}">مفتاح API</label>
@@ -1095,6 +1187,13 @@ main{padding-bottom:56px}
 <p class="hint">{{ic('lock')}}<span>يُحفظ المفتاح مختومًا على الخادم ولا يُرسل إلى الأجهزة.</span></p>
 <button class="btn wide">حفظ الإعدادات</button></form>
 {% endfor %}
+<form class="card pad" method="post" action="/{{admin}}/key" data-toast="تم حفظ إعدادات OpenRouter"><input type="hidden" name="which" value="openrouter">
+<div class="ph"><span class="pi" aria-hidden="true">R</span><div><h3>OpenRouter</h3><span class="b {{ 'on' if openrouter_set else 'off' }}">{{ 'المفتاح مضبوط' if openrouter_set else 'لا يوجد مفتاح' }}</span></div>{% if engine=='gemini' and gemini_provider=='openrouter' %}<span class="tag">الكاتب الحالي</span>{% endif %}</div>
+<label class="l" for="k-openrouter">مفتاح OpenRouter</label>
+<div class="pw"><input class="kin" id="k-openrouter" type="password" name="api_key" dir="ltr" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="{{ 'الصق مفتاحًا جديدًا للتبديل' if openrouter_set else 'الصق مفتاح OpenRouter (sk-or-…)' }}"><button type="button" class="eye" data-eye aria-label="إظهار المفتاح" aria-pressed="false">{{ic('eye')}}</button></div>
+<label class="l" for="m-openrouter">نموذج Gemini على OpenRouter</label><input id="m-openrouter" name="model" dir="ltr" value="{{openrouter_model}}" placeholder="{{openrouter_default}}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+<p class="hint">{{ic('lock')}}<span>عند اختيار «عبر OpenRouter» تُكتب تعليقات Gemini بهذا المفتاح وهذا النموذج. يُحفظ مختومًا على الخادم ولا يُرسل إلى الأجهزة.</span></p>
+<button class="btn wide">حفظ الإعدادات</button></form>
 </div>
 </section>
 
@@ -1269,9 +1368,12 @@ def dashboard():
              "cost": round(sum(r["usage"]["cost"] for r in rows), 2)}
     return render_template_string(
         DASHBOARD, admin=ADMIN, app_link=app_link(), codes=rows, stats=stats,
-        engine=keys["engine"], gemini_set=bool(keys["gemini_sealed"]), claude_set=bool(keys["claude_sealed"]),
+        engine=keys["engine"], gemini_set=gemini_ready(keys), claude_set=bool(keys["claude_sealed"]),
         gemini_model=keys["gemini_model"], claude_model=keys["claude_model"],
-        gemini_default=GEMINI_DEFAULT_MODEL, claude_default=CLAUDE_DEFAULT_MODEL)
+        gemini_default=GEMINI_DEFAULT_MODEL, claude_default=CLAUDE_DEFAULT_MODEL,
+        gemini_provider=keys["gemini_provider"], google_set=bool(keys["gemini_sealed"]),
+        openrouter_set=bool(keys["openrouter_sealed"]), openrouter_model=keys["openrouter_model"],
+        openrouter_default=OPENROUTER_DEFAULT_MODEL)
 
 
 @app.post(f"/{ADMIN}/login")
@@ -1380,7 +1482,7 @@ def set_key():
     which = request.form.get("which")
     api_key = (request.form.get("api_key") or "").strip()
     model = (request.form.get("model") or "").strip()[:60]
-    if which not in ("gemini", "claude"):
+    if which not in ("gemini", "claude", "openrouter"):
         return redirect(f"/{ADMIN}")
     with LOCK:
         keys = load_keys()
@@ -1388,6 +1490,19 @@ def set_key():
             keys[f"{which}_sealed"] = seal_key(api_key)
         keys[f"{which}_model"] = model
         save_keys(keys)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/gemini-provider")
+def set_gemini_provider():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    provider = request.form.get("provider")
+    if provider in ("google", "openrouter"):
+        with LOCK:
+            keys = load_keys()
+            keys["gemini_provider"] = provider
+            save_keys(keys)
     return redirect(f"/{ADMIN}")
 
 
@@ -1435,7 +1550,7 @@ def api_activate():
         target["bound_device"] = device
         target["last_seen"] = int(time.time())
         save_codes(codes)
-    engine, _, _ = active_engine()
+    engine, _, _, _ = active_engine()
     return api_ok(token=make_token(row["id"], device), engine=engine or "none")
 
 
