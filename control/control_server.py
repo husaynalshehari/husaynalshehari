@@ -332,7 +332,7 @@ REPLY_MANNERS = (
 )
 import random  # noqa: E402  (kept near the reply code it serves)
 
-ARABIC_DIACRITICS = re.compile(r"[ً-ْٖ-ٰٟ]")
+ARABIC_DIACRITICS = re.compile(r"[\u064b-\u0652\u0656-\u0670\u065f]")   # tashkeel marks
 HANGING_WORDS = {"و", "او", "أو", "بس", "لكن", "لان", "لأن", "عشان", "اللي", "الي", "في", "من", "على", "عن", "مع", "الى",
                  "إلى", "يعني", "ثم", "حتى", "اذا", "إذا", "لو", "ما", "لا", "كان", "and", "or", "but", "the", "to", "of",
                  "in", "a", "an", "with", "for", "that", "ve", "ama", "ile", "için", "bir", "de", "da"}
@@ -341,8 +341,8 @@ HANGING_WORDS = {"و", "او", "أو", "بس", "لكن", "لان", "لأن", "ع
 def clean_comment(raw: str) -> str:
     text = re.sub(r"\s+", " ", raw or "").strip()
     text = text.replace("**", "")
-    text = re.sub(r"^(?:reply|comment|التعليق|الرد|الدعاء)\s*[:：\-]\s*", "", text, flags=re.I)
-    text = re.sub(r"^[\w؀-ۿ]{2,24}\s*[:：]\s*", "", text)
+    text = re.sub(r"^(?:reply|comment|التعليق|الرد|الدعاء)\s*[:\uff1a\-]\s*", "", text, flags=re.I)
+    text = re.sub(r"^[\w\u0600-\u06ff]{2,24}\s*[:\uff1a]\s*", "", text)
     text = text.strip("\"'«»“” ")
     if len(text) > 280:
         cut = text[:280]
@@ -368,11 +368,11 @@ def fit_comment(text: str, limit: int = REPLY_MAX_CHARS) -> str:
 
 
 def comment_is_complete(text: str) -> bool:
-    text = re.sub(r"[\s‍️☀-➿\U0001f000-\U0001faff]+$", "", text or "")
+    text = re.sub(r"[\s\u200d\ufe0f\u2600-\u27bf\U0001f000-\U0001faff]+$", "", text or "")
     words = [word for word in text.split() if word]
     if len(words) < 6:
         return False
-    if re.search(r"[،,؛;:：\-–—/\\*]$", text.strip()):
+    if re.search(r"[،,؛;:\uff1a\-\u2013\u2014/\\*]$", text.strip()):
         return False
     last = re.sub(r"[.!?؟…\"'«»“”]+$", "", words[-1])
     return len(last) > 2
@@ -691,155 +691,557 @@ def logged_in() -> bool:
     return bool(session.get("owner"))
 
 
-LOGIN_PAGE = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>لوحة التحكّم</title>
+LOGIN_PAGE = r"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0c3d3a"><meta name="robots" content="noindex,nofollow">
+<title>تسجيل الدخول</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300..700&display=swap">
+<script>try{document.documentElement.dataset.theme=localStorage.getItem('th')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')}catch(e){}</script>
 <style>
-:root{--surface:#fff;--line:#e6eaf1;--ink:#0f172a;--muted:#64748b;--accent:#4f46e5;--accent2:#6366f1;--danger:#e11d48}
+:root{--bg:#0c3d3a;--card:#fff;--soft:#f3f6f5;--line:#dce4e2;--ink:#10201f;--mut:#566664;--pri:#0f6b66;--prih:#0b5651;--prik:#fff;--ring:rgba(15,107,102,.22);--bad:#b42318;--badsoft:#fdeae7;color-scheme:light}
+[data-theme=dark]{--bg:#0a1f1d;--card:#111b1a;--soft:#182423;--line:#243432;--ink:#e3eeec;--mut:#8c9e9b;--pri:#56c8bf;--prih:#74d6ce;--prik:#05201e;--ring:rgba(86,200,191,.28);--bad:#f6817a;--badsoft:#3a1b19;color-scheme:dark}
 *{box-sizing:border-box}
-body{font:16px/1.6 "Segoe UI",system-ui,-apple-system,"Noto Sans Arabic",sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:linear-gradient(160deg,#eef2fb,#e3e9f6);color:var(--ink);padding:20px}
-.box{background:var(--surface);padding:34px 28px;border-radius:20px;width:min(92vw,375px);box-shadow:0 24px 60px rgba(15,23,42,.14);border:1px solid var(--line)}
-.brand{display:flex;align-items:center;gap:12px;margin-bottom:4px}
-.logo{width:44px;height:44px;border-radius:13px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;color:#fff;font-weight:800;font-size:22px;box-shadow:0 6px 16px rgba(79,70,229,.35)}
-h1{font-size:21px;margin:0}
-.sub{color:var(--muted);font-size:14px;margin:4px 0 22px}
-label{font-size:13px;color:var(--muted);font-weight:700}
-input{width:100%;padding:14px;border-radius:13px;border:1px solid var(--line);background:#f8fafc;color:var(--ink);margin:7px 0 0;font-size:16px}
-input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 4px rgba(79,70,229,.14);background:#fff}
-button{width:100%;padding:14px;border:0;border-radius:13px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-weight:800;cursor:pointer;margin-top:16px;font-size:16px;box-shadow:0 8px 20px rgba(79,70,229,.3)}
-button:hover{filter:brightness(1.06)}
-.err{color:var(--danger);min-height:20px;font-size:14px;margin-top:10px;text-align:center}
-</style></head><body>
-<form class="box" method="post" action="/{{admin}}/login">
-<div class="brand"><div class="logo">ق</div><h1>لوحة التحكّم</h1></div>
-<div class="sub">إدارة رموز الدخول والمفاتيح</div>
-<label>كلمة مرور المالك</label>
-<input type="password" name="password" placeholder="••••••••" autofocus>
-<button>دخول</button>
-<div class="err">{{error}}</div>
-</form></body></html>"""
-
-DASHBOARD = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>لوحة التحكّم</title>
-<style>
-:root{--bg1:#eef2fb;--bg2:#e6ebf6;--surface:#fff;--surface2:#f8fafc;--line:#e6eaf1;--ink:#0f172a;--muted:#64748b;
-  --accent:#4f46e5;--accent2:#6366f1;--green:#059669;--green-bg:#d1fae5;--red:#e11d48;--red-bg:#ffe4e6;--chip:#eef2ff}
-*{box-sizing:border-box}
-body{font:16px/1.6 "Segoe UI",system-ui,-apple-system,"Noto Sans Arabic",sans-serif;margin:0;color:var(--ink);
-  background:linear-gradient(170deg,var(--bg1),var(--bg2) 60%);min-height:100vh}
-.wrap{max-width:900px;margin:0 auto;padding:20px 18px 48px}
-.bar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
-.brand{display:flex;align-items:center;gap:12px}
-.logo{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;color:#fff;font-weight:800;font-size:21px;box-shadow:0 6px 16px rgba(79,70,229,.32)}
-h1{font-size:22px;margin:0}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:20px;margin:16px 0;box-shadow:0 10px 30px rgba(15,23,42,.05)}
-h2{font-size:17px;margin:0 0 4px;display:flex;align-items:center;gap:9px}
-h2::before{content:"";width:5px;height:18px;border-radius:3px;background:linear-gradient(var(--accent),var(--accent2))}
-table{width:100%;border-collapse:collapse;margin-top:10px}
-td,th{padding:9px 10px;border-bottom:1px solid var(--line);text-align:right;font-size:14px}
-th{color:var(--muted);font-weight:700;font-size:12px}
-td{font-variant-numeric:tabular-nums}
-code{background:var(--chip);color:var(--accent);padding:5px 10px;border-radius:8px;font-size:15px;letter-spacing:1px;font-weight:700}
-button,.btn{padding:9px 15px;border:0;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-weight:700;cursor:pointer;font-size:14px;text-decoration:none;display:inline-block;box-shadow:0 4px 12px rgba(79,70,229,.22)}
-button:hover,.btn:hover{filter:brightness(1.05)}
-button.gray,.btn.gray{background:#eef1f7;color:#334155;box-shadow:none;border:1px solid var(--line)}
-button.red{background:var(--red);box-shadow:0 4px 12px rgba(225,29,72,.25)}
-input,select{padding:11px;border-radius:11px;border:1px solid var(--line);background:var(--surface2);color:var(--ink);font-size:14px}
-input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,70,229,.13);background:#fff}
-.row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
-.muted{color:var(--muted);font-size:13px}
-.pill{padding:3px 11px;border-radius:999px;font-size:12px;font-weight:700;display:inline-block}
-.pill.on{background:var(--green-bg);color:var(--green)}
-.pill.off{background:var(--red-bg);color:var(--red)}
-.on{color:var(--green)}.off{color:var(--red)}
-.link{word-break:break-all;background:var(--surface2);border:1px dashed var(--line);padding:12px;border-radius:11px;font-size:13px;color:#334155}
-.stats{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
-.stat{background:var(--surface2);border:1px solid var(--line);border-radius:12px;padding:8px 14px;font-size:13px;color:var(--muted)}
-.stat b{display:block;font-size:19px;color:var(--ink);font-variant-numeric:tabular-nums;margin-top:2px}
-.code-card{border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0;background:var(--surface);box-shadow:0 4px 14px rgba(15,23,42,.04)}
-.ktag{min-width:74px;font-weight:800;color:var(--accent)}
-label.rad{display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--line);padding:8px 13px;border-radius:11px;cursor:pointer;font-size:14px}
-/* الجوال: تكديس عمودي وأزرار كبيرة للمس */
-@media(max-width:560px){
-  body{font-size:15px}
-  .wrap{padding:14px 12px 40px}
-  .card{padding:15px;border-radius:14px;margin:12px 0}
-  h1{font-size:19px}h2{font-size:16px}
-  .bar{margin-bottom:4px}
-  .row{gap:8px}
-  form.row{width:100%}
-  .row input,.row select{flex:1 1 100%;width:100%;min-width:0;font-size:16px;padding:13px}
-  .ktag{flex:1 1 100%;min-width:0}
-  form.row>button{flex:1 1 100%;width:100%;padding:14px;font-size:15px}
-  label.rad{flex:1 1 100%;justify-content:center;padding:12px}
-  .stats{gap:8px}
-  .stat{flex:1 1 calc(33.333% - 6px);text-align:center;padding:9px 6px}
-  .stat b{font-size:17px}
-  .code-card{padding:14px}
-  .code-card>.row:first-child{flex-direction:column;align-items:flex-start;gap:7px}
-  .code-card .row:last-child{gap:8px}
-  .code-card .row:last-child form{flex:1 1 calc(50% - 4px)}
-  .code-card .row:last-child button{width:100%;padding:12px}
-  .link{font-size:12px;padding:11px}
-  table td,table th{padding:7px 6px;font-size:13px}
-  .btn.gray{padding:11px 14px}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;background:var(--bg);color:var(--ink);font:400 15px/1.65 "Readex Pro","IBM Plex Sans Arabic","Segoe UI",system-ui,-apple-system,"Noto Sans Arabic",Tahoma,sans-serif;-webkit-tap-highlight-color:transparent}
+h1,p{margin:0}
+.box{flex:1;display:flex;flex-direction:column;width:100%}
+.bh{flex:1;display:flex;flex-direction:column;justify-content:flex-end;padding:40px 24px 28px;color:#eef8f6}
+.logo{width:52px;height:52px;border-radius:15px;display:grid;place-items:center;background:#eef8f6;color:#0c3d3a;font-weight:600;font-size:26px;margin-bottom:20px}
+h1{font-size:26px;font-weight:600;line-height:1.35}
+.bh p{color:#a3cbc6;margin-top:4px}
+.bb{background:var(--card);border-radius:24px 24px 0 0;padding:26px 24px calc(28px + env(safe-area-inset-bottom,0px))}
+label{display:block;font-size:13.5px;font-weight:500;color:var(--mut);margin-bottom:6px}
+.pw{position:relative}
+input{width:100%;height:50px;padding:0 14px;padding-left:50px;border-radius:13px;border:1px solid var(--line);background:var(--soft);color:var(--ink);font:inherit;font-size:16px;outline:0}
+input:focus{border-color:var(--pri);box-shadow:0 0 0 3px var(--ring);background:var(--card)}
+.eye{position:absolute;left:5px;top:5px;width:40px;height:40px;border:0;border-radius:10px;background:none;color:var(--mut);cursor:pointer;display:grid;place-items:center}
+.eye[aria-pressed=true]{color:var(--pri)}
+.i{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.btn{width:100%;height:50px;margin-top:16px;border:0;border-radius:13px;background:var(--pri);color:var(--prik);font:inherit;font-weight:600;font-size:16px;cursor:pointer}
+.btn:hover{background:var(--prih)}
+.alert{display:flex;gap:9px;align-items:flex-start;background:var(--badsoft);color:var(--bad);border-radius:13px;padding:11px 14px;font-size:14px;font-weight:500;margin-bottom:18px}
+.alert .i{width:18px;height:18px;flex:none;margin-top:3px}
+:focus-visible{outline:2px solid var(--pri);outline-offset:2px}
+@media(min-width:560px){
+body{align-items:center;justify-content:center;padding:24px;background:var(--soft)}
+[data-theme=dark] body{background:#0a1211}
+.box{flex:none;width:400px;border-radius:22px;overflow:hidden;border:1px solid var(--line);background:var(--bg)}
+.bh{flex:none;padding:32px 28px 26px}
+.bb{border-radius:0;padding:26px 28px 30px}
 }
-</style></head>
-<body><div class="wrap">
-<div class="bar"><div class="brand"><div class="logo">ق</div><h1>لوحة التحكّم</h1></div><a class="btn gray" href="/{{admin}}/logout">خروج</a></div>
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style></head><body>
+<main class="box">
+<header class="bh"><div class="logo" aria-hidden="true">ق</div><h1>لوحة التحكّم</h1><p>سجّل الدخول لإدارة المستخدمين والمفاتيح.</p></header>
+<form class="bb" method="post" action="/{{admin}}/login">
+{% if error %}<div class="alert" role="alert"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg><span>{{error}} تأكّد منها ثم أعد المحاولة.</span></div>{% endif %}
+<label for="p">كلمة مرور المالك</label>
+<div class="pw"><input id="p" type="password" name="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" autofocus required>
+<button type="button" class="eye" aria-label="إظهار كلمة المرور" aria-pressed="false" onclick="var p=document.getElementById('p'),s=p.type=='password';p.type=s?'text':'password';this.setAttribute('aria-pressed',s)"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button></div>
+<button class="btn">دخول</button>
+</form></main></body></html>
+"""
 
-<div class="card"><h2>رابط التطبيق</h2>
-<p class="muted">انسخه كاملًا وضعه في التطبيق (إعداد الخادم). يحمل بصمة شهادة الخادم، فلا يقبل التطبيق خادمًا آخر.</p>
-<div class="link">{{app_link}}</div></div>
+DASHBOARD = r"""{% macro ic(n) %}<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-{{n}}"/></svg>{% endmacro %}{% set nokey = (engine=='gemini' and not gemini_set) or (engine=='claude' and not claude_set) %}<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#ffffff"><meta name="robots" content="noindex,nofollow"><meta name="format-detection" content="telephone=no">
+<title>لوحة التحكّم</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300..700&family=JetBrains+Mono:wght@500;700&display=swap">
+<script>try{document.documentElement.dataset.theme=localStorage.getItem('th')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')}catch(e){}</script>
+<style>
+/* ---- tokens: teal means "working", red means "stopped", everything else stays neutral ---- */
+:root{--bg:#eef2f1;--card:#fff;--soft:#f3f6f5;--line:#dce4e2;--dash:#b7c5c2;--ink:#10201f;--mut:#566664;
+--pri:#0f6b66;--prih:#0b5651;--prik:#fff;--prisoft:#def0ed;--ring:rgba(15,107,102,.22);
+--bad:#b42318;--badk:#fff;--badsoft:#fdeae7;--warn:#7a4f00;--warnsoft:#fbefd2;
+--hero:#0c3d3a;--heroline:rgba(255,255,255,.14);--herobd:transparent;--off:#a6b4b1;
+--pop:0 18px 48px rgba(12,32,30,.22);--nav:60px;--sb:env(safe-area-inset-bottom,0px);
+--mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color-scheme:light}
+[data-theme=dark]{--bg:#0a1211;--card:#111b1a;--soft:#182423;--line:#243432;--dash:#3a4d4a;--ink:#e3eeec;--mut:#8c9e9b;
+--pri:#56c8bf;--prih:#74d6ce;--prik:#05201e;--prisoft:#12322f;--ring:rgba(86,200,191,.28);
+--bad:#f6817a;--badk:#2b0a08;--badsoft:#3a1b19;--warn:#f1c35c;--warnsoft:#33290f;
+--hero:#0e2a28;--herobd:#1d3d3a;--off:#3b4d4a;--pop:0 18px 48px rgba(0,0,0,.55);color-scheme:dark}
 
-<div class="card"><h2>المفاتيح</h2>
-<p class="muted">المفتاح يبقى على الخادم (مختوم على القرص)، ولا يُرسل للأجهزة. التطبيق يرسل نص التغريدة فيُكتب الرد هنا.</p>
-<form class="row" method="post" action="/{{admin}}/key" style="margin-top:12px">
-<input type="hidden" name="which" value="gemini">
-<b class="ktag">Gemini</b>
-<input name="api_key" placeholder="{{gemini_set and 'مضبوط — الصق مفتاحًا جديدًا للتبديل' or 'الصق مفتاح Gemini'}}" style="flex:1;min-width:180px">
-<input name="model" value="{{gemini_model}}" placeholder="{{gemini_default}}" style="width:160px">
-<button>حفظ</button></form>
-<form class="row" method="post" action="/{{admin}}/key" style="margin-top:10px">
-<input type="hidden" name="which" value="claude">
-<b class="ktag">Claude</b>
-<input name="api_key" placeholder="{{claude_set and 'مضبوط — الصق مفتاحًا جديدًا للتبديل' or 'الصق مفتاح Claude (sk-ant-…)'}}" style="flex:1;min-width:180px">
-<input name="model" value="{{claude_model}}" placeholder="{{claude_default}}" style="width:160px">
-<button>حفظ</button></form>
-<form class="row" method="post" action="/{{admin}}/engine" style="margin-top:16px">
-<b>الكاتب الآن:</b>
-<label class="rad"><input type="radio" name="engine" value="gemini" {{engine=='gemini' and 'checked' or ''}}> Gemini {{gemini_set and '✅' or '—'}}</label>
-<label class="rad"><input type="radio" name="engine" value="claude" {{engine=='claude' and 'checked' or ''}}> Claude {{claude_set and '✅' or '—'}}</label>
-<button>تفعيل</button></form></div>
+/* ---- base ---- */
+*{box-sizing:border-box}[hidden]{display:none!important}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;color:var(--ink);background:var(--bg);font:400 15px/1.65 "Readex Pro","IBM Plex Sans Arabic","Segoe UI",system-ui,-apple-system,"Noto Sans Arabic",Tahoma,sans-serif;-webkit-tap-highlight-color:transparent}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer;touch-action:manipulation}
+h2,h3,p,dl,dd,ul{margin:0}
+h2{font-size:18px;font-weight:600;line-height:1.45}
+h3{font-size:16px;font-weight:600;line-height:1.45}
+.mut{color:var(--mut)}
+.i{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+:focus-visible{outline:2px solid var(--pri);outline-offset:2px}
+.wrap{max-width:1120px;margin:0 auto;padding-inline:16px}
 
-<div class="card"><h2>رموز الدخول</h2>
-<form class="row" method="post" action="/{{admin}}/code/new" style="margin:12px 0 6px">
-<input name="label" placeholder="اسم المستخدم (اختياري)" style="flex:1;min-width:160px"><button>+ رمز جديد</button></form>
-{% if codes %}<form method="post" action="/{{admin}}/reset-cost-all" onsubmit="return confirm('تصفير كل التكاليف لكل الرموز؟')" style="margin-bottom:6px"><button class="gray">تصفير كل التكاليف</button></form>{% endif %}
-{% for c in codes %}
-<div class="code-card">
-  <div class="row" style="justify-content:space-between">
-    <div class="row"><code>{{c.code}}</code> <b>{{c.label}}</b> <span class="pill {{c.active and 'on' or 'off'}}">{{c.active and 'يعمل' or 'موقوف'}}</span></div>
-    <div class="muted">آخر دخول {{c.last_seen_text}}</div>
-  </div>
-  <div class="stats">
-    <div class="stat">الجهاز<b>{% if c.bound_device %}<span class="on">مربوط</span>{% else %}<span class="muted">غير مربوط</span>{% endif %}</b></div>
-    <div class="stat">التعليقات<b>{{c.usage.total}}</b></div>
-    <div class="stat">التكلفة<b>${{'%.2f'|format(c.usage.cost)}}</b></div>
-  </div>
-  {% if c.usage.accounts %}<table><tr><th>حساب X</th><th>تعليقات</th><th>التكلفة</th></tr>
-  {% for a in c.usage.accounts %}<tr><td>{{ a.name and ('@' + a.name) or ('#' + a.id[:8]) }}</td><td>{{a.n}}</td><td>${{'%.2f'|format(a.cost)}}</td></tr>{% endfor %}</table>{% endif %}
-  <div class="row" style="margin-top:12px">
-    <form method="post" action="/{{admin}}/code/toggle"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">{{c.active and 'إيقاف' or 'تشغيل'}}</button></form>
-    {% if c.bound_device %}<form method="post" action="/{{admin}}/code/release" onsubmit="return confirm('تحرير الرمز من جهازه الحالي؟ يقدر يُفعّل على جوال آخر.')"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">تحرير الجهاز</button></form>{% endif %}
-    {% if c.usage.total %}<form method="post" action="/{{admin}}/code/reset-cost" onsubmit="return confirm('تصفير تكلفة هذا الرمز؟')"><input type="hidden" name="id" value="{{c.id}}"><button class="gray">تصفير التكلفة</button></form>{% endif %}
-    <form method="post" action="/{{admin}}/code/delete" onsubmit="return confirm('حذف الرمز نهائيًا؟')"><input type="hidden" name="id" value="{{c.id}}"><button class="red">حذف</button></form>
-  </div>
-</div>{% endfor %}
-{% if not codes %}<p class="muted">لا توجد رموز بعد. أنشئ رمزًا وأعطه للمستخدم.</p>{% endif %}
+/* ---- top bar + navigation (bottom bar on phones, inline tabs on wide screens) ---- */
+.top{background:var(--card);border-bottom:1px solid var(--line)}
+.topin{display:flex;align-items:center;gap:12px;min-height:60px}
+.brand{display:flex;align-items:center;gap:11px;min-width:0}
+.logo{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;background:var(--hero);color:#eef8f6;font-weight:600;font-size:19px;flex:none}
+.brand b{display:block;font-size:16px;font-weight:600;line-height:1.4}
+.brand small{display:block;font-size:12.5px;color:var(--mut);line-height:1.4}
+.acts{display:flex;gap:6px;margin-inline-start:auto}
+.ib{width:42px;height:42px;padding:0;border:1px solid var(--line);background:var(--card);border-radius:12px;display:grid;place-items:center;color:var(--mut);flex:none}
+.ib:hover{color:var(--ink);background:var(--soft)}
+.th .s{display:none}[data-theme=dark] .th .s{display:block}[data-theme=dark] .th .m{display:none}
+.nav{position:fixed;inset-inline:0;bottom:0;z-index:30;display:flex;background:var(--card);border-top:1px solid var(--line);padding-bottom:var(--sb)}
+.nav button{position:relative;flex:1;height:var(--nav);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:0;background:none;color:var(--mut);font-size:12px;font-weight:500}
+.nav .i{width:22px;height:22px}
+.nav [aria-current]{color:var(--pri);font-weight:600}
+.nav [aria-current]::before{content:"";position:absolute;top:-1px;inset-inline:30%;height:3px;border-radius:0 0 4px 4px;background:var(--pri)}
+.nav .dot{position:absolute;top:9px;inset-inline-start:calc(50% + 7px);width:8px;height:8px;border-radius:50%;background:var(--bad);box-shadow:0 0 0 2px var(--card)}
+main{padding-bottom:calc(var(--nav) + var(--sb) + 28px)}
+.panel{display:none}.panel.on{display:block}
+
+/* ---- controls ---- */
+input{width:100%;height:46px;padding:0 14px;border:1px solid var(--line);border-radius:12px;background:var(--soft);outline:0;font-size:16px}
+input:focus{border-color:var(--pri);box-shadow:0 0 0 3px var(--ring);background:var(--card)}
+input::placeholder{color:var(--mut);opacity:.8}
+.btn{display:inline-flex;gap:8px;align-items:center;justify-content:center;min-height:46px;padding:0 18px;border:0;border-radius:12px;font-weight:600;font-size:15px;white-space:nowrap;color:var(--prik);background:var(--pri)}
+.btn:hover{background:var(--prih)}
+.btn.ghost{background:var(--card);color:var(--ink);border:1px solid var(--line)}.btn.ghost:hover{background:var(--soft)}
+.btn.danger{background:var(--bad);color:var(--badk)}
+.btn.wide{width:100%}
+.busy{opacity:.6;pointer-events:none}
+.l{display:block;font-size:13.5px;font-weight:500;color:var(--mut);margin:16px 0 6px}.l small{font-weight:400}
+.pw{position:relative}.pw input{padding-left:50px}
+.eye{position:absolute;left:4px;top:4px;width:38px;height:38px;padding:0;border:0;border-radius:10px;background:none;color:var(--mut);display:grid;place-items:center}
+.eye[aria-pressed=true]{color:var(--pri)}
+.kin:placeholder-shown{direction:rtl}
+
+/* ---- summary ---- */
+.note{display:flex;gap:10px;align-items:flex-start;background:var(--warnsoft);color:var(--warn);border-radius:14px;padding:12px 14px;font-size:14px;margin-top:16px}
+.note .i{width:18px;height:18px;margin-top:3px}
+.note button{border:0;background:none;padding:0;color:inherit;font-weight:600;text-decoration:underline;text-underline-offset:3px}
+.hero{background:var(--hero);border:1px solid var(--herobd);color:#eef8f6;border-radius:20px;padding:16px 18px 0;margin-top:16px}
+.ht{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.tot{display:flex;align-items:baseline;gap:9px}
+.tot b{font-size:42px;font-weight:300;line-height:1;font-variant-numeric:tabular-nums}
+.tot span{font-size:14px;color:#a3cbc6}
+.hb{display:inline-flex;align-items:center;gap:6px;height:40px;padding:0 12px;border:1px solid rgba(255,255,255,.24);border-radius:10px;background:none;color:#d7ebe8;font-size:13px;font-weight:500}
+.hb:hover{background:rgba(255,255,255,.08)}
+.hb .i{width:16px;height:16px}
+.ratio{display:flex;height:8px;border-radius:99px;background:rgba(255,255,255,.17);overflow:hidden;margin-top:14px}
+.ratio i{border-radius:99px;background:#63d6ca}
+.rl{display:flex;justify-content:space-between;gap:12px;font-size:13px;color:#a3cbc6;margin-top:7px}
+.rl b{color:#fff;font-weight:600;font-variant-numeric:tabular-nums}
+.kp{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin-top:12px;border-top:1px solid var(--heroline)}
+.kp div{padding:10px 0 12px;padding-inline-start:14px;border-inline-start:1px solid var(--heroline)}
+.kp div:first-child{padding-inline-start:0;border:0}
+.kp dt{font-size:12px;color:#a3cbc6;line-height:1.5}
+.kp dd{font-size:20px;font-weight:500;line-height:1.4;font-variant-numeric:tabular-nums}
+
+/* ---- search, filter, sort ---- */
+.tb{position:sticky;top:0;z-index:10;display:flex;gap:8px;padding:10px 0 8px;margin-top:4px;background:var(--bg)}
+.search{position:relative;flex:1;min-width:0}
+.search .i{position:absolute;inset-inline-start:13px;top:13px;color:var(--mut);pointer-events:none}
+.search input{padding-inline:42px;border-radius:14px;background:var(--card)}
+.search input::-webkit-search-cancel-button{display:none}
+.qx{position:absolute;inset-inline-end:4px;top:4px;width:38px;height:38px;padding:0;border:0;border-radius:10px;background:none;color:var(--mut);display:grid;place-items:center}
+.qx .i{width:17px;height:17px}
+.add{border-radius:14px;padding:0 15px}
+.add .wd{display:none}
+.fr{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.seg{display:flex;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:3px}
+.seg button{height:38px;padding:0 13px;border:0;border-radius:9px;background:none;color:var(--mut);font-weight:500;font-size:14px}
+.seg [aria-pressed=true]{background:var(--ink);color:var(--card);font-weight:600}
+.sort{position:relative;display:inline-flex;align-items:center;gap:7px;height:46px;padding:0 12px;border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--mut);font-size:14px;font-weight:500}
+.sort .i{width:17px;height:17px}
+.sort select{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;font-size:16px}
+.sort:focus-within{outline:2px solid var(--pri);outline-offset:2px}
+
+/* ---- one user ---- */
+.list{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
+.u{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px 10px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px}
+.who{display:flex;gap:12px;align-items:center;min-width:0}
+.av{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;flex:none;font-weight:600;font-size:18px;line-height:1;background:hsl(var(--h,174) 50% 50%/.15);color:hsl(var(--h,174) 62% 33%)}
+[data-theme=dark] .av{color:hsl(var(--h,174) 58% 72%)}
+.nm{min-width:0}
+.nm h3{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nm p{display:flex;flex-wrap:wrap;align-items:center;column-gap:9px;font-size:12.5px;line-height:1.6;color:var(--mut)}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:600;color:var(--pri)}
+.st::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.sw{position:relative;width:52px;height:32px;padding:0;border:0;border-radius:99px;background:var(--off);flex:none;transition:background .2s}
+.sw::after{content:"";position:absolute;inset:-7px -5px}
+.sw i{position:absolute;top:3px;inset-inline-start:3px;width:26px;height:26px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:inset-inline-start .2s}
+.sw.on{background:var(--pri)}.sw.on i{inset-inline-start:23px}
+.cr{grid-column:1/-1;display:flex;gap:8px}
+.code{flex:1;min-width:0;display:flex;align-items:center;gap:10px;min-height:46px;padding:0 14px;border:1px dashed var(--dash);border-radius:12px;background:var(--soft);transition:background .2s,border-color .2s}
+.code bdi{font:700 15.5px/1 var(--mono);letter-spacing:.05em;direction:ltr;white-space:nowrap}
+.code .i{width:18px;height:18px;margin-inline-start:auto;color:var(--mut)}
+.code:hover{border-color:var(--pri)}
+.code.ok{border-style:solid;border-color:var(--pri);background:var(--prisoft)}.code.ok .i{color:var(--pri)}
+.cr .ib{width:46px;height:46px}
+.facts{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:0 14px;font-size:13.5px;color:var(--mut)}
+.facts b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.dev{display:inline-flex;align-items:center;gap:5px;margin-inline-start:auto;font-size:12.5px;font-weight:500}
+.dev .i{width:15px;height:15px}
+.dev.on{color:var(--pri)}
+.u.off .st{color:var(--bad)}
+.u.off .av{filter:grayscale(1);opacity:.55}
+.u.off h3{color:var(--mut)}
+.u.off .code bdi{text-decoration:line-through;color:var(--mut)}
+.acc{grid-column:1/-1;min-width:0}
+.acc summary{min-height:44px;margin-block:-10px;list-style:none;cursor:pointer;border-radius:8px}
+.acc summary::-webkit-details-marker{display:none}
+.acc summary>.i{width:17px;height:17px;margin-inline-start:-6px;transition:transform .2s}
+.acc[open] summary>.i{transform:rotate(180deg)}
+.alh{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:12.5px;font-weight:500;color:var(--mut)}
+.al{list-style:none;padding:0;margin-top:8px;display:grid;gap:11px}
+.al li{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:5px 14px;align-items:baseline;font-size:13.5px;color:var(--mut)}
+.al b{font-weight:500;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.al span{font-variant-numeric:tabular-nums}
+.pg{grid-column:1/-1;height:4px;border-radius:9px;background:var(--line);overflow:hidden}
+.pg i{display:block;height:100%;border-radius:9px;background:var(--pri)}
+.empty{text-align:center;padding:40px 20px;color:var(--mut);background:var(--card);border:1px dashed var(--dash);border-radius:16px}
+.empty h3{color:var(--ink);margin-bottom:4px}
+.empty .btn{margin-top:16px}
+
+/* ---- keys + link ---- */
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;margin-top:16px}
+.pad{padding:18px}
+.eng{display:grid;gap:10px;margin-top:14px}
+.opt{position:relative;display:flex;gap:12px;align-items:center;min-height:66px;padding:10px 14px;border:1.5px solid var(--line);border-radius:14px;background:var(--soft);cursor:pointer}
+.opt input{position:absolute;opacity:0;width:1px;height:1px}
+.opt b{display:block;font-weight:600;line-height:1.45}
+.opt small{display:block;font-size:12.5px;color:var(--mut)}
+.ck{margin-inline-start:auto;width:24px;height:24px;border-radius:50%;border:1.5px solid var(--dash);display:grid;place-items:center;color:transparent;flex:none}
+.ck .i{width:14px;height:14px;stroke-width:3}
+.opt:has(input:checked){border-color:var(--pri);background:var(--prisoft)}
+.opt:has(input:checked) .ck{background:var(--pri);border-color:var(--pri);color:var(--prik)}
+.opt:has(input:focus-visible){outline:2px solid var(--pri);outline-offset:2px}
+.pi{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;flex:none;font:700 17px/1 var(--mono);background:var(--card);border:1px solid var(--line)}
+.g2{display:grid;gap:12px;margin-top:12px}.g2 .card{margin:0}
+.ph{display:flex;gap:12px;align-items:center}
+.b{display:inline-flex;gap:6px;align-items:center;font-size:12.5px;font-weight:600}
+.b::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.b.on{color:var(--pri)}.b.off{color:var(--bad)}
+.tag{margin-inline-start:auto;background:var(--prisoft);color:var(--pri);border-radius:99px;padding:2px 11px;font-size:12.5px;font-weight:600;white-space:nowrap}
+.hint{display:flex;gap:8px;align-items:flex-start;font-size:13px;color:var(--mut);margin:14px 0 16px}
+.hint .i{width:16px;height:16px;margin-top:3px}
+.lk{display:block;direction:ltr;text-align:left;word-break:break-all;font:500 13px/1.75 var(--mono);background:var(--soft);border:1px dashed var(--dash);border-radius:12px;padding:12px 14px;margin-top:14px;-webkit-user-select:all;user-select:all}
+.da{display:flex;gap:10px;margin-top:20px}.da .btn{flex:1}
+.lk + .da{margin-top:12px}
+.notes{list-style:none;padding:0;margin-top:20px;display:grid;gap:10px;color:var(--mut);font-size:14px}
+.notes li{display:flex;gap:10px;align-items:flex-start}
+.notes .i{width:18px;height:18px;margin-top:3px;color:var(--pri)}
+
+/* ---- dialogs: sheets rise from the bottom on phones ---- */
+dialog{border:0;padding:0;background:var(--card);color:var(--ink);box-shadow:var(--pop);max-height:calc(100vh - 24px);overflow:auto}
+dialog::backdrop{background:rgba(6,14,13,.55)}
+dialog[open]{animation:pop .22s cubic-bezier(.2,.8,.2,1)}
+.ask{width:calc(100vw - 32px);max-width:420px;margin:12vh auto auto;border-radius:20px}
+.sheet{width:100%;max-width:100%;margin:auto 0 0;border-radius:22px 22px 0 0;padding-bottom:var(--sb)}
+.sheet[open]{animation:rise .26s cubic-bezier(.2,.8,.2,1)}
+@keyframes rise{from{transform:translateY(100%)}}
+@keyframes pop{from{transform:translateY(12px);opacity:0}}
+.grab{width:38px;height:4px;border-radius:9px;background:var(--dash);margin:9px auto 0}
+.dg{padding:20px 18px 18px}
+.dg h3{font-size:18px}
+.shh{display:flex;gap:12px;align-items:center;padding:12px 16px 14px;border-bottom:1px solid var(--line)}
+.shh div:nth-child(2){min-width:0;flex:1}
+.shh h3{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.shh bdi{display:block;font:500 13px/1.5 var(--mono);color:var(--mut);direction:ltr;text-align:right}
+.shl{display:grid;padding:6px 8px 10px}
+.shl button{display:flex;gap:13px;align-items:center;width:100%;min-height:52px;padding:6px 10px;border:0;border-radius:12px;background:none;font-size:15.5px;font-weight:500;text-align:start}
+.shl button:hover{background:var(--soft)}
+.shl button .i{color:var(--mut)}
+.shl small{display:block;font-size:12.5px;font-weight:400;line-height:1.5;color:var(--mut)}
+.shl hr{border:0;border-top:1px solid var(--line);margin:6px 10px}
+.shl .del button,.shl .del button .i{color:var(--bad)}
+.big{display:block;margin-top:16px;padding:22px 8px;border:1.5px dashed var(--dash);border-radius:14px;background:var(--soft);text-align:center;direction:ltr;font:700 clamp(19px,6.2vw,26px)/1 var(--mono);letter-spacing:.06em;-webkit-user-select:all;user-select:all}
+.toasts{position:fixed;inset-inline:0;bottom:calc(var(--nav) + var(--sb) + 14px);z-index:99;display:flex;flex-direction:column;align-items:center;gap:8px;padding:0 16px;pointer-events:none}
+.toast{background:var(--ink);color:var(--card);padding:10px 18px;border-radius:12px;font-weight:500;font-size:14px;box-shadow:var(--pop);animation:pop .2s}
+.toast.out{opacity:0;transition:opacity .3s}
+
+/* ---- wider screens ---- */
+@media(min-width:420px){.add .wd{display:inline}}
+@media(min-width:600px){
+.eng{grid-template-columns:1fr 1fr}
+.sheet{width:420px;margin:auto;border-radius:20px;padding-bottom:0}
+.sheet[open]{animation-name:pop}
+.ask{margin:auto}
+.grab{display:none}
+.shh{padding-top:16px}
+.lk + .da .btn{flex:none}
+}
+@media(min-width:700px){.list{grid-template-columns:repeat(auto-fill,minmax(330px,1fr));align-items:start;gap:12px}}
+@media(min-width:800px){.g2{grid-template-columns:1fr 1fr}.pad{padding:22px}}
+@media(min-width:900px){
+.wrap{padding-inline:24px}
+.topin{min-height:64px}
+.nav{position:static;gap:4px;margin-inline-start:20px;padding:0;border:0;background:none}
+.nav button{flex:none;flex-direction:row;gap:8px;height:40px;padding:0 14px;border-radius:10px;font-size:14.5px}
+.nav .i{width:19px;height:19px}
+.nav [aria-current]{background:var(--prisoft)}
+.nav [aria-current]::before{display:none}
+.nav .dot{position:static;margin-inline-start:-2px;box-shadow:none}
+main{padding-bottom:56px}
+.toasts{bottom:24px}
+.hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);align-items:center;gap:0 30px;padding:22px 26px;margin-top:22px}
+.kp{margin:0;border-top:0;border-inline-start:1px solid var(--heroline)}
+.kp div{padding:6px 0;padding-inline-start:22px}
+.kp div:first-child{padding-inline-start:26px}
+.kp dd{font-size:24px}
+.tb{padding-top:14px}
+.search{max-width:420px}
+.add{margin-inline-start:auto}
+}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></symbol>
+<symbol id="i-out" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+<symbol id="i-phone" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></symbol>
+<symbol id="i-reset" viewBox="0 0 24 24"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-users" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m11.4 11.6 9.6-9.6M17 6l3 3M14 9l2 2"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+<symbol id="i-share" viewBox="0 0 24 24"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8M16 6l-4-4-4 4M12 2v13"/></symbol>
+<symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-sort" viewBox="0 0 24 24"><path d="M3 6h18M6 12h12M10 18h4"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+</defs></svg>
+
+<header class="top"><div class="wrap topin">
+<div class="brand"><div class="logo" aria-hidden="true">ق</div><div><b>لوحة التحكّم</b><small>رموز الدخول والمفاتيح</small></div></div>
+<nav class="nav" aria-label="أقسام اللوحة">
+<button type="button" data-t="users" aria-current="page">{{ic('users')}}<span>المستخدمون</span></button>
+<button type="button" data-t="keys">{{ic('key')}}<span>المفاتيح</span>{% if nokey %}<i class="dot" title="لا يوجد مفتاح للكاتب الحالي"></i>{% endif %}</button>
+<button type="button" data-t="link">{{ic('link')}}<span>الرابط</span></button>
+</nav>
+<div class="acts"><button class="ib th" id="th" type="button" aria-label="تبديل المظهر"><span class="m">{{ic('moon')}}</span><span class="s">{{ic('sun')}}</span></button>
+<form method="post" action="/{{admin}}/logout"><button class="ib" aria-label="تسجيل الخروج" title="تسجيل الخروج">{{ic('out')}}</button></form></div>
+</div></header>
+
+<main class="wrap">
+<section class="panel on" id="p-users">
+{% if nokey and codes %}<div class="note" role="status">{{ic('alert')}}<p>لا يوجد مفتاح للكاتب الحالي، فلن تُكتب أي تعليقات. <button type="button" data-t="keys">أضف المفتاح</button></p></div>{% endif %}
+{% if codes %}
+<section class="hero" aria-label="ملخّص المستخدمين">
+<div>
+<div class="ht"><div class="tot"><b>{{stats.users}}</b><span>مستخدم</span></div>
+{% if stats.comments %}<form method="post" action="/{{admin}}/reset-cost-all" data-title="تصفير كل التكاليف؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لكل المستخدمين." data-yes="تصفير التكاليف" data-kind="danger" data-toast="تم تصفير كل التكاليف"><button class="hb">{{ic('reset')}}تصفير التكاليف</button></form>{% endif %}</div>
+<div class="ratio" aria-hidden="true"><i style="width:{{ stats.active * 100 / stats.users }}%"></i></div>
+<div class="rl"><span><b>{{stats.active}}</b> يعمل</span><span><b>{{stats.users - stats.active}}</b> موقوف</span></div>
 </div>
+<dl class="kp">
+<div><dt>أجهزة مربوطة</dt><dd>{{stats.bound}}</dd></div>
+<div><dt>تعليقات مكتوبة</dt><dd>{{ '{:,}'.format(stats.comments) }}</dd></div>
+<div><dt>التكلفة التقديرية</dt><dd>${{ '%.2f'|format(stats.cost) }}</dd></div>
+</dl>
+</section>
+<div class="tb">
+<label class="search">{{ic('search')}}<input id="q" type="search" placeholder="ابحث بالاسم أو الرمز" aria-label="ابحث بالاسم أو الرمز" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"><button type="button" class="qx" id="qx" aria-label="مسح البحث" hidden>{{ic('x')}}</button></label>
+<button class="btn add" type="button" data-open="nu" aria-label="إضافة مستخدم">{{ic('plus')}}<span>إضافة<span class="wd"> مستخدم</span></span></button>
+</div>
+<div class="fr">
+<div class="seg" id="flt" role="group" aria-label="تصفية حسب الحالة"><button type="button" data-f="all" aria-pressed="true">الكل</button><button type="button" data-f="on" aria-pressed="false">يعمل</button><button type="button" data-f="off" aria-pressed="false">موقوف</button></div>
+<label class="sort">{{ic('sort')}}<span id="sol">الأحدث</span><select id="so" aria-label="ترتيب المستخدمين"><option value="new" data-s="الأحدث">الأحدث إضافةً</option><option value="seen" data-s="آخر دخول">آخر دخول</option><option value="top" data-s="الأكثر تعليقًا">الأكثر تعليقًا</option><option value="name" data-s="الاسم">الاسم</option></select></label>
+</div>
+{% endif %}
 
-</div></body></html>"""
+<div class="list" id="list">
+{% for c in codes %}{% set hue = (c.id[:2]|int(0,16)) * 360 // 256 %}
+<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.bound_device else '' }}" data-n="{{c.usage.total}}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
+<div class="who"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (c.label or '؟')[:1] }}</div>
+<div class="nm"><h3>{{ c.label or 'بدون اسم' }}</h3><p><span class="st">{{ 'يعمل' if c.active else 'موقوف' }}</span><span>{% if c.last_seen %}آخر دخول {{c.last_seen_text}}{% else %}لم يدخل بعد{% endif %}</span></p></div></div>
+<form method="post" action="/{{admin}}/code/toggle" data-toast="{{ 'تم إيقاف الرمز' if c.active else 'تم تشغيل الرمز' }}"><input type="hidden" name="id" value="{{c.id}}"><button class="sw{{ ' on' if c.active else '' }}" role="switch" aria-checked="{{ 'true' if c.active else 'false' }}" aria-label="رمز {{ c.label or 'بدون اسم' }} يعمل"><i></i></button></form>
+<div class="cr"><button type="button" class="code" data-copy="{{c.code}}" aria-label="نسخ الرمز {{c.code}}"><bdi>{{c.code}}</bdi>{{ic('copy')}}</button><button type="button" class="ib" data-more aria-label="خيارات {{ c.label or 'المستخدم' }}">{{ic('more')}}</button></div>
+{% set facts %}<span><b>{{ '{:,}'.format(c.usage.total) }}</b> تعليق</span><span title="التكلفة التقديرية"><b>${{ '%.2f'|format(c.usage.cost) }}</b></span><span class="dev{{ ' on' if c.bound_device else '' }}">{{ic('phone')}}{{ 'جهاز مربوط' if c.bound_device else 'غير مربوط' }}</span>{% endset %}
+{% if c.usage.accounts %}<details class="acc"><summary class="facts" title="التعليقات حسب حساب X">{{facts}}{{ic('chev')}}</summary>
+<p class="alh">حسابات X ({{c.usage.accounts|length}})</p><ul class="al">
+{% for a in c.usage.accounts %}<li><b><bdi>{{ ('@' ~ a.name) if a.name else ('#' ~ a.id[:8]) }}</bdi></b><span>{{ '{:,}'.format(a.n) }} تعليق</span><span>${{ '%.2f'|format(a.cost) }}</span><div class="pg"><i style="width:{{ ((a.n * 100 / c.usage.total)|round|int) if c.usage.total else 0 }}%"></i></div></li>{% endfor %}
+</ul></details>{% else %}<div class="facts">{{facts}}</div>{% endif %}
+</article>
+{% endfor %}
+</div>
+{% if not codes %}<div class="empty" style="margin-top:16px"><h3>لا يوجد مستخدمون بعد</h3><p>أضف مستخدمًا ليُنشأ له رمز دخول يفتح به التطبيق.</p><button class="btn" type="button" data-open="nu">{{ic('plus')}}إضافة مستخدم</button></div>{% endif %}
+<div class="empty" id="nomatch" hidden><h3>لا نتائج</h3><p>جرّب اسمًا أو رمزًا آخر، أو غيّر التصفية.</p><button class="btn ghost" type="button" id="clr">عرض كل المستخدمين</button></div>
+</section>
 
+<section class="panel" id="p-keys">
+<div class="card pad"><h2>الكاتب الحالي</h2><p class="mut">اختر المحرّك الذي يكتب التعليقات. يمكنك التبديل بينهما في أي لحظة.</p>
+<form class="eng" method="post" action="/{{admin}}/engine" data-toast="تم تغيير الكاتب">
+<label class="opt"><input type="radio" name="engine" value="gemini" {{ 'checked' if engine=='gemini' else '' }} onchange="this.form.requestSubmit()"><span class="pi" aria-hidden="true">G</span><span><b>Gemini</b><small>{{ 'المفتاح مضبوط' if gemini_set else 'لا يوجد مفتاح' }}</small></span><span class="ck">{{ic('check')}}</span></label>
+<label class="opt"><input type="radio" name="engine" value="claude" {{ 'checked' if engine=='claude' else '' }} onchange="this.form.requestSubmit()"><span class="pi" aria-hidden="true">C</span><span><b>Claude</b><small>{{ 'المفتاح مضبوط' if claude_set else 'لا يوجد مفتاح' }}</small></span><span class="ck">{{ic('check')}}</span></label>
+<noscript><button class="btn">تفعيل</button></noscript></form>
+{% if nokey %}<div class="note" role="status">{{ic('alert')}}<p>الكاتب المختار بلا مفتاح، فلن تُكتب أي تعليقات. أضف مفتاحه في الأسفل أو اختر الكاتب الآخر.</p></div>{% endif %}
+</div>
+<div class="g2">
+{% for k in [('gemini','Gemini',gemini_set,gemini_model,gemini_default,'G','الصق مفتاح Gemini'),('claude','Claude',claude_set,claude_model,claude_default,'C','الصق مفتاح Claude (sk-ant-…)')] %}
+<form class="card pad" method="post" action="/{{admin}}/key" data-toast="تم حفظ إعدادات {{k[1]}}"><input type="hidden" name="which" value="{{k[0]}}">
+<div class="ph"><span class="pi" aria-hidden="true">{{k[5]}}</span><div><h3>{{k[1]}}</h3><span class="b {{ 'on' if k[2] else 'off' }}">{{ 'المفتاح مضبوط' if k[2] else 'لا يوجد مفتاح' }}</span></div>{% if engine==k[0] %}<span class="tag">الكاتب الحالي</span>{% endif %}</div>
+<label class="l" for="k-{{k[0]}}">مفتاح API</label>
+<div class="pw"><input class="kin" id="k-{{k[0]}}" type="password" name="api_key" dir="ltr" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="{{ 'الصق مفتاحًا جديدًا للتبديل' if k[2] else k[6] }}"><button type="button" class="eye" data-eye aria-label="إظهار المفتاح" aria-pressed="false">{{ic('eye')}}</button></div>
+<label class="l" for="m-{{k[0]}}">النموذج</label><input id="m-{{k[0]}}" name="model" dir="ltr" value="{{k[3]}}" placeholder="{{k[4]}}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+<p class="hint">{{ic('lock')}}<span>يُحفظ المفتاح مختومًا على الخادم ولا يُرسل إلى الأجهزة.</span></p>
+<button class="btn wide">حفظ الإعدادات</button></form>
+{% endfor %}
+</div>
+</section>
+
+<section class="panel" id="p-link">
+<div class="card pad"><h2>رابط التطبيق</h2><p class="mut">انسخه كاملًا وضعه في التطبيق عند إعداد الخادم.</p>
+<code class="lk">{{app_link}}</code>
+<div class="da"><button type="button" class="btn" data-copy="{{app_link}}">{{ic('copy')}}نسخ الرابط</button><button type="button" class="btn ghost" data-share="{{app_link}}">{{ic('share')}}مشاركة</button></div>
+<ul class="notes"><li>{{ic('shield')}}<span>يحمل الرابط بصمة شهادة الخادم، فلا يقبل التطبيق أي خادم آخر.</span></li><li>{{ic('lock')}}<span>الرابط سرّي: شاركه فقط مع من تعطيه رمز دخول.</span></li></ul></div>
+</section>
+</main>
+
+<dialog id="sheet" class="sheet" aria-labelledby="sh-name"><div class="grab"></div>
+<div class="shh"><div class="av" id="sh-av" aria-hidden="true"></div><div><h3 id="sh-name"></h3><bdi id="sh-code"></bdi></div><button type="button" class="ib" data-close aria-label="إغلاق">{{ic('x')}}</button></div>
+<div class="shl">
+<button type="button" id="sh-copy" data-copy="" data-close>{{ic('copy')}}نسخ الرمز</button>
+<button type="button" id="sh-share" data-share="" data-close>{{ic('share')}}مشاركة الرمز</button>
+<button type="button" id="sh-rename">{{ic('edit')}}تعديل الاسم</button>
+<form id="sh-release" method="post" action="/{{admin}}/code/release" data-title="تحرير الجهاز؟" data-confirm="يُفكّ ارتباط الرمز بجواله الحالي ليتمكّن صاحبه من تفعيله على جوال آخر." data-yes="تحرير الجهاز" data-toast="تم تحرير الجهاز"><input type="hidden" name="id"><button>{{ic('phone')}}<span>تحرير الجهاز<small>ليُفعَّل الرمز على جوال آخر</small></span></button></form>
+<form id="sh-reset" method="post" action="/{{admin}}/code/reset-cost" data-title="تصفير التكلفة؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لهذا المستخدم فقط." data-yes="تصفير التكلفة" data-kind="danger" data-toast="تم تصفير التكلفة"><input type="hidden" name="id"><button>{{ic('reset')}}تصفير التكلفة</button></form>
+<hr>
+<form class="del" method="post" action="/{{admin}}/code/delete" data-title="حذف المستخدم؟" data-confirm="يُحذف رمزه نهائيًا وتُفقد إحصائياته، ولا يمكن التراجع." data-yes="حذف المستخدم" data-kind="danger" data-toast="تم حذف المستخدم"><input type="hidden" name="id"><button>{{ic('trash')}}حذف المستخدم</button></form>
+</div></dialog>
+
+<dialog id="nu" class="ask" aria-labelledby="nu-t"><form class="dg" method="post" action="/{{admin}}/code/new" data-fresh><h3 id="nu-t">إضافة مستخدم</h3><p class="mut">يُنشأ له رمز دخول فريد تعطيه إيّاه.</p>
+<label class="l" for="nu-l">اسم المستخدم <small>(اختياري)</small></label><input id="nu-l" name="label" maxlength="40" placeholder="مثال: أحمد" autocomplete="off" enterkeyhint="done">
+<div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button class="btn">إضافة المستخدم</button></div></form></dialog>
+
+<dialog id="rn" class="ask" aria-labelledby="rn-t"><form class="dg" method="post" action="/{{admin}}/code/rename" data-toast="تم حفظ الاسم"><input type="hidden" name="id"><h3 id="rn-t">تعديل الاسم</h3><p class="mut">الاسم يظهر لك وحدك في هذه اللوحة، والرمز لا يتغيّر.</p>
+<label class="l" for="rn-l">اسم المستخدم</label><input id="rn-l" name="label" maxlength="40" autocomplete="off" enterkeyhint="done">
+<div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button class="btn">حفظ الاسم</button></div></form></dialog>
+
+<dialog id="rd" class="sheet" aria-labelledby="rd-h"><div class="grab"></div><div class="dg"><h3 id="rd-h">الرمز جاهز</h3><p class="mut" id="rd-t">أعطِ هذا الرمز للمستخدم ليفتح به التطبيق. يرتبط الرمز بأول جوال يُدخَل فيه.</p>
+<bdi class="big" id="rd-code"></bdi>
+<div class="da"><button type="button" class="btn ghost" id="rd-share" data-share="" data-close>{{ic('share')}}مشاركة</button><button type="button" class="btn" id="rd-copy" data-copy="" data-close>{{ic('copy')}}نسخ الرمز</button></div></div></dialog>
+
+<dialog id="cf" class="sheet" aria-labelledby="cft"><div class="grab"></div><div class="dg"><h3 id="cft"></h3><p class="mut" id="cfm"></p><div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button type="button" class="btn" id="cfok">تأكيد</button></div></div></dialog>
+<div class="toasts" aria-live="polite"></div>
+
+<script>
+(function(){
+var D=document,R=D.documentElement,
+$=function(s,r){return(r||D).querySelector(s)},
+$$=function(s,r){return[].slice.call((r||D).querySelectorAll(s))},
+NOW=Date.now();
+function lget(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function lset(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+function sget(k){try{return sessionStorage.getItem(k)}catch(e){return null}}
+function sset(k,v){try{v==null?sessionStorage.removeItem(k):sessionStorage.setItem(k,v)}catch(e){}}
+/* a value left for the very next page load only (it is dropped if that load comes late) */
+function leave(k,v){sset(k,Date.now()+'|'+v)}
+function take(k){var v=sget(k);if(v==null)return null;sset(k);var at=v.indexOf('|');return NOW-(+v.slice(0,at))<15000?v.slice(at+1):null}
+function toast(m){var t=D.createElement('div');t.className='toast';t.textContent=m;$('.toasts').appendChild(t);setTimeout(function(){t.classList.add('out');setTimeout(function(){t.remove()},300)},2400)}
+
+/* sections */
+var TABS=['users','keys','link'];
+function tab(n,byUser){if(TABS.indexOf(n)<0)n='users';
+$$('.panel').forEach(function(p){p.classList.toggle('on',p.id==='p-'+n)});
+$$('.nav button').forEach(function(b){if(b.dataset.t===n)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});
+lset('tab',n);if(byUser)window.scrollTo(0,0)}
+$$('[data-t]').forEach(function(b){b.addEventListener('click',function(){tab(b.dataset.t,true)})});
+tab(lget('tab'));
+
+/* light / dark */
+var tc=$('meta[name=theme-color]');
+function paint(){tc.content=R.dataset.theme==='dark'?'#111b1a':'#ffffff'}
+paint();
+$('#th').onclick=function(){R.dataset.theme=R.dataset.theme==='dark'?'light':'dark';lset('th',R.dataset.theme);paint()};
+
+/* search, filter and sort of the users */
+var list=$('#list'),rows=$$('.u'),q=$('#q'),so=$('#so'),nomatch=$('#nomatch'),fl=sget('fl')||'all';
+rows.forEach(function(u,i){u._i=i});
+var ORDER={
+'new':function(a,b){return a._i-b._i},
+seen:function(a,b){return b.dataset.seen-a.dataset.seen||a._i-b._i},
+top:function(a,b){return b.dataset.n-a.dataset.n||a._i-b._i},
+name:function(a,b){return a.dataset.name.localeCompare(b.dataset.name,'ar')||a._i-b._i}};
+function filter(){if(!q)return;var s=q.value.trim().toLowerCase(),n=0;
+rows.forEach(function(u){var ok=(fl==='all'||u.dataset.s===fl)&&(!s||u.dataset.q.indexOf(s)>-1);u.hidden=!ok;if(ok)n++});
+nomatch.hidden=n>0;$('#qx').hidden=!s;
+$$('#flt button').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.f===fl))});sset('fl',fl)}
+function sort(){if(!so)return;if(!ORDER[so.value])so.value='new';
+$('#sol').textContent=so.options[so.selectedIndex].dataset.s;
+rows.slice().sort(ORDER[so.value]).forEach(function(u){list.appendChild(u)});sset('so',so.value)}
+if(q){
+q.value=take('q')||'';so.value=sget('so')||'new';
+q.oninput=filter;so.onchange=sort;
+$('#qx').onclick=function(){q.value='';filter();q.focus()};
+$('#clr').onclick=function(){q.value='';fl='all';filter()};
+$$('#flt button').forEach(function(b){b.onclick=function(){fl=b.dataset.f;filter()}});
+}
+
+/* a user just added: show the new code, ready to copy or share */
+var added=take('new');
+if(added!=null&&rows.length===+added+1){var nu=rows[0],rd=$('#rd'),nc=nu.dataset.code;
+if(q){q.value='';fl='all';so.value='new'}
+$('#rd-code').textContent=nc;$('#rd-copy').dataset.copy=nc;$('#rd-share').dataset.share='رمز الدخول: '+nc;
+if(nu.dataset.name)$('#rd-t').textContent='أعطِ هذا الرمز لـ«'+nu.dataset.name+'» ليفتح به التطبيق. يرتبط الرمز بأول جوال يُدخَل فيه.';
+rd.showModal()}
+sort();filter();
+var y=take('y');if(y)window.scrollTo(0,+y);
+var note=take('toast');if(note)toast(note);
+
+/* copy and share */
+function copy(v,el){
+function ok(){toast('تم النسخ');if(el&&el.classList.contains('code')){var us=$('use',el),h=us.getAttribute('href');el.classList.add('ok');us.setAttribute('href','#i-check');setTimeout(function(){el.classList.remove('ok');us.setAttribute('href',h)},1300)}}
+function old(){var a=D.createElement('textarea');a.value=v;a.style.cssText='position:fixed;top:0;opacity:0';($('dialog[open]')||D.body).appendChild(a);a.select();var done=false;try{done=D.execCommand('copy')}catch(x){}a.remove();done?ok():toast('تعذّر النسخ. انسخه يدويًا.')}
+if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(v).then(ok,old);else old()}
+if(!navigator.share)$$('[data-share]').forEach(function(b){b.hidden=true});
+
+/* the options sheet of one user */
+var sheet=$('#sheet'),cur=null;
+function openSheet(u){cur=u;var d=u.dataset,av=$('.av',u),sa=$('#sh-av');
+$('#sh-name').textContent=d.name||'بدون اسم';$('#sh-code').textContent=d.code;
+sa.textContent=av.textContent;sa.style.setProperty('--h',av.style.getPropertyValue('--h'));
+$$('input[name=id]',sheet).forEach(function(i){i.value=d.id});
+$('#sh-copy').dataset.copy=d.code;$('#sh-share').dataset.share='رمز الدخول: '+d.code;
+$('#sh-release').hidden=!d.bound;$('#sh-reset').hidden=!+d.n;
+sheet.showModal()}
+$('#sh-rename').onclick=function(){sheet.close();var d=$('#rn'),i=$('#rn-l');$('input[name=id]',d).value=cur.dataset.id;i.value=cur.dataset.name;d.showModal();i.focus();i.select()};
+
+D.addEventListener('click',function(e){var t=e.target,el;
+if((el=t.closest('[data-more]'))){openSheet(el.closest('.u'));return}
+if((el=t.closest('[data-open]'))){var d=$('#'+el.dataset.open),i=$('input:not([type=hidden])',d);d.showModal();if(i){i.value='';i.focus()}return}
+if((el=t.closest('[data-eye]'))){var p=$('input',el.parentNode),show=p.type==='password';p.type=show?'text':'password';el.setAttribute('aria-pressed',String(show));return}
+if((el=t.closest('[data-copy]')))copy(el.dataset.copy,el);
+if((el=t.closest('[data-share]'))&&navigator.share)navigator.share({text:el.dataset.share}).catch(function(){});
+if((el=t.closest('[data-close]'))){el=el.closest('dialog');if(el)el.close()}
+else if(t.tagName==='DIALOG')t.close()});
+
+/* every change is a form post; risky ones ask first */
+var cf=$('#cf'),pending=null;
+function keep(f){if(f.dataset.toast)leave('toast',f.dataset.toast);
+if(f.hasAttribute('data-fresh'))leave('new',rows.length);
+else{leave('y',window.scrollY);if(q)leave('q',q.value)}}
+$('#cfok').onclick=function(){var f=pending;pending=null;cf.close();if(f){keep(f);f.submit()}};
+D.addEventListener('submit',function(e){var f=e.target;
+if(f.dataset.confirm){e.preventDefault();var o=f.closest('dialog'),b=$('#cfok');if(o)o.close();pending=f;
+$('#cft').textContent=f.dataset.title||'تأكيد الإجراء';$('#cfm').textContent=f.dataset.confirm;
+b.textContent=f.dataset.yes||'تأكيد';b.classList.toggle('danger',f.dataset.kind==='danger');cf.showModal();return}
+keep(f);
+var sw=$('.sw',f),go=$('button:not([type=button])',f);
+if(sw){sw.classList.toggle('on');sw.setAttribute('aria-checked',String(sw.classList.contains('on')))}
+if(go&&!sw)go.classList.add('busy')});
+})();
+</script>
+</body></html>
+"""
 
 def seen_text(row: dict) -> str:
     when = row.get("last_seen") or 0
@@ -861,8 +1263,12 @@ def dashboard():
     with LOCK:
         codes = load_codes()
     rows = [dict(c, last_seen_text=seen_text(c), usage=usage_of(c["id"])) for c in codes]
+    stats = {"users": len(rows), "active": sum(1 for r in rows if r.get("active")),
+             "bound": sum(1 for r in rows if r.get("bound_device")),
+             "comments": sum(r["usage"]["total"] for r in rows),
+             "cost": round(sum(r["usage"]["cost"] for r in rows), 2)}
     return render_template_string(
-        DASHBOARD, admin=ADMIN, app_link=app_link(), codes=rows,
+        DASHBOARD, admin=ADMIN, app_link=app_link(), codes=rows, stats=stats,
         engine=keys["engine"], gemini_set=bool(keys["gemini_sealed"]), claude_set=bool(keys["claude_sealed"]),
         gemini_model=keys["gemini_model"], claude_model=keys["claude_model"],
         gemini_default=GEMINI_DEFAULT_MODEL, claude_default=CLAUDE_DEFAULT_MODEL)
@@ -931,6 +1337,22 @@ def code_release():
         for row in codes:
             if row.get("id") == code_id:
                 row["bound_device"] = ""
+        save_codes(codes)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/code/rename")
+def code_rename():
+    """Change the name the owner sees for a code; the code itself and its phone stay as they are."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    code_id = request.form.get("id")
+    label = (request.form.get("label") or "").strip()[:40]
+    with LOCK:
+        codes = load_codes()
+        for row in codes:
+            if row.get("id") == code_id:
+                row["label"] = label
         save_codes(codes)
     return redirect(f"/{ADMIN}")
 
