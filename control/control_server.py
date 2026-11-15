@@ -262,6 +262,27 @@ def usage_of(code_id: str) -> dict:
     return {"total": total, "cost": round(total * COST_PER_COMMENT, 2), "accounts": accounts}
 
 
+def usage_by_account(code_id: str) -> dict:
+    """What the app shows its user: the comments of their code and their cost, by X account. Accounts go by
+    their @name: one signed in again (in the app, or after the app was installed again) is the same account,
+    whatever its new key; one whose name was never read stays on its own."""
+    row = load_usage().get(code_id) or {"total": 0, "accounts": {}}
+    merged: dict[str, dict] = {}
+    for key, value in (row.get("accounts") or {}).items():
+        if not isinstance(value, dict):
+            continue
+        name = str(value.get("name") or "").strip().lstrip("@")[:40]
+        slot = merged.setdefault(name.lower() if name else "id:" + str(key), {"name": name, "n": 0})
+        slot["n"] += int(value.get("n") or 0)
+        if name and not slot["name"]:
+            slot["name"] = name
+    accounts = sorted(
+        ({"name": slot["name"], "n": slot["n"], "cost": round(slot["n"] * COST_PER_COMMENT, 2)} for slot in merged.values()),
+        key=lambda item: -item["n"])
+    total = int(row.get("total") or 0)
+    return {"total": total, "cost": round(total * COST_PER_COMMENT, 2), "price": COST_PER_COMMENT, "accounts": accounts}
+
+
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash"
 CLAUDE_DEFAULT_MODEL = "claude-haiku-5-5"
 
@@ -1000,6 +1021,17 @@ def api_activate():
 def api_check():
     body = request.get_json(silent=True) or {}
     return api_ok(active=bool(code_from_token(body.get("token"))))
+
+
+@app.post(f"/{API}/usage")
+def api_usage():
+    """The app's page shows these at its top: the comments written for this code and their cost, in all and by
+    X account (kept here, so they stay when the app is installed again)."""
+    body = request.get_json(silent=True) or {}
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    return api_ok(**usage_by_account(row["id"]))
 
 
 @app.post(f"/{API}/comment")
