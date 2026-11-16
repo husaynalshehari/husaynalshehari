@@ -364,7 +364,16 @@ public class MainActivity extends Activity {
                 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 7);
             }
-            askBatteryExemption();
+            // The two settings that keep the task at full speed after leaving the app, asked when it matters:
+            // first the one-pixel window (without it the browsers nearly stop), then battery optimization.
+            if (!BrowserHost.mayStayOnScreen(this)) {
+                if (!overlayAskedAtTask) {
+                    overlayAskedAtTask = true;
+                    askForBackground();
+                }
+            } else {
+                askBatteryExemption();
+            }
             WorkService.start(this);
         } else {
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -376,6 +385,7 @@ public class MainActivity extends Activity {
     // work to save battery, even with a foreground service. Asking once to be left out of
     // battery optimization is what keeps the task at full speed after the user leaves the app.
     private boolean batteryAsked;
+    private boolean overlayAskedAtTask;
 
     void askBatteryExemption() {
         if (batteryAsked || Build.VERSION.SDK_INT < 23) {
