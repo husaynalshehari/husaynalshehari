@@ -19,7 +19,9 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.provider.MediaStore;
+import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -362,10 +364,59 @@ public class MainActivity extends Activity {
                 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 7);
             }
+            askBatteryExemption();
             WorkService.start(this);
         } else {
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             WorkService.stop(this);
+        }
+    }
+
+    // On aggressive phones (Xiaomi, Huawei, Oppo...) the system throttles or kills background
+    // work to save battery, even with a foreground service. Asking once to be left out of
+    // battery optimization is what keeps the task at full speed after the user leaves the app.
+    private boolean batteryAsked;
+
+    void askBatteryExemption() {
+        if (batteryAsked || Build.VERSION.SDK_INT < 23) {
+            return;
+        }
+        batteryAsked = true;
+        try {
+            PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+            if (power == null || power.isIgnoringBatteryOptimizations(getPackageName())) {
+                return;                                    // (already exempt — nothing to ask)
+            }
+            new AlertDialog.Builder(this)
+                .setTitle("إبقاء العمل في الخلفية")
+                .setMessage("لكي تستمر المهمة بكامل سرعتها بعد الخروج من التطبيق، يحتاج الجوال إلى "
+                    + "استثناء «قروبات» من توفير البطارية. اضغط «السماح» ثم اختر «عدم التحسين» أو «السماح».")
+                .setPositiveButton("السماح", (d, w) -> openBatteryExemption())
+                .setNegativeButton("لاحقًا", null)
+                .show();
+        } catch (RuntimeException e) {
+            AppLog.error("تعذّر فحص استثناء البطارية", e);
+        }
+    }
+
+    private void openBatteryExemption() {
+        // First the direct per-app request; if this phone refuses it, fall back to the battery
+        // settings list where the user can pick the app and turn optimization off by hand.
+        try {
+            Intent ask = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:" + getPackageName()));
+            startActivity(ask);
+            return;
+        } catch (RuntimeException e) {
+            AppLog.error("تعذّر فتح طلب استثناء البطارية المباشر", e);
+        }
+        try {
+            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+        } catch (RuntimeException e) {
+            AppLog.error("تعذّر فتح إعدادات البطارية", e);
+            Toast.makeText(this,
+                "افتح إعدادات البطارية واختر «قروبات» ثم «عدم التحسين» يدويًا.",
+                Toast.LENGTH_LONG).show();
         }
     }
 
