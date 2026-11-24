@@ -91,9 +91,9 @@ final class Store {
         saveQueue();
     }
 
-    /** Added at the end of the list unless it is already there or the list is full. */
-    synchronized boolean addToQueue(String name) {
-        if (queue.size() >= QUEUE_MAX) {
+    /** Added at the end of the search list unless it is already there or the list has its size (max). */
+    synchronized boolean addToQueue(String name, int max) {
+        if (queue.size() >= Math.min(max, QUEUE_MAX)) {
             return false;
         }
         for (String waiting : queue) {

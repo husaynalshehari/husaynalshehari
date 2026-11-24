@@ -15,6 +15,20 @@ final class Scripts {
         + "cells:document.querySelectorAll('[data-testid=\"UserCell\"]').length,"
         + "empty:!!document.querySelector('[data-testid=\"emptyState\"]')};})()";
 
+    /** Back to the top of the page (where a list's reading starts, whatever position the page opened at). */
+    static final String TOP = "(function(){window.scrollTo(0,0);return true;})()";
+
+    /**
+     * One step down the page (most of a screen, so that every account passes through it: X keeps only the accounts
+     * near the screen in the page), and whether X shows it is loading more.
+     */
+    static final String SCROLL =
+        "(function(){"
+        + "var se=document.scrollingElement||document.documentElement;"
+        + "window.scrollTo(0,se.scrollTop+Math.max(400,Math.round(window.innerHeight*0.85)));"
+        + "return {loading:!!document.querySelector('[role=\"progressbar\"]'),y:se.scrollTop,h:se.scrollHeight};"
+        + "})()";
+
     /** The accounts in the page, with the kind of their verified badge (the original script's reading). */
     static final String COLLECT =
         "(function(){"

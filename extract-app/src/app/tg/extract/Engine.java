@@ -13,20 +13,30 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * One extraction task at a time, on its own thread: the original script's steps and pauses, in the app's browser,
- * with everything kept on the phone. From the start account, it opens its verified followers, reads the country of
- * each one on its «About» page, keeps the gold-verified ones of the chosen countries, and goes on from the followers
- * of every account found in those countries.
+ * with everything kept on the phone. From the start account, it opens its verified followers (scrolling down the
+ * whole list), reads the country of the followers on their «About» page, and keeps the gold-verified ones of the
+ * chosen countries. The search goes on from the followers of the accounts in the search list: a list of accounts of
+ * those countries kept at its size (50 unless chosen otherwise). While the list is short of its size, every
+ * follower's country is read to fill it; once it is full, only the gold-verified followers' «About» page is opened.
+ * Each account the search takes from the list is made up for by the next one found.
  */
 final class Engine {
     private Engine() {
     }
+
+    // How far down a followers' page is read.
+    private static final int MAX_PER_PAGE = 1000;
+    private static final int QUIET_ROUNDS = 4;              // (scrolls in a row with no one new: the list's end)
+    private static final int QUIET_ROUNDS_LOADING = 8;      // (the same while X still shows it is loading)
 
     // The original script's numbers.
     private static final long SCROLL_DELAY = 5_000;
@@ -54,6 +64,8 @@ final class Engine {
     static volatile String status = "جاهز";
     static volatile int done;
     static volatile int target;
+    /** The search list's size (the user's choice, 50 unless changed). */
+    static volatile int pool = 50;
     private static Thread thread;
     private static Context app;
     private static final ArrayDeque<String> LOG = new ArrayDeque<>();
@@ -76,7 +88,8 @@ final class Engine {
 
     // ---------------------------------------------------------------- start and stop
 
-    static synchronized boolean start(Context context, Store store, String seed, int count, Set<String> countries) {
+    static synchronized boolean start(Context context, Store store, String seed, int count, int listSize,
+                                      Set<String> countries) {
         if (running) {
             return false;
         }
@@ -85,9 +98,10 @@ final class Engine {
         stopping = false;
         done = 0;
         target = count;
+        pool = listSize;
         status = "يبدأ...";
         final Set<String> allowed = new HashSet<>(countries);
-        thread = new Thread(() -> run(store, seed, count, allowed), "extract");
+        thread = new Thread(() -> run(store, seed, count, listSize, allowed), "extract");
         thread.start();
         changed();
         return true;
@@ -105,7 +119,7 @@ final class Engine {
         changed();
     }
 
-    private static void run(Store store, String seed, int count, Set<String> allowed) {
+    private static void run(Store store, String seed, int count, int listSize, Set<String> allowed) {
         WorkService.start(app);
         Web.onMain(() -> {
             Web.taskStarted();
@@ -113,7 +127,7 @@ final class Engine {
         }, 5_000, false);
         String end;
         try {
-            end = extract(store, seed, count, allowed);
+            end = extract(store, seed, count, listSize, allowed);
         } catch (Stop stop) {
             end = "⛔ أُوقفت المهمة - " + done + "/" + count;
         } catch (Throwable t) {
@@ -139,9 +153,9 @@ final class Engine {
 
     // ---------------------------------------------------------------- the task (the script's extract_users)
 
-    private static String extract(Store store, String seed, int count, Set<String> allowed) {
+    private static String extract(Store store, String seed, int count, int listSize, Set<String> allowed) {
         log("🔍 بدء استخراج " + count + " حساب ذهبي من @" + seed);
-        log("📋 عدد المستخدمين المفحوصين مسبقًا: " + store.checkedCount());
+        log("📋 المفحوصون مسبقًا: " + store.checkedCount() + " | قائمة البحث: " + store.queueSize() + "/" + listSize);
         if (!Web.onMain(Web::loggedIn, 5_000, false)) {
             return "🔴 لم تسجّل الدخول - اضغط «تسجيل الدخول» أولًا";
         }
@@ -150,8 +164,10 @@ final class Engine {
         int duplicates = 0;
         int notGold = 0;
         int cached = 0;
+        int unopened = 0;
         int noLocation = 0;
         int navFails = 0;
+        Boolean listFull = null;                                // (the search list's state last told in the log)
 
         while (done < count) {
             checkStop();
@@ -204,7 +220,7 @@ final class Engine {
             navFails = 0;
             sleep(4_000);
 
-            List<Cell> cells = collect();
+            List<Cell> cells = collectAll(current, generation);
             if (Web.generation != generation) {
                 log("🔄 المتصفح انهار أثناء الاستخراج - إعادة تشغيله...");
                 store.pushFront(current);
@@ -221,17 +237,25 @@ final class Engine {
                     gold++;
                 }
             }
-            log("      🟡 حسابات ذهبية في الصفحة: " + gold + "/" + cells.size());
+            log("      📜 جُمع " + cells.size() + " حساب من صفحة المتابعين | 🟡 الذهبية: " + gold);
 
             int found = 0;
+            int unopenedHere = 0;
             for (Cell user : cells) {
                 checkStop();
+                boolean filling = store.queueSize() < listSize;
+                listFull = tellList(listFull, !filling, store.queueSize(), listSize);
                 if (store.isExtracted(user.username)) {
                     duplicates++;
                     continue;
                 }
                 if (store.isChecked(user.username)) {
                     cached++;
+                    continue;
+                }
+                boolean isGold = "gold".equals(user.badge);
+                if (!filling && !isGold) {
+                    unopenedHere++;                             // (the list is full: only gold accounts are opened)
                     continue;
                 }
                 store.addChecked(user.username);
@@ -251,11 +275,11 @@ final class Engine {
                 if (country != null) {
                     noLocation = 0;
                     log("      ✓ @" + user.username + " - الموقع: " + location + " | الشارة: " + badgeName(user.badge));
-                    // Every account of the chosen countries widens the search (as in the script).
-                    if (store.addToQueue(user.username)) {
-                        log("      ➕ @" + user.username + " - أُضيف لقائمة الانتظار");
+                    // An account of the chosen countries joins the search list while the list is short of its size.
+                    if (store.addToQueue(user.username, listSize)) {
+                        log("      ➕ @" + user.username + " - أُضيف لقائمة البحث (" + store.queueSize() + "/" + listSize + ")");
                     }
-                    if (!"gold".equals(user.badge)) {
+                    if (!isGold) {
                         notGold++;
                         log("      ⏭️ @" + user.username + " - ليس ذهبي (تخطي)");
                         sleep(3_000);
@@ -301,17 +325,32 @@ final class Engine {
                 sleep(3_000);
             }
 
+            if (unopenedHere > 0) {
+                unopened += unopenedHere;
+                log("      ⏭️ " + unopenedHere + " حساب غير ذهبي لم يُفتح موقعه (قائمة البحث مكتملة)");
+            }
             if (found > 0) {
                 log("      ✅ الإجمالي: " + done + "/" + count);
             }
-            log("   📊 انتظار: " + store.queueSize() + " | مكرر: " + duplicates + " | غير ذهبي: " + notGold
-                + " | مفحوص: " + store.checkedCount() + " | مستخرج كليًا: " + store.extractedCount() + " | مؤقت: " + cached);
+            log("   📊 قائمة البحث: " + store.queueSize() + "/" + listSize + " | مكرر: " + duplicates
+                + " | غير ذهبي: " + notGold + " | بلا فتح: " + unopened + " | مفحوص: " + store.checkedCount()
+                + " | مستخرج كليًا: " + store.extractedCount() + " | مؤقت: " + cached);
             sleep(SCROLL_DELAY);
         }
         if (done >= count) {
             return "✅ اكتملت - " + done + "/" + count + " من " + checkedNow + " مفحوص";
         }
-        return "✅ انتهت قائمة الانتظار - " + done + "/" + count + " من " + checkedNow + " مفحوص";
+        return "✅ انتهت قائمة البحث - " + done + "/" + count + " من " + checkedNow + " مفحوص";
+    }
+
+    /** The log says when the search list fills up and when it is short again (and what that changes). */
+    private static Boolean tellList(Boolean before, boolean full, int size, int listSize) {
+        if (before == null || before != full) {
+            log(full
+                ? "      📋 قائمة البحث مكتملة (" + size + "/" + listSize + ") - يُفتح موقع الحسابات الذهبية فقط"
+                : "      🔎 قائمة البحث " + size + "/" + listSize + " - يُفحص موقع كل الحسابات حتى تكتمل");
+        }
+        return full;
     }
 
     // ---------------------------------------------------------------- pages
@@ -462,6 +501,51 @@ final class Engine {
         return cells;
     }
 
+    /**
+     * Every follower the page shows, scrolling down step by step until the list ends (no one new for a few steps) or
+     * MAX_PER_PAGE are read. X keeps only the accounts near the screen in the page, so they are read at each step.
+     * Null when the page could not be read at all (or the browser was made anew meanwhile).
+     */
+    private static List<Cell> collectAll(String user, int generation) {
+        Map<String, Cell> all = new LinkedHashMap<>();
+        boolean readOnce = false;
+        int quiet = 0;
+        evaluate(Scripts.TOP, 5_000);
+        sleep(800);
+        for (int round = 0; round < 600; round++) {
+            List<Cell> seen = collect();
+            if (Web.generation != generation) {
+                return null;
+            }
+            int before = all.size();
+            if (seen != null) {
+                readOnce = true;
+                for (Cell cell : seen) {
+                    String key = cell.username.toLowerCase(Locale.ROOT);
+                    if (!all.containsKey(key)) {
+                        all.put(key, cell);
+                    }
+                }
+            }
+            if (all.size() >= MAX_PER_PAGE) {
+                break;
+            }
+            quiet = all.size() > before ? 0 : quiet + 1;
+            Object scrolled = evaluate(Scripts.SCROLL, 5_000);
+            boolean loading = scrolled instanceof JSONObject && ((JSONObject) scrolled).optBoolean("loading");
+            if (quiet >= (loading ? QUIET_ROUNDS_LOADING : QUIET_ROUNDS)) {
+                break;
+            }
+            status("يمرّر متابعي @" + user + " - جُمع " + all.size());
+            sleep(quiet == 0 ? 1_500 : 2_000);
+        }
+        if (!readOnce) {
+            return null;
+        }
+        List<Cell> cells = new ArrayList<>(all.values());
+        return cells.size() > MAX_PER_PAGE ? new ArrayList<>(cells.subList(0, MAX_PER_PAGE)) : cells;
+    }
+
     private static Object evaluate(String script, long timeoutMs) {
         String json = Web.js(script, timeoutMs);
         checkStop();
@@ -571,7 +655,7 @@ final class Engine {
         } else {
             head = status;
         }
-        return head + "\nفي الانتظار: " + store.queueSize() + "  |  مفحوص: " + store.checkedCount();
+        return head + "\nقائمة البحث: " + store.queueSize() + "/" + pool + "  |  مفحوص: " + store.checkedCount();
     }
 
     /** The page and the notification are refreshed (at most a few times a second). */

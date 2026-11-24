@@ -89,6 +89,7 @@ public final class MainActivity extends Activity {
     private Button logoutButton;
     private EditText seedInput;
     private EditText targetInput;
+    private EditText poolInput;
     private Button startButton;
     private Button stopButton;
     private TextView progressText;
@@ -287,6 +288,9 @@ public final class MainActivity extends Activity {
         add(card, text("عدد الحسابات الذهبية المطلوبة", 13, INK, true), 10);
         targetInput = input("100", InputType.TYPE_CLASS_NUMBER);
         add(card, targetInput, 4);
+        add(card, text("حجم قائمة البحث (حسابات خليجية يُبحث في متابعيها)", 13, INK, true), 10);
+        poolInput = input("50", InputType.TYPE_CLASS_NUMBER);
+        add(card, poolInput, 4);
         add(card, text("الدول", 13, INK, true), 10);
         LinearLayout grid = new LinearLayout(this);
         grid.setOrientation(LinearLayout.VERTICAL);
@@ -305,7 +309,9 @@ public final class MainActivity extends Activity {
             countryBoxes.put(Text.CODES[i], box);
         }
         add(card, grid, 2);
-        add(card, text("تُحفظ الحسابات الموثّقة بالعلامة الذهبية فقط (الشركات والمنظمات).", 12, MUTED, false), 6);
+        add(card, text("يمرّر صفحة المتابعين حتى نهايتها. يُفحص موقع كل الحسابات حتى تكتمل قائمة البحث، ثم يُفتح موقع "
+            + "الحسابات الذهبية فقط، وكل حساب يُبحث فيه يُعوَّض بغيره فتبقى القائمة مكتملة. تُحفظ الحسابات الذهبية "
+            + "فقط (الشركات والمنظمات).", 12, MUTED, false), 6);
         startButton = primary("▶  بدء");
         startButton.setOnClickListener(v -> startTask());
         stopButton = danger("■  إيقاف");
@@ -328,7 +334,7 @@ public final class MainActivity extends Activity {
         backgroundRow.addView(fix, fixSize);
         add(card, backgroundRow, 10);
 
-        resetButton = secondary("تصفير البحث (قائمة الانتظار والمفحوصين)");
+        resetButton = secondary("تصفير البحث (قائمة البحث والمفحوصين)");
         resetButton.setOnClickListener(v -> resetSearch());
         add(card, resetButton, 10);
         return card;
@@ -391,6 +397,7 @@ public final class MainActivity extends Activity {
         enable(stopButton, running && !Engine.stopping);
         seedInput.setEnabled(!running);
         targetInput.setEnabled(!running);
+        poolInput.setEnabled(!running);
         for (CheckBox box : countryBoxes.values()) {
             box.setEnabled(!running);
         }
@@ -556,6 +563,10 @@ public final class MainActivity extends Activity {
     private void restoreInputs() {
         seedInput.setText(prefs.getString("seed", ""));
         targetInput.setText(String.valueOf(prefs.getInt("target", 100)));
+        poolInput.setText(String.valueOf(prefs.getInt("pool", 50)));
+        if (!Engine.running) {
+            Engine.pool = prefs.getInt("pool", 50);
+        }
         String saved = prefs.getString("countries", TextUtils.join(",", Text.DEFAULT_CODES));
         Set<String> chosen = new LinkedHashSet<>(Arrays.asList(saved.split(",")));
         for (Map.Entry<String, CheckBox> box : countryBoxes.entrySet()) {
@@ -588,6 +599,17 @@ public final class MainActivity extends Activity {
             targetInput.requestFocus();
             return;
         }
+        int listSize;
+        try {
+            listSize = Integer.parseInt(poolInput.getText().toString().trim());
+        } catch (NumberFormatException e) {
+            listSize = -1;
+        }
+        if (listSize < 1 || listSize > Store.QUEUE_MAX) {
+            poolInput.setError("اكتب عددًا من 1 إلى " + Store.QUEUE_MAX);
+            poolInput.requestFocus();
+            return;
+        }
         Set<String> countries = new LinkedHashSet<>();
         for (Map.Entry<String, CheckBox> box : countryBoxes.entrySet()) {
             if (box.getValue().isChecked()) {
@@ -599,10 +621,10 @@ public final class MainActivity extends Activity {
             return;
         }
         seedInput.setText(seed);
-        prefs.edit().putString("seed", seed).putInt("target", count)
+        prefs.edit().putString("seed", seed).putInt("target", count).putInt("pool", listSize)
             .putString("countries", TextUtils.join(",", countries)).apply();
         hideKeyboard();
-        if (Engine.start(this, store, seed, count, countries)) {
+        if (Engine.start(this, store, seed, count, listSize, countries)) {
             if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, ASK_NOTIFICATIONS);
@@ -614,7 +636,7 @@ public final class MainActivity extends Activity {
     }
 
     private void resetSearch() {
-        confirm("تصفير البحث", "تُمسح قائمة الانتظار (" + store.queueSize() + ") والحسابات المفحوصة ("
+        confirm("تصفير البحث", "تُمسح قائمة البحث (" + store.queueSize() + ") والحسابات المفحوصة ("
                 + store.checkedCount() + ")، فيبدأ البحث القادم من جديد. النتائج لا تُمسح.",
             () -> {
                 store.clearSearch();
