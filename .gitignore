@@ -1,2 +1,4 @@
 __pycache__/
 members_data/
+extract-app/build/
+extract-app/signing.jks
