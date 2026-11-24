@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_background">#17181C</color>
+    <color name="gold">#D4A017</color>
+    <color name="log_bg">#111317</color>
+    <color name="log_text">#D8DCE3</color>
+</resources>
