@@ -107,6 +107,7 @@ public final class MainActivity extends Activity {
     private Button saveButton;
     private Button shareButton;
     private Button copyButton;
+    private Button linksButton;
     private Button clearButton;
     private TextView collectedText;
     private Button collectedButton;
@@ -372,11 +373,14 @@ public final class MainActivity extends Activity {
         shareButton = secondary("مشاركة الملف");
         shareButton.setOnClickListener(v -> shareResults());
         add(card, row(saveButton, shareButton), 10);
-        copyButton = secondary("نسخ اليوزرات");
+        copyButton = secondary("نسخ الروابط");
         copyButton.setOnClickListener(v -> copyUsernames());
+        linksButton = secondary("⬇  تنزيل الروابط");
+        linksButton.setOnClickListener(v -> saveLinks());
+        add(card, row(copyButton, linksButton), 8);
         clearButton = danger("مسح النتائج");
         clearButton.setOnClickListener(v -> clearResults());
-        add(card, row(copyButton, clearButton), 8);
+        add(card, clearButton, 8);
         collectedText = text("", 13, INK, false);
         add(card, collectedText, 14);
         collectedButton = secondary("⬇  تنزيل كل اليوزرات المجموعة");
@@ -441,6 +445,7 @@ public final class MainActivity extends Activity {
         enable(saveButton, count > 0);
         enable(shareButton, count > 0);
         enable(copyButton, count > 0);
+        enable(linksButton, count > 0);
         enable(clearButton, count > 0 && !running);
         int everyone = store.collectedCount();
         collectedText.setText("كل اليوزرات المجموعة من صفحات المتابعين (بلا تكرار): " + everyone);
@@ -867,14 +872,29 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /** The gold accounts' profile links, copied one a line. */
     private void copyUsernames() {
         List<String> names = store.resultUsernames();
+        copy("روابط الحسابات", resultLinks(names).trim());
+        toast("نُسخ " + names.size() + " رابط");
+    }
+
+    /** The gold accounts' profile links in a text file in «Downloads». */
+    private void saveLinks() {
+        List<String> names = store.resultUsernames();
+        if (names.isEmpty()) {
+            return;
+        }
+        byte[] data = resultLinks(names).getBytes(StandardCharsets.UTF_8);
+        saveDownload("gold-links-" + stamp() + ".txt", "text/plain", out -> out.write(data), this::saveLinks);
+    }
+
+    private static String resultLinks(List<String> names) {
         StringBuilder text = new StringBuilder();
         for (String name : names) {
-            text.append('@').append(name).append('\n');
+            text.append("https://x.com/").append(name).append('\n');
         }
-        copy("اليوزرات", text.toString().trim());
-        toast("نُسخ " + names.size() + " يوزر");
+        return text.toString();
     }
 
     private void clearResults() {
