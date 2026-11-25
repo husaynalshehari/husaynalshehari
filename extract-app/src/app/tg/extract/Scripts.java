@@ -125,7 +125,7 @@ final class Scripts {
         + "if(cursor && cursor !== 'null')variables.cursor=cursor;"
         + "var features={\"articles_preview_enabled\":true,\"responsive_web_graphql_timeline_navigation_enabled\":true,\"verified_phone_label_enabled\":false,\"view_counts_everywhere_api_enabled\":true,\"responsive_web_graphql_exclude_directive_enabled\":true};"
         + "var url='https://x.com/i/api/graphql/'+queryId+'/BlueVerifiedFollowers?variables='+encodeURIComponent(JSON.stringify(variables))+'&features='+encodeURIComponent(JSON.stringify(features));"
-        + "var ct0=(document.cookie.match(/(?:^|; )ct0=([^;]*)/)||[])[1]||'';"
+        + "var ct0='';try{ct0=(document.cookie.match(/(?:^|; )ct0=([^;]*)/)||[])[1]||'';}catch(ce){}"
         + "fetch(url,{method:'GET',credentials:'include',headers:{'Authorization':'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA','x-csrf-token':ct0,'x-twitter-active-user':'yes','x-twitter-auth-type':'OAuth2Session'}})"
         + ".then(function(r){return r.ok ? r.json() : {error:'HTTP '+r.status};})"
         + ".then(function(data){"
@@ -168,11 +168,39 @@ final class Scripts {
         + "var variables={screen_name:screenName,withSafetyModeUserFields:true};"
         + "var features={\"responsive_web_graphql_timeline_navigation_enabled\":true};"
         + "var url='https://x.com/i/api/graphql/'+queryId+'/UserByScreenName?variables='+encodeURIComponent(JSON.stringify(variables))+'&features='+encodeURIComponent(JSON.stringify(features));"
-        + "var ct0=(document.cookie.match(/(?:^|; )ct0=([^;]*)/)||[])[1]||'';"
+        + "var ct0='';try{ct0=(document.cookie.match(/(?:^|; )ct0=([^;]*)/)||[])[1]||'';}catch(ce){}"
         + "fetch(url,{method:'GET',credentials:'include',headers:{'Authorization':'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA','x-csrf-token':ct0}})"
         + ".then(function(r){return r.ok?r.json():null;})"
         + ".then(function(data){try{var id=((data.data||{}).user||{}).result.rest_id; window.__gqlResult=JSON.stringify({id:id});}catch(e){window.__gqlResult=JSON.stringify({id:null});}})"
         + ".catch(function(){window.__gqlResult=JSON.stringify({id:null});});"
         + "return true;"
         + "})('%SCREEN%')";
+
+    /**
+     * The account's «About» data straight from X with the page's session (AboutAccountQuery), kept in
+     * window.__aboutResult as {country} or {error}. The «About» page is read instead when it gives no country.
+     */
+    static final String START_FETCH_ABOUT =
+        "(function(username){"
+        + "window.__aboutResult=null;"
+        + "var queryId='zs_jFPFT78rBpXv9Z3U2YQ';"
+        + "var variables={screenName:username};"
+        + "var url='https://x.com/i/api/graphql/'+queryId+'/AboutAccountQuery?variables='+encodeURIComponent(JSON.stringify(variables))+'&features='+encodeURIComponent('{}');"
+        + "var ct0='';try{ct0=(document.cookie.match(/(?:^|; )ct0=([^;]*)/)||[])[1]||'';}catch(ce){}"
+        + "fetch(url,{method:'GET',credentials:'include',headers:{'authorization':'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',"
+        + "'x-csrf-token':ct0,'x-twitter-active-user':'yes','x-twitter-auth-type':'OAuth2Session','x-twitter-client-language':'en'}})"
+        + ".then(function(r){return r.ok?r.json():{__error:'HTTP '+r.status};})"
+        + ".then(function(data){"
+        + " if(!data||data.__error){window.__aboutResult=JSON.stringify({error:(data&&data.__error)||'empty'});return;}"
+        + " var d=data.data||{};"
+        + " var res=((d.user_result_by_screen_name||{}).result)||((d.user||{}).result)||((d.user_result||{}).result);"
+        + " if(!res){window.__aboutResult=JSON.stringify({error:'no user'});return;}"
+        + " var about=res.about_profile||{};"
+        + " window.__aboutResult=JSON.stringify({country:about.account_based_in||about.accountBasedIn||null});"
+        + "})"
+        + ".catch(function(e){window.__aboutResult=JSON.stringify({error:String(e)});});"
+        + "return true;"
+        + "})('%USERNAME%')";
+
+    static final String POLL_ABOUT_RESULT = "(function(){return window.__aboutResult||null;})()";
 }

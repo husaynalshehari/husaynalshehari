@@ -68,6 +68,9 @@ final class Engine {
     static volatile int pool = 50;
     /** The direct way's failures in a row (after 3 the task keeps to the page and its scrolling). */
     private static int directFails;
+    /** The direct «About» check's failures in a row (after 3 the task keeps to the «About» page). */
+    private static int aboutFails;
+    private static boolean aboutWorks;
     private static Thread thread;
     private static Context app;
     private static final ArrayDeque<String> LOG = new ArrayDeque<>();
@@ -163,6 +166,8 @@ final class Engine {
         }
         store.prepare(seed);
         directFails = 0;
+        aboutFails = 0;
+        aboutWorks = false;
         int checkedNow = 0;
         int duplicates = 0;
         int notGold = 0;
@@ -402,8 +407,58 @@ final class Engine {
         }
     }
 
-    /** The country on the account's «About» page; null when the page has none (or did not open). */
+    /** The account's country: asked straight from X first, and read on its «About» page if that gives none. */
     private static String locationOf(String user) {
+        if (aboutFails < 3) {
+            String country = aboutDirect(user);
+            if (country != null) {
+                return country;
+            }
+        }
+        return locationFromPage(user);
+    }
+
+    /**
+     * The country from X's «About» data, asked with the page's session (no page load). Null when it gave none (then
+     * the «About» page is read). After 3 failures in a row, it is not asked again in the task.
+     */
+    private static String aboutDirect(String user) {
+        evaluate(Scripts.START_FETCH_ABOUT.replace("%USERNAME%", user), 3_000);
+        String error = "لا رد";
+        for (int i = 0; i < 30; i++) {                          // (up to about 15 s)
+            sleep(500);
+            Object value = evaluate(Scripts.POLL_ABOUT_RESULT, 2_000);
+            if (!(value instanceof String)) {
+                continue;
+            }
+            try {
+                JSONObject result = new JSONObject((String) value);
+                if (result.isNull("error")) {
+                    aboutFails = 0;
+                    if (!aboutWorks) {
+                        aboutWorks = true;
+                        log("      ⚡ فحص الموقع المباشر يعمل");
+                    }
+                    // (Android gives "null" as text for a JSON null: a missing country is never taken as a place)
+                    String country = result.isNull("country") ? "" : result.optString("country", "").trim();
+                    return country.isEmpty() ? null : country;
+                }
+                error = result.optString("error", "خطأ");
+            } catch (JSONException e) {
+                error = "رد غير مفهوم";
+            }
+            break;
+        }
+        aboutFails++;
+        log("      ⚠️ فحص الموقع المباشر لـ @" + user + " فشل (" + error + ") - تُفتح صفحة «حول»");
+        if (aboutFails == 3) {
+            log("   ↩️ فحص الموقع المباشر فشل 3 مرات متتالية - تُستخدم صفحة «حول» لبقية المهمة");
+        }
+        return null;
+    }
+
+    /** The country on the account's «About» page; null when the page has none (or did not open). */
+    private static String locationFromPage(String user) {
         String path = "/" + user + "/about";
         if (navigate("https://x.com" + path, path, 30_000) != OK) {
             return null;
