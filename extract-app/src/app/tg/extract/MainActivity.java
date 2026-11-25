@@ -117,6 +117,33 @@ public final class MainActivity extends Activity {
     private TextView logView;
 
     private boolean onBrowserTab;
+    private int view;                                           // (0 the panel, 1 crypto, 2 the browser)
+    // The crypto page.
+    private Store cryptoStore;
+    private ScrollView cryptoPanel;
+    private Button tabCrypto;
+    private EditText cSeed;
+    private EditText cTarget;
+    private EditText cMin;
+    private EditText cMax;
+    private EditText cWords;
+    private EditText cPool;
+    private EditText cPerList;
+    private RadioButton cFromFollowing;
+    private RadioButton cFromAll;
+    private RadioButton cFromVerified;
+    private CheckBox cMore;
+    private Button cStart;
+    private Button cStop;
+    private Button cSave;
+    private Button cShare;
+    private Button cCopy;
+    private Button cLinks;
+    private Button cEdit;
+    private Button cClear;
+    private TextView cProgress;
+    private TextView cResults;
+    private TextView cLog;
     private boolean waitingLogin;
     private boolean waitingToken;
     private int homeTicks;
@@ -130,12 +157,14 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         store = Store.get(this);
+        cryptoStore = Store.crypto(this);
         prefs = getSharedPreferences("extract", MODE_PRIVATE);
         drawBehindBars();
         setContentView(buildPage());
         Web.showIn(stage, this);
         Engine.listener = refresher;
         restoreInputs();
+        restoreCrypto();
         showTab(false);
         refresh();
     }
@@ -188,6 +217,10 @@ public final class MainActivity extends Activity {
             }
             return;
         }
+        if (view == 1) {
+            showView(0);
+            return;
+        }
         if (Engine.running) {
             moveTaskToBack(true);                               // (the task keeps going: the page is not closed)
             return;
@@ -234,11 +267,14 @@ public final class MainActivity extends Activity {
         bar.addView(text("المستخرج", 19, Color.WHITE, true), new LinearLayout.LayoutParams(0, WRAP, 1));
         tabPanel = tab("اللوحة");
         tabPanel.setOnClickListener(v -> showTab(false));
+        tabCrypto = tab("Crypto");
+        tabCrypto.setOnClickListener(v -> showView(1));
         tabBrowser = tab("المتصفح");
         tabBrowser.setOnClickListener(v -> showTab(true));
         LinearLayout.LayoutParams tabSize = new LinearLayout.LayoutParams(WRAP, dp(36));
         tabSize.setMarginStart(dp(6));
         bar.addView(tabPanel, tabSize);
+        bar.addView(tabCrypto, new LinearLayout.LayoutParams(tabSize));
         bar.addView(tabBrowser, new LinearLayout.LayoutParams(tabSize));
         root.addView(bar, new LinearLayout.LayoutParams(MATCH, WRAP));
 
@@ -269,6 +305,8 @@ public final class MainActivity extends Activity {
         list.setPadding(dp(12), dp(12), dp(12), dp(24));
         panel.addView(list, new FrameLayout.LayoutParams(MATCH, WRAP));
         content.addView(panel, new FrameLayout.LayoutParams(MATCH, MATCH));
+        cryptoPanel = cryptoPage();
+        content.addView(cryptoPanel, new FrameLayout.LayoutParams(MATCH, MATCH));
 
         list.addView(accountCard());
         list.addView(taskCard());
@@ -414,11 +452,19 @@ public final class MainActivity extends Activity {
     }
 
     private void showTab(boolean browser) {
-        onBrowserTab = browser;
-        panel.setVisibility(browser ? View.GONE : View.VISIBLE);
-        paintTab(tabPanel, !browser);
-        paintTab(tabBrowser, browser);
-        if (browser) {
+        showView(browser ? 2 : 0);
+    }
+
+    /** 0: the panel, 1: crypto, 2: the browser. */
+    private void showView(int which) {
+        view = which;
+        onBrowserTab = which == 2;
+        panel.setVisibility(which == 0 ? View.VISIBLE : View.GONE);
+        cryptoPanel.setVisibility(which == 1 ? View.VISIBLE : View.GONE);
+        paintTab(tabPanel, which == 0);
+        paintTab(tabCrypto, which == 1);
+        paintTab(tabBrowser, which == 2);
+        if (which == 2) {
             hideKeyboard();
         }
     }
@@ -438,7 +484,7 @@ public final class MainActivity extends Activity {
         enable(tokenButton, !running);
         enable(logoutButton, !running && signedIn);
         enable(startButton, !running);
-        enable(stopButton, running && !Engine.stopping);
+        enable(stopButton, running && Engine.taskKind == 0 && !Engine.stopping);
         seedInput.setEnabled(!running);
         targetInput.setEnabled(!running);
         poolInput.setEnabled(!running);
@@ -452,7 +498,7 @@ public final class MainActivity extends Activity {
         enable(resetButton, !running);
         enable(listButton, store.queueSize() > 0);
         enable(editListButton, !running);
-        progressText.setText(Engine.progress(store));
+        progressText.setText(Engine.progress(store, Engine.taskKind == 0, prefs.getInt("pool", 50)));
 
         int count = store.resultCount();
         resultsText.setText("محفوظ: " + count + " حساب ذهبي");
@@ -470,6 +516,7 @@ public final class MainActivity extends Activity {
         logView.setText(log.isEmpty() ? "لا شيء بعد." : log);
         blocker.setVisibility(running ? View.VISIBLE : View.GONE);
         banner.setVisibility(running ? View.VISIBLE : View.GONE);
+        refreshCrypto(running);
 
         boolean overlay = Web.canOverlay(this);
         boolean battery = batteryExempt();
@@ -810,10 +857,14 @@ public final class MainActivity extends Activity {
     }
 
     private void saveToDownloads() {
-        if (store.resultCount() == 0) {
+        saveResultsOf(store, "extract");
+    }
+
+    private void saveResultsOf(Store results, String base) {
+        if (results.resultCount() == 0) {
             return;
         }
-        saveDownload("extract-" + stamp() + ".csv", "text/csv", store::copyResults, this::saveToDownloads);
+        saveDownload(base + "-" + stamp() + ".csv", "text/csv", results::copyResults, () -> saveResultsOf(results, base));
     }
 
     /** The search list in a box to edit: one username (or @name, or link) a line, in the order of the search. */
@@ -827,29 +878,33 @@ public final class MainActivity extends Activity {
             "يوزر أو رابط حساب في كل سطر. الترتيب هو ترتيب البحث، والمكرر يُحذف.", names, this::saveEditedList);
     }
 
-    /** The gold accounts extracted, to edit: a removed line takes the account out, a new line adds one. */
     private void editResults() {
-        if (Engine.running) {
-            toast("أوقف المهمة أولًا لتعديل الحسابات الذهبية");
-            return;
-        }
-        List<String> names = store.resultUsernames();
-        listEditor("تعديل الحسابات الذهبية (" + names.size() + ")",
-            "يوزر أو رابط حساب في كل سطر. احذف السطر لحذف الحساب من النتائج (ولن يُستخرج مرة أخرى)، وأضف سطرًا "
-                + "لإضافة حساب. الترتيب هو ترتيب الملف، والمكرر يُحذف.", names, this::saveEditedResults);
+        editResultsOf(store, "الحسابات الذهبية");
     }
 
-    private void saveEditedResults(String text) {
+    /** A results file to edit: a removed line takes the account out (not extracted again), a new line adds one. */
+    private void editResultsOf(Store results, String what) {
         if (Engine.running) {
-            toast("أوقف المهمة أولًا لتعديل الحسابات الذهبية");
+            toast("أوقف المهمة أولًا لتعديل " + what);
             return;
         }
-        int before = store.resultCount();
+        List<String> names = results.resultUsernames();
+        listEditor("تعديل " + what + " (" + names.size() + ")",
+            "يوزر أو رابط حساب في كل سطر. احذف السطر لحذف الحساب من النتائج (ولن يُستخرج مرة أخرى)، وأضف سطرًا "
+                + "لإضافة حساب. الترتيب هو ترتيب الملف، والمكرر يُحذف.", names, text -> saveEditedResultsOf(results, what, text));
+    }
+
+    private void saveEditedResultsOf(Store results, String what, String text) {
+        if (Engine.running) {
+            toast("أوقف المهمة أولًا لتعديل " + what);
+            return;
+        }
+        int before = results.resultCount();
         int[] bad = new int[1];
         List<String> names = Text.handlesIn(text, bad);
-        int[] done = store.replaceResults(names);
+        int[] done = results.replaceResults(names);
         int removed = Math.max(0, before - done[0]);
-        toast("✅ حُفظت الحسابات الذهبية: " + names.size()
+        toast("✅ حُفظت " + what + ": " + names.size()
             + (removed > 0 ? "، حُذف " + removed : "")
             + (done[1] > 0 ? "، أُضيف " + done[1] : "")
             + (bad[0] > 0 ? "، وتُرك " + bad[0] + " غير صالح" : ""));
@@ -968,11 +1023,15 @@ public final class MainActivity extends Activity {
     }
 
     private void shareResults() {
-        if (store.resultCount() == 0) {
+        shareResultsOf(store, "extract");
+    }
+
+    private void shareResultsOf(Store results, String base) {
+        if (results.resultCount() == 0) {
             return;
         }
         try {
-            File copy = store.shareCopy();
+            File copy = results.shareCopy(base);
             Uri uri = ResultsProvider.uriOf(copy);
             Intent send = new Intent(Intent.ACTION_SEND)
                 .setType("text/csv")
@@ -988,19 +1047,27 @@ public final class MainActivity extends Activity {
 
     /** The gold accounts' profile links, copied one a line. */
     private void copyUsernames() {
-        List<String> names = store.resultUsernames();
+        copyLinksOf(store);
+    }
+
+    private void copyLinksOf(Store results) {
+        List<String> names = results.resultUsernames();
         copy("روابط الحسابات", resultLinks(names).trim());
         toast("نُسخ " + names.size() + " رابط");
     }
 
     /** The gold accounts' profile links in a text file in «Downloads». */
     private void saveLinks() {
-        List<String> names = store.resultUsernames();
+        saveLinksOf(store, "gold-links");
+    }
+
+    private void saveLinksOf(Store results, String base) {
+        List<String> names = results.resultUsernames();
         if (names.isEmpty()) {
             return;
         }
         byte[] data = resultLinks(names).getBytes(StandardCharsets.UTF_8);
-        saveDownload("gold-links-" + stamp() + ".txt", "text/plain", out -> out.write(data), this::saveLinks);
+        saveDownload(base + "-" + stamp() + ".txt", "text/plain", out -> out.write(data), () -> saveLinksOf(results, base));
     }
 
     private static String resultLinks(List<String> names) {
@@ -1012,12 +1079,212 @@ public final class MainActivity extends Activity {
     }
 
     private void clearResults() {
-        confirm("مسح النتائج", "تُحذف النتائج المحفوظة (" + store.resultCount() + " حساب) من التطبيق، "
+        clearResultsOf(store);
+    }
+
+    private void clearResultsOf(Store results) {
+        confirm("مسح النتائج", "تُحذف النتائج المحفوظة (" + results.resultCount() + " حساب) من التطبيق، "
                 + "ويمكن استخراج هذه الحسابات مرة أخرى لاحقًا. احفظها أو شاركها أولًا إن كنت تحتاجها.",
             () -> {
-                store.clearResults();
+                results.clearResults();
                 refresh();
             });
+    }
+
+    // ---------------------------------------------------------------- crypto
+
+    /** The crypto page: its task (accounts naming crypto, within followers' bounds), its results and the log. */
+    private ScrollView cryptoPage() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(PAPER);
+        scroll.setFillViewport(true);
+        scroll.setVisibility(View.GONE);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(12), dp(12), dp(12), dp(24));
+        scroll.addView(list, new FrameLayout.LayoutParams(MATCH, WRAP));
+
+        LinearLayout task = card("استخراج حسابات Crypto");
+        add(task, text("حسابات تذكر crypto في يوزرها أو اسمها أو نبذتها، بعدد متابعين تختاره. لا يُفحص الموقع.", 12, MUTED, false), 4);
+        add(task, text("ابدأ من حساب", 13, INK, true), 10);
+        cSeed = input("يوزر أو رابط، مثل: binance",
+            InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS | InputType.TYPE_TEXT_VARIATION_URI);
+        add(task, cSeed, 4);
+        add(task, text("اجمع من", 13, INK, true), 10);
+        RadioGroup from = new RadioGroup(this);
+        from.setOrientation(RadioGroup.VERTICAL);
+        cFromFollowing = radio("الذين يتابعهم الحساب (Following)");
+        cFromAll = radio("كل متابعيه (Followers)");
+        cFromVerified = radio("متابعيه الموثّقين فقط");
+        from.addView(cFromFollowing);
+        from.addView(cFromAll);
+        from.addView(cFromVerified);
+        add(task, from, 2);
+        add(task, text("عدد الحسابات المطلوبة", 13, INK, true), 10);
+        cTarget = input("100", InputType.TYPE_CLASS_NUMBER);
+        add(task, cTarget, 4);
+        add(task, text("عدد المتابعين: من … إلى (0 = بلا حد)", 13, INK, true), 10);
+        cMin = input("0", InputType.TYPE_CLASS_NUMBER);
+        cMax = input("10000", InputType.TYPE_CLASS_NUMBER);
+        add(task, row(cMin, cMax), 4);
+        cMore = new CheckBox(this);
+        cMore.setText("يتابع أكثر من عدد متابعيه (Following أكبر من Followers)");
+        cMore.setTextColor(INK);
+        cMore.setTextSize(14);
+        cMore.setButtonTintList(ColorStateList.valueOf(BLUE));
+        add(task, cMore, 8);
+        add(task, text("كلمات Crypto (كلمة في كل سطر، و* في آخرها = أي كلمة تبدأ بها)", 13, INK, true), 10);
+        cWords = input("", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        cWords.setSingleLine(false);
+        cWords.setHorizontallyScrolling(false);
+        cWords.setMinLines(4);
+        cWords.setMaxLines(8);
+        cWords.setGravity(Gravity.TOP | Gravity.START);
+        add(task, cWords, 4);
+        add(task, text("حجم قائمة البحث", 13, INK, true), 10);
+        cPool = input("50", InputType.TYPE_CLASS_NUMBER);
+        add(task, cPool, 4);
+        add(task, text("الحد الأقصى للجمع من كل قائمة", 13, INK, true), 10);
+        cPerList = input("2000", InputType.TYPE_CLASS_NUMBER);
+        add(task, cPerList, 4);
+        cStart = primary("▶  بدء");
+        cStart.setOnClickListener(v -> startCrypto());
+        cStop = danger("■  إيقاف");
+        cStop.setOnClickListener(v -> Engine.stop());
+        add(task, row(cStart, cStop), 12);
+        cProgress = text("", 13, INK, false);
+        cProgress.setLineSpacing(dp(2), 1f);
+        add(task, cProgress, 10);
+        list.addView(task);
+
+        LinearLayout results = card("نتائج Crypto");
+        cResults = text("", 14, INK, true);
+        add(results, cResults, 6);
+        cSave = primary("حفظ في التنزيلات");
+        cSave.setOnClickListener(v -> saveResultsOf(cryptoStore, "crypto"));
+        cShare = secondary("مشاركة الملف");
+        cShare.setOnClickListener(v -> shareResultsOf(cryptoStore, "crypto"));
+        add(results, row(cSave, cShare), 10);
+        cCopy = secondary("نسخ الروابط");
+        cCopy.setOnClickListener(v -> copyLinksOf(cryptoStore));
+        cLinks = secondary("⬇  تنزيل الروابط");
+        cLinks.setOnClickListener(v -> saveLinksOf(cryptoStore, "crypto-links"));
+        add(results, row(cCopy, cLinks), 8);
+        cEdit = secondary("✏️  تعديل حسابات Crypto");
+        cEdit.setOnClickListener(v -> editResultsOf(cryptoStore, "حسابات Crypto"));
+        add(results, cEdit, 8);
+        cClear = danger("مسح النتائج");
+        cClear.setOnClickListener(v -> clearResultsOf(cryptoStore));
+        add(results, cClear, 8);
+        add(results, text("ملف CSV فيه اليوزر والاسم والنبذة وعدد المتابعين ومن يتابعهم والرابط.", 12, MUTED, false), 8);
+        list.addView(results);
+
+        LinearLayout logs = card("السجل (الأحدث أولًا)");
+        cLog = text("", 12, 0xFF374151, false);
+        cLog.setLineSpacing(dp(2), 1f);
+        add(logs, cLog, 8);
+        list.addView(logs);
+        return scroll;
+    }
+
+    private void restoreCrypto() {
+        cSeed.setText(prefs.getString("c_seed", ""));
+        int from = prefs.getInt("c_source", 1);
+        (from == 2 ? cFromAll : from == 0 ? cFromVerified : cFromFollowing).setChecked(true);
+        cTarget.setText(String.valueOf(prefs.getInt("c_target", 100)));
+        cMin.setText(String.valueOf(prefs.getLong("c_min", 0)));
+        cMax.setText(String.valueOf(prefs.getLong("c_max", 10_000)));
+        cMore.setChecked(prefs.getBoolean("c_more", false));
+        cWords.setText(prefs.getString("c_words", Text.CRYPTO_WORDS));
+        cPool.setText(String.valueOf(prefs.getInt("c_pool", 50)));
+        cPerList.setText(String.valueOf(prefs.getInt("c_perList", 2000)));
+    }
+
+    private void refreshCrypto(boolean running) {
+        boolean mine = Engine.taskKind == 1;
+        enable(cStart, !running);
+        enable(cStop, running && mine && !Engine.stopping);
+        for (View box : new View[] {cSeed, cTarget, cMin, cMax, cMore, cWords, cPool, cPerList, cFromFollowing, cFromAll, cFromVerified}) {
+            box.setEnabled(!running);
+        }
+        cProgress.setText(Engine.progress(cryptoStore, mine, prefs.getInt("c_pool", 50)));
+        int count = cryptoStore.resultCount();
+        cResults.setText("محفوظ: " + count + " حساب crypto");
+        enable(cSave, count > 0);
+        enable(cShare, count > 0);
+        enable(cCopy, count > 0);
+        enable(cLinks, count > 0);
+        enable(cEdit, !running);
+        enable(cClear, count > 0 && !running);
+        String log = Engine.logText(150, true);
+        cLog.setText(log.isEmpty() ? "لا شيء بعد." : log);
+    }
+
+    /** The number in the box, or -1 (and the box shows why) when it is not one from min to max. */
+    private long number(EditText box, long min, long max) {
+        long value;
+        try {
+            value = Long.parseLong(box.getText().toString().trim());
+        } catch (NumberFormatException e) {
+            value = -1;
+        }
+        if (value < min || value > max) {
+            box.setError("اكتب عددًا من " + min + " إلى " + max);
+            box.requestFocus();
+            return -1;
+        }
+        return value;
+    }
+
+    private void startCrypto() {
+        if (Engine.running) {
+            return;
+        }
+        if (!Web.loggedIn()) {
+            toast("سجّل الدخول أولًا");
+            return;
+        }
+        String seed = Text.cleanHandle(cSeed.getText().toString());
+        if (seed == null) {
+            cSeed.setError("اكتب يوزر صحيح، مثل: binance");
+            cSeed.requestFocus();
+            return;
+        }
+        long count = number(cTarget, 1, 100_000);
+        long min = count < 0 ? -1 : number(cMin, 0, 1_000_000_000L);
+        long max = min < 0 ? -1 : number(cMax, 0, 1_000_000_000L);
+        long listSize = max < 0 ? -1 : number(cPool, 1, Store.QUEUE_MAX);
+        long perList = listSize < 0 ? -1 : number(cPerList, 1, 20_000);
+        if (perList < 0) {
+            return;
+        }
+        if (max > 0 && min > max) {
+            cMax.setError("الحد الأعلى أقل من الأدنى");
+            cMax.requestFocus();
+            return;
+        }
+        List<String> words = Text.wordsIn(cWords.getText().toString());
+        if (words.isEmpty()) {
+            toast("اكتب كلمة واحدة على الأقل");
+            return;
+        }
+        int from = cFromFollowing.isChecked() ? 1 : cFromAll.isChecked() ? 2 : 0;
+        cSeed.setText(seed);
+        prefs.edit().putString("c_seed", seed).putInt("c_source", from).putInt("c_target", (int) count)
+            .putLong("c_min", min).putLong("c_max", max).putBoolean("c_more", cMore.isChecked())
+            .putString("c_words", cWords.getText().toString()).putInt("c_pool", (int) listSize)
+            .putInt("c_perList", (int) perList).apply();
+        hideKeyboard();
+        if (Engine.startCrypto(this, cryptoStore, seed, (int) count, (int) listSize, from, (int) perList, words, min, max,
+            cMore.isChecked())) {
+            if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, ASK_NOTIFICATIONS);
+            } else {
+                askBackground(false);
+            }
+        }
+        refresh();
     }
 
     // ---------------------------------------------------------------- small things
@@ -1134,7 +1401,7 @@ public final class MainActivity extends Activity {
         b.setMinimumHeight(0);
         b.setMinWidth(0);
         b.setMinimumWidth(0);
-        b.setPadding(dp(14), 0, dp(14), 0);
+        b.setPadding(dp(10), 0, dp(10), 0);
         return b;
     }
 

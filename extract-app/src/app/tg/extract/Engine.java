@@ -20,6 +20,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 /**
  * One extraction task at a time, on its own thread: the original script's steps and pauses, in the app's browser,
@@ -72,8 +73,15 @@ final class Engine {
     static volatile int target;
     /** The search list's size (the user's choice, 50 unless changed). */
     static volatile int pool = 50;
-    /** Which list is read: whom each account follows (true), or its verified followers (false). */
-    static volatile boolean following;
+    /** Which list is read: 0 the verified followers, 1 whom the account follows, 2 all its followers. */
+    static volatile int source;
+    /** The running (or last) task's kind: 0 gold accounts, 1 crypto accounts. */
+    static volatile int taskKind;
+    // A crypto task's choices.
+    private static List<Pattern> cryptoWords = new ArrayList<>();
+    private static long cryptoMin;
+    private static long cryptoMax;
+    private static boolean cryptoMore;
     /** The direct way's failures in a row (after 3 the task keeps to the page and its scrolling). */
     private static int directFails;
     /** The direct «About» check's failures in a row (after 3 the task keeps to the «About» page). */
@@ -81,9 +89,11 @@ final class Engine {
     private static boolean aboutWorks;
     /** X's direct «no country»: 0-1 being checked against the page, 2 taken as is, -1 not trusted (task long). */
     private static int noneState;
-    /** The «Following» query found in X's scripts in this task (two tries: the first page may not be X's). */
-    private static JSONObject followingOp;
-    private static int followingOpTries;
+    /** This task's query of each list (its id and features), and how many times its id was looked for. */
+    private static final Map<String, JSONObject> ops = new HashMap<>();
+    private static final Map<String, Integer> opTries = new HashMap<>();
+    /** Failures in a row to open a list's page, in this task. */
+    private static int navFails;
     private static Thread thread;
     private static Context app;
     private static final ArrayDeque<String> LOG = new ArrayDeque<>();
@@ -103,6 +113,8 @@ final class Engine {
         String image;
         String badge;
         long followers = -1;                             // (-1: not known yet)
+        long following = -1;
+        boolean fromPage;                                // (read on the page: no bio nor counts)
     }
 
     // ---------------------------------------------------------------- start and stop
@@ -118,7 +130,8 @@ final class Engine {
         done = 0;
         target = count;
         pool = listSize;
-        following = followingList;
+        source = followingList ? 1 : 0;
+        taskKind = 0;
         maxPerList = perList;
         goldMaxFollowers = maxFollowers;
         status = "يبدأ...";
@@ -127,6 +140,135 @@ final class Engine {
         thread.start();
         changed();
         return true;
+    }
+
+    /** A crypto task: accounts that name crypto in their username, name or bio, within the followers' bounds. */
+    static synchronized boolean startCrypto(Context context, Store store, String seed, int count, int listSize, int from,
+                                            int perList, List<String> words, long min, long max, boolean followsMore) {
+        if (running) {
+            return false;
+        }
+        app = context.getApplicationContext();
+        running = true;
+        stopping = false;
+        done = 0;
+        target = count;
+        pool = listSize;
+        source = from;
+        maxPerList = perList;
+        taskKind = 1;
+        cryptoWords = Text.wordPatterns(words);
+        cryptoMin = min;
+        cryptoMax = max;
+        cryptoMore = followsMore;
+        status = "يبدأ...";
+        thread = new Thread(() -> run(store, seed, count, listSize, new HashSet<String>()), "extract");
+        thread.start();
+        changed();
+        return true;
+    }
+
+    private static String extractCrypto(Store store, String seed, int count, int listSize) {
+        log("🪙 بدء استخراج " + count + " حساب crypto من @" + seed + " (" + sourceName() + ")");
+        log("📋 المفحوصون مسبقًا: " + store.checkedCount() + " | قائمة البحث: " + store.queueSize() + "/" + listSize
+            + " | الحد لكل قائمة: " + maxPerList);
+        log("📏 المتابعون من " + cryptoMin + " إلى " + (cryptoMax > 0 ? String.valueOf(cryptoMax) : "بلا حد")
+            + (cryptoMore ? " | ويتابع أكثر من متابعيه" : ""));
+        if (!Web.onMain(Web::loggedIn, 5_000, false)) {
+            return "🔴 لم تسجّل الدخول - اضغط «تسجيل الدخول» أولًا";
+        }
+        store.prepare(seed);
+        resetTask();
+        int checkedNow = 0;
+        int duplicates = 0;
+        int cached = 0;
+        int notCrypto = 0;
+        int outside = 0;
+        int unknown = 0;
+        while (done < count) {
+            checkStop();
+            String current = store.poll();
+            if (current == null) {
+                break;
+            }
+            ListRead read = readList(store, current);
+            if (read.end != null) {
+                return read.end;
+            }
+            if (read.cells == null) {
+                continue;
+            }
+            List<Cell> cells = read.cells;
+            List<String> names = new ArrayList<>();
+            for (Cell cell : cells) {
+                names.add(cell.username);
+            }
+            int fresh = store.addCollected(names);
+            log("      📜 جُمع " + cells.size() + " حساب من القائمة | 🗂️ +" + fresh + " جديد في ملف كل اليوزرات");
+            int found = 0;
+            for (Cell user : cells) {
+                checkStop();
+                if (store.isExtracted(user.username)) {
+                    duplicates++;
+                    continue;
+                }
+                if (store.isChecked(user.username)) {
+                    cached++;
+                    continue;
+                }
+                if (user.fromPage || user.followers < 0) {      // (no bio nor counts in hand: the account's data)
+                    status("يقرأ بيانات @" + user.username);
+                    JSONObject data = userData(user.username);
+                    sleep(1_000);
+                    if (data == null || data.optLong("followers", -1) < 0) {
+                        unknown++;                              // (not counted as checked: tried again later)
+                        continue;
+                    }
+                    user.bio = data.optString("bio", "");
+                    if (user.name == null || user.name.isEmpty()) {
+                        user.name = data.optString("name", user.username);
+                    }
+                    user.followers = data.optLong("followers", -1);
+                    user.following = data.optLong("following", -1);
+                }
+                checkedNow++;
+                store.addChecked(user.username);
+                if (!Text.mentions(user.username + " " + user.name + " " + user.bio, cryptoWords)) {
+                    notCrypto++;
+                    continue;
+                }
+                if (store.addToQueue(user.username, listSize)) {
+                    log("      ➕ @" + user.username + " - أُضيف لقائمة البحث (" + store.queueSize() + "/" + listSize + ")");
+                }
+                boolean within = user.followers >= cryptoMin && (cryptoMax <= 0 || user.followers <= cryptoMax)
+                    && (!cryptoMore || user.following > user.followers);
+                if (!within) {
+                    outside++;
+                    log("      ⏭️ @" + user.username + " - crypto | متابعوه " + user.followers + " | يتابع " + user.following
+                        + " (خارج الشروط)");
+                    continue;
+                }
+                if (done >= count) {
+                    break;
+                }
+                store.addCryptoResult(user.username, user.name, user.bio, user.followers, user.following, user.image, current);
+                done++;
+                found++;
+                log("      ✅ @" + user.username + " - crypto | متابعوه " + user.followers + " | يتابع " + user.following
+                    + " - تم الاستخراج (" + done + "/" + count + ")");
+            }
+            if (found > 0) {
+                log("      ✅ الإجمالي: " + done + "/" + count);
+            }
+            log("   📊 قائمة البحث: " + store.queueSize() + "/" + listSize + " | مكرر: " + duplicates + " | ليس crypto: "
+                + notCrypto + " | خارج الشروط: " + outside + " | تعذّرت بياناته: " + unknown + " | مفحوص: "
+                + store.checkedCount() + " | مؤقت: " + cached);
+            sleep(SCROLL_DELAY);
+        }
+        if (done >= count) {
+            return "✅ اكتملت - " + done + "/" + count + " من " + checkedNow + " مفحوص";
+        }
+        return "✅ انتهت قائمة البحث - " + done + "/" + count + " من " + checkedNow + " مفحوص";
     }
 
     static synchronized void stop() {
@@ -149,7 +291,7 @@ final class Engine {
         }, 5_000, false);
         String end;
         try {
-            end = extract(store, seed, count, listSize, allowed);
+            end = taskKind == 1 ? extractCrypto(store, seed, count, listSize) : extract(store, seed, count, listSize, allowed);
         } catch (Stop stop) {
             end = "⛔ أُوقفت المهمة - " + done + "/" + count;
         } catch (Throwable t) {
@@ -177,7 +319,7 @@ final class Engine {
 
     private static String extract(Store store, String seed, int count, int listSize, Set<String> allowed) {
         log("🔍 بدء استخراج " + count + " حساب ذهبي من @" + seed
-            + (following ? " (ممن يتابعهم كل حساب)" : " (من المتابعين الموثّقين)"));
+            + " (" + sourceName() + ")");
         log("📋 المفحوصون مسبقًا: " + store.checkedCount() + " | قائمة البحث: " + store.queueSize() + "/" + listSize
             + " | الحد لكل قائمة: " + maxPerList);
         if (goldMaxFollowers > 0) {
@@ -187,13 +329,7 @@ final class Engine {
             return "🔴 لم تسجّل الدخول - اضغط «تسجيل الدخول» أولًا";
         }
         store.prepare(seed);
-        directFails = 0;
-        aboutFails = 0;
-        aboutWorks = false;
-        noneState = 0;
-        followingOp = null;
-        followingOpTries = 0;
-        followerCounts.clear();
+        resetTask();
         int checkedNow = 0;
         int duplicates = 0;
         int notGold = 0;
@@ -201,7 +337,6 @@ final class Engine {
         int unopened = 0;
         int overLimit = 0;
         int noLocation = 0;
-        int navFails = 0;
         Boolean listFull = null;                                // (the search list's state last told in the log)
 
         while (done < count) {
@@ -210,79 +345,17 @@ final class Engine {
             if (current == null) {
                 break;
             }
-            String listName = following ? "من يتابعهم @" + current : "متابعي @" + current;
-            List<Cell> cells = null;
-            if (directFails < 3) {
-                log("   📂 استخراج " + listName + " (مباشر)...");
-                status("يجلب " + listName + " مباشرة");
-                cells = collectAllDirect(current);
-                if (cells != null) {
-                    directFails = 0;
-                } else if (++directFails == 3) {
-                    log("   ↩️ الطريقة المباشرة فشلت 3 مرات متتالية - تُستخدم الصفحة والتمرير لبقية المهمة");
-                }
+            ListRead read = readList(store, current);
+            if (read.end != null) {
+                return read.end;
             }
-            if (cells == null) {
-                // The page and its scrolling.
-                log("   📂 استخراج " + listName + " (الصفحة والتمرير)...");
-                status("يفتح " + listName);
-                int generation = Web.generation;
-                int page = openFollowers(current);
-                if (Web.generation != generation) {
-                    log("🔄 المتصفح انهار - إعادة تشغيله...");
-                    log("✅ تم إعادة تشغيل المتصفح");
-                    store.pushFront(current);
-                    noLocation = 0;
-                    continue;
-                }
-                if (page == SIGNED_OUT || page == LOCKED) {
-                    store.pushFront(current);
-                    return page == LOCKED ? LOCKED_END : SIGNED_OUT_END;
-                }
-                if (page == EMPTY) {
-                    navFails = 0;
-                    log("      ⚪ القائمة فارغة: " + listName + " (تخطي)");
-                    sleep(SCROLL_DELAY);
-                    continue;
-                }
-                if (page == FAILED) {
-                    navFails++;
-                    log("      ⚠️ تخطي @" + current + " - فشل التحميل");
-                    log("      📉 فشل متتالي: " + navFails);
-                    if (navFails >= NAV_FAIL_LONG_PAUSE) {
-                        log("🔴 " + navFails + " فشل متتالي - توقف ساعة كاملة...");
-                        store.pushFront(current);
-                        pause(NAV_FAIL_LONG_WAIT);
-                        log("🔄 فتح متصفح جديد بعد التوقف الطويل...");
-                        freshBrowser();
-                        log("▶️ استئناف العمل...");
-                        navFails = 0;
-                    } else if (navFails >= NAV_FAIL_PAUSE) {
-                        log("⏸️ " + navFails + " فشل متتالي - توقف دقيقة + متصفح جديد...");
-                        store.pushFront(current);
-                        pause(NAV_FAIL_SHORT_WAIT);
-                        freshBrowser();
-                        log("▶️ استئناف العمل...");
-                    }
-                    continue;
-                }
-                navFails = 0;
-                sleep(1_500);
-                cells = collectAll(current, generation);
-                if (Web.generation != generation) {
-                    log("🔄 المتصفح انهار أثناء الاستخراج - إعادة تشغيله...");
-                    store.pushFront(current);
-                    noLocation = 0;
-                    continue;
-                }
-                if (cells == null) {
-                    log("      ⚠️ تعذّر قراءة صفحة @" + current + " (تخطي)");
-                    continue;
-                }
-            } else if (cells.isEmpty()) {
-                log("      ⚪ القائمة فارغة: " + listName + " (تخطي)");
+            if (read.crashed) {
+                noLocation = 0;
+            }
+            if (read.cells == null) {
                 continue;
             }
+            List<Cell> cells = read.cells;
             int gold = 0;
             int goldDone = 0;
             int goldSeen = 0;
@@ -451,7 +524,7 @@ final class Engine {
 
     /** The account's verified followers (the script: load, 7 s, then up to 60 s for the first account cell). */
     private static int openFollowers(String user) {
-        String path = "/" + user + (following ? "/following" : "/verified_followers");
+        String path = "/" + user + (source == 1 ? "/following" : source == 2 ? "/followers" : "/verified_followers");
         int opened = navigate("https://x.com" + path, path, 30_000);
         if (opened != OK) {
             return opened;
@@ -595,6 +668,113 @@ final class Engine {
         }
     }
 
+    /** One account's list read: its accounts, or why there are none this time. */
+    private static final class ListRead {
+        List<Cell> cells;                                       // (null: nothing read from this account now)
+        String end;                                             // (the task must end: signed out, locked)
+        boolean crashed;                                        // (the browser was made anew meanwhile)
+    }
+
+    /** The account's list (the direct way first, else the page and its scrolling), with the original pauses. */
+    private static ListRead readList(Store store, String current) {
+        ListRead read = new ListRead();
+        String listName = listName(current);
+        List<Cell> cells = null;
+        if (directFails < 3) {
+            log("   📂 استخراج " + listName + " (مباشر)...");
+            status("يجلب " + listName + " مباشرة");
+            cells = collectAllDirect(current);
+            if (cells != null) {
+                directFails = 0;
+            } else if (++directFails == 3) {
+                log("   ↩️ الطريقة المباشرة فشلت 3 مرات متتالية - تُستخدم الصفحة والتمرير لبقية المهمة");
+            }
+        }
+        if (cells == null) {
+            // The page and its scrolling.
+            log("   📂 استخراج " + listName + " (الصفحة والتمرير)...");
+            status("يفتح " + listName);
+            int generation = Web.generation;
+            int page = openFollowers(current);
+            if (Web.generation != generation) {
+                log("🔄 المتصفح انهار - إعادة تشغيله...");
+                log("✅ تم إعادة تشغيل المتصفح");
+                store.pushFront(current);
+                read.crashed = true;
+                return read;
+            }
+            if (page == SIGNED_OUT || page == LOCKED) {
+                store.pushFront(current);
+                read.end = page == LOCKED ? LOCKED_END : SIGNED_OUT_END;
+                return read;
+            }
+            if (page == EMPTY) {
+                navFails = 0;
+                log("      ⚪ القائمة فارغة: " + listName + " (تخطي)");
+                sleep(SCROLL_DELAY);
+                return read;
+            }
+            if (page == FAILED) {
+                navFails++;
+                log("      ⚠️ تخطي @" + current + " - فشل التحميل");
+                log("      📉 فشل متتالي: " + navFails);
+                if (navFails >= NAV_FAIL_LONG_PAUSE) {
+                    log("🔴 " + navFails + " فشل متتالي - توقف ساعة كاملة...");
+                    store.pushFront(current);
+                    pause(NAV_FAIL_LONG_WAIT);
+                    log("🔄 فتح متصفح جديد بعد التوقف الطويل...");
+                    freshBrowser();
+                    log("▶️ استئناف العمل...");
+                    navFails = 0;
+                } else if (navFails >= NAV_FAIL_PAUSE) {
+                    log("⏸️ " + navFails + " فشل متتالي - توقف دقيقة + متصفح جديد...");
+                    store.pushFront(current);
+                    pause(NAV_FAIL_SHORT_WAIT);
+                    freshBrowser();
+                    log("▶️ استئناف العمل...");
+                }
+                return read;
+            }
+            navFails = 0;
+            sleep(1_500);
+            cells = collectAll(current, generation);
+            if (Web.generation != generation) {
+                log("🔄 المتصفح انهار أثناء الاستخراج - إعادة تشغيله...");
+                store.pushFront(current);
+                read.crashed = true;
+                return read;
+            }
+            if (cells == null) {
+                log("      ⚠️ تعذّر قراءة صفحة @" + current + " (تخطي)");
+                return read;
+            }
+        } else if (cells.isEmpty()) {
+            log("      ⚪ القائمة فارغة: " + listName + " (تخطي)");
+            return read;
+        }
+        read.cells = cells;
+        return read;
+    }
+
+    private static String listName(String user) {
+        return source == 1 ? "من يتابعهم @" + user : source == 2 ? "كل متابعي @" + user : "متابعي @" + user + " الموثّقين";
+    }
+
+    private static String sourceName() {
+        return source == 1 ? "ممن يتابعهم كل حساب" : source == 2 ? "من كل المتابعين" : "من المتابعين الموثّقين";
+    }
+
+    private static void resetTask() {
+        directFails = 0;
+        aboutFails = 0;
+        aboutWorks = false;
+        noneState = 0;
+        navFails = 0;
+        ops.clear();
+        opTries.clear();
+        followerCounts.clear();
+    }
+
     /** The script's check_session: X's home page, and whether X sends it to signing in. */
     private static int checkSession() {
         log("🔐 جاري التحقق من صلاحية الجلسة...");
@@ -682,6 +862,7 @@ final class Engine {
             cell.bio = one.optString("bio");
             cell.image = one.optString("image");
             cell.badge = one.optString("badge", "none");
+            cell.fromPage = true;
             cells.add(cell);
         }
         return cells;
@@ -704,7 +885,7 @@ final class Engine {
         String cursor = null;
         for (int page = 0; page < maxPerList / 20 + 10 && all.size() < maxPerList; page++) {  // safety limit
             checkStop();
-            JSONObject pageResult = following ? fetchFollowingPage(userId, cursor) : fetchVerifiedPage(userId, cursor);
+            JSONObject pageResult = source == 1 ? fetchListPage("Following", userId, cursor) : source == 2 ? fetchListPage("Followers", userId, cursor) : fetchVerifiedPage(userId, cursor);
             if (pageResult == null || (pageResult.has("error") && !pageResult.isNull("error"))) {
                 String why = pageResult == null ? "لا رد" : pageResult.optString("error");
                 if (all.isEmpty()) {
@@ -727,6 +908,7 @@ final class Engine {
                     cell.image = u.optString("image");
                     cell.badge = u.optString("badge");
                     cell.followers = u.optLong("followers", -1);
+                    cell.following = u.optLong("following", -1);
                     if (cell.username != null && !cell.username.isEmpty()) {
                         all.put(cell.username.toLowerCase(Locale.ROOT), cell);
                     }
@@ -775,21 +957,39 @@ final class Engine {
     /** The features sent with «Following» (the followers' direct way's; any X says are missing are added). */
     private static final String FOLLOWING_FEATURES = "{\"articles_preview_enabled\":true,\"responsive_web_graphql_timeline_navigation_enabled\":true,\"verified_phone_label_enabled\":false,\"view_counts_everywhere_api_enabled\":true,\"responsive_web_graphql_exclude_directive_enabled\":true}";
 
-    /** One page of whom the account follows: X's «Following» query, asked again when X names what it misses. */
-    private static JSONObject fetchFollowingPage(String userId, String cursor) {
-        if (followingOp == null) {
+
+    /** One page of an account's list (X's «Following» or «Followers» query), asked again when X names what it misses. */
+    private static JSONObject fetchListPage(String op, String userId, String cursor) {
+        JSONObject state = ops.get(op);
+        if (state == null) {
             try {
-                followingOp = new JSONObject().put("queryId", FOLLOWING_QUERY_ID).put("features", new JSONObject(FOLLOWING_FEATURES));
+                if ("Following".equals(op)) {
+                    state = new JSONObject().put("queryId", FOLLOWING_QUERY_ID).put("features", new JSONObject(FOLLOWING_FEATURES));
+                } else {
+                    if (tries(op) >= 2) {
+                        return null;
+                    }
+                    JSONObject found = findOperation(op);
+                    if (found == null) {
+                        return null;
+                    }
+                    JSONObject features = found.optJSONObject("features");
+                    if (features == null || features.length() == 0) {
+                        features = new JSONObject(FOLLOWING_FEATURES);
+                    }
+                    state = new JSONObject().put("queryId", found.optString("queryId")).put("features", features);
+                }
             } catch (JSONException e) {
                 return null;
             }
+            ops.put(op, state);
         }
         JSONObject result = null;
         for (int attempt = 0; attempt < 4; attempt++) {
-            JSONObject features = followingOp.optJSONObject("features");
+            JSONObject features = state.optJSONObject("features");
             String script = Scripts.START_FETCH_LIST
-                .replace("%QID%", followingOp.optString("queryId"))
-                .replace("%OP%", "Following")
+                .replace("%QID%", state.optString("queryId"))
+                .replace("%OP%", op)
                 .replace("%FEATURES%", features != null ? features.toString() : "{}")
                 .replace("%USER_ID%", userId)
                 .replace("%CURSOR%", cursor == null ? "null" : cursor);
@@ -813,11 +1013,11 @@ final class Engine {
                 log("      🔧 طلبت X ميزات ناقصة (" + missing.length() + ") - أُضيفت وأُعيد الطلب");
                 continue;
             }
-            if (result.optString("error").startsWith("HTTP 404") && followingOpTries < 2) {
-                JSONObject found = findOperation("Following");  // (X may have changed the query id)
-                if (found != null && !found.optString("queryId").equals(followingOp.optString("queryId"))) {
+            if (result.optString("error").startsWith("HTTP 404") && tries(op) < 2) {
+                JSONObject found = findOperation(op);           // (X may have changed the query id)
+                if (found != null && !found.optString("queryId").equals(state.optString("queryId"))) {
                     try {
-                        followingOp.put("queryId", found.optString("queryId"));
+                        state.put("queryId", found.optString("queryId"));
                         JSONObject more = found.optJSONObject("features");
                         if (more != null && features != null) {
                             for (java.util.Iterator<String> it = more.keys(); it.hasNext(); ) {
@@ -836,9 +1036,14 @@ final class Engine {
         return result;
     }
 
+    private static int tries(String op) {
+        Integer n = opTries.get(op);
+        return n == null ? 0 : n;
+    }
+
     /** An operation's query id and features, looked for in the scripts X loaded in the page (two tries a task). */
     private static JSONObject findOperation(String operation) {
-        followingOpTries++;
+        opTries.put(operation, tries(operation) + 1);
         status("يبحث عن استعلام " + operation + " في سكربتات X");
         evaluate(Scripts.FIND_OPERATION.replace("%OP%", operation), 3_000);
         JSONObject found = pollJson(Scripts.POLL_OP_RESULT, 60);     // (up to about 30 s: X's scripts are big)
@@ -848,6 +1053,12 @@ final class Engine {
         }
         log("      ⚠️ لم يُعثر على استعلام " + operation + " في سكربتات X (" + (found == null ? "لا رد" : found.optString("error")) + ")");
         return null;
+    }
+
+    /** The account's own data from X (its counts, bio and name); null when X did not give it. */
+    private static JSONObject userData(String user) {
+        evaluate(Scripts.START_FETCH_USER_ID.replace("%SCREEN%", user), 3_000);
+        return pollJson(Scripts.POLL_GQL_RESULT, 20);
     }
 
     /** The account's followers count: from the list's data, else asked from X, else read on its profile page. */
@@ -872,8 +1083,7 @@ final class Engine {
     }
 
     private static long followersDirect(String user) {
-        evaluate(Scripts.START_FETCH_USER_ID.replace("%SCREEN%", user), 3_000);
-        JSONObject data = pollJson(Scripts.POLL_GQL_RESULT, 20);
+        JSONObject data = userData(user);
         return data == null ? -1 : data.optLong("followers", -1);
     }
 
@@ -1079,14 +1289,17 @@ final class Engine {
         return out.toString();
     }
 
-    static String progress(Store store) {
+    /** One kind of task's state for its page: its own progress, or that the other kind of task works. */
+    static String progress(Store store, boolean mine, int listSize) {
         String head;
-        if (running) {
+        if (running && mine) {
             head = (stopping ? "⏳ يتوقف..." : "🟢 يعمل - هذه المهمة: " + done + "/" + target) + "\n" + status;
+        } else if (running) {
+            head = "⏳ مهمة أخرى تعمل الآن";
         } else {
-            head = status;
+            head = mine ? status : "جاهز";
         }
-        return head + "\nقائمة البحث: " + store.queueSize() + "/" + pool + "  |  مفحوص: " + store.checkedCount();
+        return head + "\nقائمة البحث: " + store.queueSize() + "/" + listSize + "  |  مفحوص: " + store.checkedCount();
     }
 
     /** The page and the notification are refreshed (at most a few times a second). */

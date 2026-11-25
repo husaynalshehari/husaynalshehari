@@ -31,7 +31,13 @@ final class Store {
     static final int QUEUE_MAX = 5000;
     private static final String[] HEADER = {
         "اليوزر", "الاسم", "النبذة", "الموقع", "الدولة", "رابط الحساب", "صورة الحساب", "وُجد عبر", "وقت الاستخراج"};
+    private static final String[] CRYPTO_HEADER = {
+        "اليوزر", "الاسم", "النبذة", "المتابعون", "يتابع", "رابط الحساب", "صورة الحساب", "وُجد عبر", "وقت الاستخراج"};
     private static Store instance;
+    private static Store cryptoInstance;
+
+    private final String prefix;
+    private final String[] header;
 
     private final File dir;
     private final ArrayList<String> queue = new ArrayList<>();
@@ -45,12 +51,22 @@ final class Store {
 
     static synchronized Store get(Context context) {
         if (instance == null) {
-            instance = new Store(context.getApplicationContext());
+            instance = new Store(context.getApplicationContext(), "", HEADER);
         }
         return instance;
     }
 
-    private Store(Context app) {
+    /** The crypto task's own files (crypto_...), apart from the gold accounts'. */
+    static synchronized Store crypto(Context context) {
+        if (cryptoInstance == null) {
+            cryptoInstance = new Store(context.getApplicationContext(), "crypto_", CRYPTO_HEADER);
+        }
+        return cryptoInstance;
+    }
+
+    private Store(Context app, String prefix, String[] header) {
+        this.prefix = prefix;
+        this.header = header;
         dir = app.getFilesDir();
         List<String> saved = readJsonList(file("queue.json"));
         if (saved == null) {
@@ -73,7 +89,7 @@ final class Store {
     }
 
     private File file(String name) {
-        return new File(dir, name);
+        return new File(dir, prefix + name);
     }
 
     // ---------------------------------------------------------------- the waiting list
@@ -211,13 +227,26 @@ final class Store {
 
     synchronized void addResult(String username, String name, String bio, String location, String country,
                                 String image, String foundVia) {
+        appendRow(username, username, name, bio, location, country, "https://x.com/" + username, image, foundVia, now());
+    }
+
+    synchronized void addCryptoResult(String username, String name, String bio, long followers, long following,
+                                      String image, String foundVia) {
+        appendRow(username, username, name, bio, String.valueOf(followers), String.valueOf(following),
+            "https://x.com/" + username, image, foundVia, now());
+    }
+
+    private static String now() {
+        return new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(new Date());
+    }
+
+    private void appendRow(String username, String... cells) {
         File csv = file("results.csv");
         StringBuilder out = new StringBuilder();
         if (!csv.isFile() || csv.length() == 0) {
-            out.append('﻿').append(Text.csvRow(HEADER));       // (the mark lets Excel read the Arabic)
+            out.append('﻿').append(Text.csvRow(header));       // (the mark lets Excel read the Arabic)
         }
-        String time = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(new Date());
-        out.append(Text.csvRow(username, name, bio, location, country, "https://x.com/" + username, image, foundVia, time));
+        out.append(Text.csvRow(cells));
         append(csv, out.toString());
         results++;
         String key = username.toLowerCase(Locale.ROOT);
@@ -248,7 +277,7 @@ final class Store {
                 }
             }
         }
-        StringBuilder out = new StringBuilder().append('\uFEFF').append(Text.csvRow(HEADER));
+        StringBuilder out = new StringBuilder().append('\uFEFF').append(Text.csvRow(header));
         String time = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(new Date());
         int kept = 0;
         int added = 0;
@@ -300,7 +329,7 @@ final class Store {
     }
 
     /** A copy of the results to share, under a name with the date (the shared folder keeps only this one). */
-    synchronized File shareCopy() throws IOException {
+    synchronized File shareCopy(String base) throws IOException {
         File folder = ResultsProvider.folder(dir);
         File[] old = folder.listFiles();
         if (old != null) {
@@ -308,7 +337,7 @@ final class Store {
                 f.delete();
             }
         }
-        File copy = new File(folder, "extract-" + new SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(new Date()) + ".csv");
+        File copy = new File(folder, base + "-" + new SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(new Date()) + ".csv");
         try (OutputStream out = new FileOutputStream(copy)) {
             copyResults(out);
         }

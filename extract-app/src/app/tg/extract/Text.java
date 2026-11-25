@@ -167,6 +167,54 @@ final class Text {
         return Math.round(value);
     }
 
+    /** The words looked for in crypto accounts (one a line; "word*": any word that starts so). */
+    static final String CRYPTO_WORDS = "crypto*\nbitcoin*\nbtc\neth\nethereum*\nblockchain*\nweb3*\nnft*\ndefi\naltcoin*\n"
+        + "memecoin*\nsolana*\nbinance*\nairdrop*\ntrading\ntrader*\ntoken*\nhodl*\nsatoshi*\nكريبتو\nعملات رقمية\n"
+        + "العملات الرقمية\nعملة رقمية\nبيتكوين\nبتكوين\nايثيريوم\nإيثريوم\nبلوكتشين\nتداول\nميم كوين";
+
+    /** The words of the user's list: separated by new lines or commas, once each. */
+    static List<String> wordsIn(String text) {
+        List<String> words = new ArrayList<>();
+        for (String part : (text == null ? "" : text).split("[\\n,،]+")) {
+            String word = part.trim();
+            if (!word.isEmpty() && !words.contains(word)) {
+                words.add(word);
+            }
+        }
+        return words;
+    }
+
+    /** What to look for: Arabic words anywhere (they take prefixes), others as whole words ("word*": as a start). */
+    static List<Pattern> wordPatterns(List<String> words) {
+        List<Pattern> patterns = new ArrayList<>();
+        for (String raw : words) {
+            String word = normalize(raw);
+            boolean start = word.endsWith("*");
+            if (start) {
+                word = word.substring(0, word.length() - 1).trim();
+            }
+            if (word.isEmpty()) {
+                continue;
+            }
+            if (word.matches(".*[\\u0600-\\u06FF].*")) {
+                patterns.add(Pattern.compile(Pattern.quote(word)));
+            } else {
+                patterns.add(Pattern.compile("(?<![\\p{L}\\p{N}])" + Pattern.quote(word) + (start ? "" : "(?![\\p{L}\\p{N}])")));
+            }
+        }
+        return patterns;
+    }
+
+    static boolean mentions(String text, List<Pattern> patterns) {
+        String plain = normalize(text);
+        for (Pattern pattern : patterns) {
+            if (pattern.matcher(plain).find()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** One CSV cell: quoted, on one line, and never read as a formula by a spreadsheet. */
     static String csvCell(String value) {
         String v = value == null ? "" : value.replace("\r", " ").replace("\n", " ").trim();

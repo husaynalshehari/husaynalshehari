@@ -67,6 +67,16 @@ public final class TextTest {
         same(String.valueOf(Text.parseCount("Followers")), "-1");
         same(String.valueOf(Text.parseCount(null)), "-1");
 
+        // Crypto accounts.
+        java.util.List<java.util.regex.Pattern> crypto = Text.wordPatterns(Text.wordsIn(Text.CRYPTO_WORDS));
+        same(String.valueOf(Text.mentions("CryptoKing | $BTC holder", crypto)), "true");
+        same(String.valueOf(Text.mentions("Web3 builder", crypto)), "true");
+        same(String.valueOf(Text.mentions("مهتم بالعملات الرقمية", crypto)), "true");
+        same(String.valueOf(Text.mentions("أحب التداول", crypto)), "true");
+        same(String.valueOf(Text.mentions("Ethics professor, definitely", crypto)), "false");
+        same(String.valueOf(Text.mentions("", crypto)), "false");
+        same(String.join("|", Text.wordsIn("a, b\nc\n\na")), "a|b|c");
+
         // CSV cells.
         same(Text.csvCell("a \"quoted\" name"), "\"a \"\"quoted\"\" name\"");
         same(Text.csvCell("two\nlines"), "\"two lines\"");
