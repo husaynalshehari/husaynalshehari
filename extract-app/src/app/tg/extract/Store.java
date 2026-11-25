@@ -35,6 +35,8 @@ final class Store {
     private final ArrayList<String> queue = new ArrayList<>();
     private final HashSet<String> checked = new HashSet<>();
     private final HashSet<String> extracted = new HashSet<>();
+    /** Every username read from a followers' page, once (lower case), as in collected.txt. */
+    private final HashSet<String> collected = new HashSet<>();
     private int results;
 
     static synchronized Store get(Context context) {
@@ -56,6 +58,9 @@ final class Store {
         checked.addAll(readLines(file("checked.txt")));
         for (String name : readLines(file("extracted.txt"))) {
             extracted.add(name.toLowerCase(Locale.ROOT));
+        }
+        for (String name : readLines(file("collected.txt"))) {
+            collected.add(name.toLowerCase(Locale.ROOT));
         }
         results = resultUsernames().size();
     }
@@ -145,6 +150,37 @@ final class Store {
 
     synchronized int extractedCount() {
         return extracted.size();
+    }
+
+    // ---------------------------------------------------------------- every username read
+
+    /** Adds the usernames not yet in collected.txt (never twice, whatever the case). How many were new. */
+    synchronized int addCollected(List<String> names) {
+        StringBuilder fresh = new StringBuilder();
+        int added = 0;
+        for (String name : names) {
+            if (name != null && !name.isEmpty() && collected.add(name.toLowerCase(Locale.ROOT))) {
+                fresh.append(name).append('\n');
+                added++;
+            }
+        }
+        if (added > 0) {
+            append(file("collected.txt"), fresh.toString());
+        }
+        return added;
+    }
+
+    synchronized int collectedCount() {
+        return collected.size();
+    }
+
+    /** The collected usernames, "@name" one a line, in the order they were first read. */
+    synchronized void copyCollected(OutputStream out) throws IOException {
+        StringBuilder text = new StringBuilder();
+        for (String name : readLines(file("collected.txt"))) {
+            text.append('@').append(name).append('\n');
+        }
+        out.write(text.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     // ---------------------------------------------------------------- results

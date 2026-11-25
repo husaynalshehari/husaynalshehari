@@ -103,6 +103,8 @@ public final class MainActivity extends Activity {
     private Button shareButton;
     private Button copyButton;
     private Button clearButton;
+    private TextView collectedText;
+    private Button collectedButton;
     private TextView logView;
 
     private boolean onBrowserTab;
@@ -359,6 +361,11 @@ public final class MainActivity extends Activity {
         clearButton = danger("مسح النتائج");
         clearButton.setOnClickListener(v -> clearResults());
         add(card, row(copyButton, clearButton), 8);
+        collectedText = text("", 13, INK, false);
+        add(card, collectedText, 14);
+        collectedButton = secondary("⬇  تنزيل كل اليوزرات المجموعة");
+        collectedButton.setOnClickListener(v -> saveCollected());
+        add(card, collectedButton, 6);
         add(card, text("ملف CSV يفتح في Excel و Google Sheets. لا يُرسل شيء إلى أي خادم: كل شيء على جوالك.", 12, MUTED, false), 8);
         return card;
     }
@@ -416,6 +423,9 @@ public final class MainActivity extends Activity {
         enable(shareButton, count > 0);
         enable(copyButton, count > 0);
         enable(clearButton, count > 0 && !running);
+        int everyone = store.collectedCount();
+        collectedText.setText("كل اليوزرات المجموعة من صفحات المتابعين (بلا تكرار): " + everyone);
+        enable(collectedButton, everyone > 0);
 
         String log = Engine.logText(150, true);
         logView.setText(log.isEmpty() ? "لا شيء بعد." : log);
@@ -754,6 +764,14 @@ public final class MainActivity extends Activity {
         }
         byte[] data = text.toString().getBytes(StandardCharsets.UTF_8);
         saveDownload("search-list-" + stamp() + ".txt", "text/plain", out -> out.write(data), this::saveSearchList);
+    }
+
+    /** Every username read from the followers' pages, once each, in a text file in «Downloads». */
+    private void saveCollected() {
+        if (store.collectedCount() == 0) {
+            return;
+        }
+        saveDownload("all-usernames-" + stamp() + ".txt", "text/plain", store::copyCollected, this::saveCollected);
     }
 
     private String stamp() {

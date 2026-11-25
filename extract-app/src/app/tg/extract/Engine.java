@@ -262,6 +262,12 @@ final class Engine {
                 }
             }
             log("      📜 جُمع " + cells.size() + " حساب من صفحة المتابعين | 🟡 الذهبية: " + gold);
+            List<String> names = new ArrayList<>();
+            for (Cell cell : cells) {
+                names.add(cell.username);
+            }
+            int fresh = store.addCollected(names);
+            log("      🗂️ ملف كل اليوزرات: +" + fresh + " جديد (المجموع " + store.collectedCount() + " بلا تكرار)");
 
             int found = 0;
             int unopenedHere = 0;
