@@ -26,7 +26,8 @@ final class Scripts {
         "(function(){"
         + "var se=document.scrollingElement||document.documentElement;"
         + "window.scrollTo(0,se.scrollTop+Math.max(400,Math.round(window.innerHeight*0.85)));"
-        + "return {loading:!!document.querySelector('[role=\"progressbar\"]'),y:se.scrollTop,h:se.scrollHeight};"
+        + "return {loading:!!document.querySelector('[role=\"progressbar\"]'),y:se.scrollTop,h:se.scrollHeight,"
+        + "bottom:se.scrollTop+window.innerHeight>=se.scrollHeight-40};"
         + "})()";
 
     /** The accounts in the page, with the kind of their verified badge (the original script's reading). */

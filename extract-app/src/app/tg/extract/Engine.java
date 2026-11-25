@@ -239,7 +239,7 @@ final class Engine {
                     continue;
                 }
                 navFails = 0;
-                sleep(4_000);
+                sleep(1_500);
                 cells = collectAll(current, generation);
                 if (Web.generation != generation) {
                     log("🔄 المتصفح انهار أثناء الاستخراج - إعادة تشغيله...");
@@ -389,7 +389,7 @@ final class Engine {
         if (opened != OK) {
             return opened;
         }
-        sleep(7_000);
+        sleep(2_000);
         long end = SystemClock.elapsedRealtime() + 60_000;
         while (true) {
             Object value = evaluate(Scripts.CELLS, 5_000);
@@ -631,14 +631,16 @@ final class Engine {
         for (int page = 0; page < 50 && all.size() < MAX_PER_PAGE; page++) {  // safety limit
             checkStop();
             JSONObject pageResult = fetchVerifiedPage(userId, cursor);
-            if (pageResult == null) {
-                log("      ⚠️ فشل جلب الصفحة المباشرة - العودة للطريقة التقليدية");
-                return null;
+            if (pageResult == null || (pageResult.has("error") && !pageResult.isNull("error"))) {
+                String why = pageResult == null ? "لا رد" : pageResult.optString("error");
+                if (all.isEmpty()) {
+                    log("      ⚠️ فشل الجلب المباشر (" + why + ") - العودة للطريقة التقليدية");
+                    return null;
+                }
+                log("      ⚠️ توقف الجلب المباشر عند " + all.size() + " (" + why + ") - يُكمل بما جُمع");
+                break;
             }
-            if (pageResult.has("error") && !pageResult.isNull("error")) {
-                log("      ⚠️ خطأ API: " + pageResult.optString("error"));
-                return null;
-            }
+            int before = all.size();
             JSONArray users = pageResult.optJSONArray("users");
             if (users != null) {
                 for (int i = 0; i < users.length(); i++) {
@@ -656,8 +658,11 @@ final class Engine {
                 }
             }
             String next = pageResult.optString("cursor", null);
-            if (next == null || next.isEmpty() || "null".equals(next)) {
+            if (next == null || next.isEmpty() || "null".equals(next) || next.equals(cursor)) {
                 break;
+            }
+            if (all.size() == before) {
+                break;                                          // (no one new: the list's end, no use asking on)
             }
             cursor = next;
             status("يجلب متابعي @" + user + " مباشرة - جُمع " + all.size());
@@ -737,11 +742,12 @@ final class Engine {
             quiet = all.size() > before ? 0 : quiet + 1;
             Object scrolled = evaluate(Scripts.SCROLL, 5_000);
             boolean loading = scrolled instanceof JSONObject && ((JSONObject) scrolled).optBoolean("loading");
-            if (quiet >= (loading ? QUIET_ROUNDS_LOADING : QUIET_ROUNDS)) {
-                break;
+            boolean bottom = scrolled instanceof JSONObject && ((JSONObject) scrolled).optBoolean("bottom");
+            if (quiet >= (loading ? QUIET_ROUNDS_LOADING : bottom ? 2 : QUIET_ROUNDS)) {
+                break;                                          // (the list's end: no use waiting on)
             }
             status("يمرّر متابعي @" + user + " - جُمع " + all.size());
-            sleep(quiet == 0 ? 1_500 : 2_000);
+            sleep(1_500);
         }
         if (!readOnce) {
             return null;
