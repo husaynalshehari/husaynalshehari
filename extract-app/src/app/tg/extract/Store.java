@@ -124,6 +124,13 @@ final class Store {
         writeAtomic(list, new JSONArray(queue).toString().getBytes(StandardCharsets.UTF_8));
     }
 
+    /** The search list as the user edited it, in their order (the list before stays in queue.json.bak). */
+    synchronized void replaceQueue(List<String> names) {
+        queue.clear();
+        queue.addAll(names);
+        saveQueue();
+    }
+
     /** The search list's usernames, in their order (a copy). */
     synchronized List<String> queueSnapshot() {
         return new ArrayList<>(queue);

@@ -103,6 +103,7 @@ public final class MainActivity extends Activity {
     private TextView backgroundText;
     private Button resetButton;
     private Button listButton;
+    private Button editListButton;
     private TextView resultsText;
     private Button saveButton;
     private Button shareButton;
@@ -355,6 +356,9 @@ public final class MainActivity extends Activity {
         backgroundRow.addView(fix, fixSize);
         add(card, backgroundRow, 10);
 
+        editListButton = secondary("✏️  تعديل قائمة البحث");
+        editListButton.setOnClickListener(v -> editSearchList());
+        add(card, editListButton, 10);
         listButton = secondary("⬇  تنزيل يوزرات قائمة البحث");
         listButton.setOnClickListener(v -> saveSearchList());
         add(card, listButton, 10);
@@ -438,6 +442,7 @@ public final class MainActivity extends Activity {
         }
         enable(resetButton, !running);
         enable(listButton, store.queueSize() > 0);
+        enable(editListButton, !running);
         progressText.setText(Engine.progress(store));
 
         int count = store.resultCount();
@@ -787,6 +792,58 @@ public final class MainActivity extends Activity {
             return;
         }
         saveDownload("extract-" + stamp() + ".csv", "text/csv", store::copyResults, this::saveToDownloads);
+    }
+
+    /** The search list in a box to edit: one username (or @name, or link) a line, in the order of the search. */
+    private void editSearchList() {
+        if (Engine.running) {
+            toast("أوقف المهمة أولًا لتعديل قائمة البحث");
+            return;
+        }
+        List<String> names = store.queueSnapshot();
+        EditText box = new EditText(this);
+        box.setText(TextUtils.join("\n", names));
+        box.setHint("يوزر أو رابط حساب في كل سطر");
+        box.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        box.setSingleLine(false);
+        box.setHorizontallyScrolling(false);
+        box.setMinLines(8);
+        box.setMaxLines(14);
+        box.setVerticalScrollBarEnabled(true);
+        box.setGravity(Gravity.TOP | Gravity.START);
+        box.setTextDirection(View.TEXT_DIRECTION_LTR);
+        box.setTextSize(14);
+        box.setTextColor(INK);
+        box.setBackground(round(0xFFF9FAFB, LINE, 10));
+        box.setPadding(dp(12), dp(10), dp(12), dp(10));
+        FrameLayout holder = new FrameLayout(this);
+        holder.setPadding(dp(20), dp(8), dp(20), 0);
+        holder.addView(box);
+        new AlertDialog.Builder(this)
+            .setTitle("تعديل قائمة البحث (" + names.size() + ")")
+            .setMessage("يوزر أو رابط حساب في كل سطر. الترتيب هو ترتيب البحث، والمكرر يُحذف.")
+            .setView(holder)
+            .setPositiveButton("حفظ", (dialog, which) -> saveEditedList(box.getText().toString()))
+            .setNegativeButton("إلغاء", null)
+            .show();
+    }
+
+    private void saveEditedList(String text) {
+        if (Engine.running) {
+            toast("أوقف المهمة أولًا لتعديل قائمة البحث");
+            return;
+        }
+        int[] bad = new int[1];
+        List<String> names = Text.handlesIn(text, bad);
+        int over = Math.max(0, names.size() - Store.QUEUE_MAX);
+        if (over > 0) {
+            names = names.subList(0, Store.QUEUE_MAX);
+        }
+        store.replaceQueue(names);
+        toast("✅ حُفظت قائمة البحث: " + names.size() + " حساب"
+            + (bad[0] > 0 ? "، وتُرك " + bad[0] + " غير صالح" : "")
+            + (over > 0 ? "، وحُذف " + over + " فوق الحد " + Store.QUEUE_MAX : ""));
+        refresh();
     }
 
     /** The search list's usernames, one a line, in a text file in «Downloads». */

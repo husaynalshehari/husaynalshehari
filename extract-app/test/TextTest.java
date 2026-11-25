@@ -49,6 +49,13 @@ public final class TextTest {
         same(Text.cleanHandle("averyveryverylongname"), null);
         same(Text.cleanHandle(""), null);
 
+        // The search list as the user edits it.
+        int[] bad = new int[1];
+        same(String.join("|", Text.handlesIn("@a1\n b_2 \nhttps://x.com/C3\nnot-valid!\n@A1\n\n", bad)), "a1|b_2|C3");
+        same(String.valueOf(bad[0]), "1");
+        same(String.join("|", Text.handlesIn("one, two، three", null)), "one|two|three");
+        same(String.valueOf(Text.handlesIn("", bad).size()), "0");
+
         // CSV cells.
         same(Text.csvCell("a \"quoted\" name"), "\"a \"\"quoted\"\" name\"");
         same(Text.csvCell("two\nlines"), "\"two lines\"");

@@ -1,6 +1,9 @@
 package app.tg.extract;
 
 import java.text.Normalizer;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -94,6 +97,31 @@ final class Text {
             s = s.substring(1);
         }
         return s.matches("[A-Za-z0-9_]{1,15}") ? s : null;
+    }
+
+    /**
+     * The usernames in a text the user wrote (one or more a line: names, @names or links), once each whatever the
+     * case, in their order. bad[0] (if given) gets how many pieces were not usernames.
+     */
+    static List<String> handlesIn(String text, int[] bad) {
+        List<String> names = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        int wrong = 0;
+        for (String part : (text == null ? "" : text).split("[\\s,،]+")) {
+            if (part.isEmpty()) {
+                continue;
+            }
+            String name = cleanHandle(part);
+            if (name == null) {
+                wrong++;
+            } else if (seen.add(name.toLowerCase(Locale.ROOT))) {
+                names.add(name);
+            }
+        }
+        if (bad != null && bad.length > 0) {
+            bad[0] = wrong;
+        }
+        return names;
     }
 
     /** One CSV cell: quoted, on one line, and never read as a formula by a spreadsheet. */
