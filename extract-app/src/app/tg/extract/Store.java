@@ -37,6 +37,8 @@ final class Store {
     private final HashSet<String> extracted = new HashSet<>();
     /** Every username read from a followers' page, once (lower case), as in collected.txt. */
     private final HashSet<String> collected = new HashSet<>();
+    /** Gold accounts whose country was read for sure (gold_checked.txt): only these are not read again. */
+    private final HashSet<String> goldChecked = new HashSet<>();
     private int results;
 
     static synchronized Store get(Context context) {
@@ -61,6 +63,9 @@ final class Store {
         }
         for (String name : readLines(file("collected.txt"))) {
             collected.add(name.toLowerCase(Locale.ROOT));
+        }
+        for (String name : readLines(file("gold_checked.txt"))) {
+            goldChecked.add(name.toLowerCase(Locale.ROOT));
         }
         results = resultUsernames().size();
     }
@@ -142,6 +147,16 @@ final class Store {
 
     synchronized int checkedCount() {
         return checked.size();
+    }
+
+    synchronized boolean isGoldChecked(String name) {
+        return goldChecked.contains(name.toLowerCase(Locale.ROOT));
+    }
+
+    synchronized void addGoldChecked(String name) {
+        if (goldChecked.add(name.toLowerCase(Locale.ROOT))) {
+            append(file("gold_checked.txt"), name.toLowerCase(Locale.ROOT) + "\n");
+        }
     }
 
     synchronized boolean isExtracted(String name) {
@@ -259,9 +274,11 @@ final class Store {
     synchronized void clearSearch() {
         queue.clear();
         checked.clear();
+        goldChecked.clear();
         file("queue.json").delete();
         file("queue.json.bak").delete();
         file("checked.txt").delete();
+        file("gold_checked.txt").delete();
     }
 
     // ---------------------------------------------------------------- files

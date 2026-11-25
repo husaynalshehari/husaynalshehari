@@ -256,12 +256,21 @@ final class Engine {
                 continue;
             }
             int gold = 0;
+            int goldDone = 0;
+            int goldSeen = 0;
             for (Cell cell : cells) {
                 if ("gold".equals(cell.badge)) {
                     gold++;
+                    if (store.isExtracted(cell.username)) {
+                        goldDone++;
+                    } else if (store.isGoldChecked(cell.username)) {
+                        goldSeen++;
+                    }
                 }
             }
-            log("      📜 جُمع " + cells.size() + " حساب من صفحة المتابعين | 🟡 الذهبية: " + gold);
+            log("      📜 جُمع " + cells.size() + " حساب من صفحة المتابعين | 🟡 الذهبية: " + gold
+                + (gold > 0 ? " (جديدة: " + (gold - goldDone - goldSeen) + "، مستخرجة سابقًا: " + goldDone
+                + "، فُحص موقعها سابقًا: " + goldSeen + ")" : ""));
             List<String> names = new ArrayList<>();
             for (Cell cell : cells) {
                 names.add(cell.username);
@@ -279,26 +288,31 @@ final class Engine {
                     duplicates++;
                     continue;
                 }
-                if (store.isChecked(user.username)) {
+                boolean isGold = "gold".equals(user.badge);
+                if (isGold ? store.isGoldChecked(user.username) : store.isChecked(user.username)) {
                     cached++;
                     continue;
                 }
-                boolean isGold = "gold".equals(user.badge);
                 if (!filling && !isGold) {
                     unopenedHere++;                             // (the list is full: only gold accounts are opened)
                     continue;
                 }
-                store.addChecked(user.username);
                 checkedNow++;
                 status("يفحص @" + user.username);
 
                 int before = Web.generation;
-                String location = locationOf(user.username);
+                String location = locationOf(user.username, isGold);
                 if (Web.generation != before) {
                     log("🔄 المتصفح انهار أثناء فحص الموقع - إعادة تشغيله...");
                     log("✅ تم إعادة تشغيل المتصفح");
                     noLocation = 0;
                     break;
+                }
+                if (location != null) {                         // (read for sure: not asked again; else retried later)
+                    store.addChecked(user.username);
+                    if (isGold) {
+                        store.addGoldChecked(user.username);
+                    }
                 }
                 String country = location == null || location.isEmpty() ? null : Text.countryOf(location, allowed);
 
@@ -423,11 +437,15 @@ final class Engine {
      * The account's country, asked straight from X first and read on its «About» page if that does not tell. "" when
      * X shows no country for the account (nothing to wait for), null when it could not be told.
      */
-    private static String locationOf(String user) {
+    private static String locationOf(String user, boolean gold) {
         if (aboutFails < 3) {
             String direct = aboutDirect(user);
             if (direct != null && !direct.isEmpty()) {
                 return direct;
+            }
+            if (direct != null && gold) {
+                String page = locationFromPage(user);           // (what the task looks for: the page is read too)
+                return page != null ? page : "";
             }
             if (direct != null) {                               // (X's data: no country for this account)
                 if (noneState >= 2) {
@@ -507,6 +525,7 @@ final class Engine {
             return null;
         }
         long start = SystemClock.elapsedRealtime();
+        int lastLength = -1;
         sleep(1_500);
         while (true) {
             Object value = evaluate(Scripts.LOCATION, 5_000);
@@ -516,9 +535,11 @@ final class Engine {
                 if (!location.isEmpty()) {
                     return location;
                 }
-                if (page.optBoolean("loaded")) {
-                    return "";                                  // (no country on this account: no use waiting)
+                int length = page.optInt("len", -1);
+                if (page.optBoolean("loaded") && length == lastLength) {
+                    return "";                                  // (its details are there, no country: no use waiting)
                 }
+                lastLength = length;
             }
             if (SystemClock.elapsedRealtime() - start >= 8_000) {
                 return null;

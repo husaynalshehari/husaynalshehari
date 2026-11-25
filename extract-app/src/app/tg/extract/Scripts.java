@@ -97,7 +97,7 @@ final class Scripts {
         + "  }"
         + " }"
         + "}"
-        + "var loaded=/date joined|joined|verified since|connected via|username change|تاريخ الانضمام|انضم/i.test(body);"
+        + "var loaded=/date joined|verified since|connected via|date d'inscription|تاريخ الانضمام|موثّق منذ|موثق منذ|متصل عبر/i.test(body);"
         + "return {loc:null,len:body.length,loaded:loaded};"
         + "})()";
 
