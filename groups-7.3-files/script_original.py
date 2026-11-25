@@ -10066,7 +10066,7 @@ def tweet_flags_from_api(data, status_id: str) -> dict | None:
 # one is loaded in full, as before: the page starts fresh again. Any tweet loaded in full starts the count again.
 # Once X refuses anything in a task (see in_page_after), every tweet after it is loaded in full, as before, until
 # the task ends, the browser closed and reopened for a pause included.
-IN_PAGE_MOVES = True
+IN_PAGE_MOVES = False                        # off: every tweet, and every silent retry, is loaded in full
 IN_PAGE_WAIT_SECONDS = 7
 IN_PAGE_FULL_EVERY = (1, 3)                 # (unless the panel's «سرعة التنفيذ» says otherwise: _pace["in_page"])
 IN_PAGE_FULL_MOST = 50
