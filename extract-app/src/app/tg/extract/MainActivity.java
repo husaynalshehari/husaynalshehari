@@ -109,6 +109,7 @@ public final class MainActivity extends Activity {
     private Button shareButton;
     private Button copyButton;
     private Button linksButton;
+    private Button editResultsButton;
     private Button clearButton;
     private TextView collectedText;
     private Button collectedButton;
@@ -382,6 +383,9 @@ public final class MainActivity extends Activity {
         linksButton = secondary("⬇  تنزيل الروابط");
         linksButton.setOnClickListener(v -> saveLinks());
         add(card, row(copyButton, linksButton), 8);
+        editResultsButton = secondary("✏️  تعديل الحسابات الذهبية");
+        editResultsButton.setOnClickListener(v -> editResults());
+        add(card, editResultsButton, 8);
         clearButton = danger("مسح النتائج");
         clearButton.setOnClickListener(v -> clearResults());
         add(card, clearButton, 8);
@@ -451,6 +455,7 @@ public final class MainActivity extends Activity {
         enable(shareButton, count > 0);
         enable(copyButton, count > 0);
         enable(linksButton, count > 0);
+        enable(editResultsButton, !running);
         enable(clearButton, count > 0 && !running);
         int everyone = store.collectedCount();
         collectedText.setText("كل اليوزرات المجموعة من صفحات المتابعين (بلا تكرار): " + everyone);
@@ -801,6 +806,41 @@ public final class MainActivity extends Activity {
             return;
         }
         List<String> names = store.queueSnapshot();
+        listEditor("تعديل قائمة البحث (" + names.size() + ")",
+            "يوزر أو رابط حساب في كل سطر. الترتيب هو ترتيب البحث، والمكرر يُحذف.", names, this::saveEditedList);
+    }
+
+    /** The gold accounts extracted, to edit: a removed line takes the account out, a new line adds one. */
+    private void editResults() {
+        if (Engine.running) {
+            toast("أوقف المهمة أولًا لتعديل الحسابات الذهبية");
+            return;
+        }
+        List<String> names = store.resultUsernames();
+        listEditor("تعديل الحسابات الذهبية (" + names.size() + ")",
+            "يوزر أو رابط حساب في كل سطر. احذف السطر لحذف الحساب من النتائج (ولن يُستخرج مرة أخرى)، وأضف سطرًا "
+                + "لإضافة حساب. الترتيب هو ترتيب الملف، والمكرر يُحذف.", names, this::saveEditedResults);
+    }
+
+    private void saveEditedResults(String text) {
+        if (Engine.running) {
+            toast("أوقف المهمة أولًا لتعديل الحسابات الذهبية");
+            return;
+        }
+        int before = store.resultCount();
+        int[] bad = new int[1];
+        List<String> names = Text.handlesIn(text, bad);
+        int[] done = store.replaceResults(names);
+        int removed = Math.max(0, before - done[0]);
+        toast("✅ حُفظت الحسابات الذهبية: " + names.size()
+            + (removed > 0 ? "، حُذف " + removed : "")
+            + (done[1] > 0 ? "، أُضيف " + done[1] : "")
+            + (bad[0] > 0 ? "، وتُرك " + bad[0] + " غير صالح" : ""));
+        refresh();
+    }
+
+    /** A box with one username a line, to edit; save gets the text when the user saves. */
+    private void listEditor(String title, String message, List<String> names, java.util.function.Consumer<String> save) {
         EditText box = new EditText(this);
         box.setText(TextUtils.join("\n", names));
         box.setHint("يوزر أو رابط حساب في كل سطر");
@@ -820,10 +860,10 @@ public final class MainActivity extends Activity {
         holder.setPadding(dp(20), dp(8), dp(20), 0);
         holder.addView(box);
         new AlertDialog.Builder(this)
-            .setTitle("تعديل قائمة البحث (" + names.size() + ")")
-            .setMessage("يوزر أو رابط حساب في كل سطر. الترتيب هو ترتيب البحث، والمكرر يُحذف.")
+            .setTitle(title)
+            .setMessage(message)
             .setView(holder)
-            .setPositiveButton("حفظ", (dialog, which) -> saveEditedList(box.getText().toString()))
+            .setPositiveButton("حفظ", (dialog, which) -> save.accept(box.getText().toString()))
             .setNegativeButton("إلغاء", null)
             .show();
     }

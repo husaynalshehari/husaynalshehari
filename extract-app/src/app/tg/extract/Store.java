@@ -18,8 +18,10 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * What the extraction keeps on the phone, and nowhere else: the waiting list, the accounts already checked, the
@@ -226,6 +228,50 @@ final class Store {
 
     synchronized int resultCount() {
         return results;
+    }
+
+    /**
+     * The results as the user edited them, in their order: the rows of the names kept stay as they are, names that
+     * were not in the results are added with their link ("يدوي"), and removed ones go (they stay extracted, so they are
+     * not extracted again). results.csv.bak keeps the file before. Gives {kept, added}.
+     */
+    synchronized int[] replaceResults(List<String> names) {
+        File csv = file("results.csv");
+        Map<String, String> rows = new LinkedHashMap<>();
+        for (String line : readLines(csv)) {
+            String row = line.startsWith("\uFEFF") ? line.substring(1) : line;
+            int end = row.startsWith("\"") ? row.indexOf('"', 1) : -1;
+            if (end > 1) {
+                String name = row.substring(1, end);
+                if (name.matches("[A-Za-z0-9_]{1,15}")) {
+                    rows.put(name.toLowerCase(Locale.ROOT), row);
+                }
+            }
+        }
+        StringBuilder out = new StringBuilder().append('\uFEFF').append(Text.csvRow(HEADER));
+        String time = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(new Date());
+        int kept = 0;
+        int added = 0;
+        for (String name : names) {
+            String key = name.toLowerCase(Locale.ROOT);
+            String row = rows.remove(key);
+            if (row != null) {
+                out.append(row).append("\r\n");
+                kept++;
+            } else {
+                out.append(Text.csvRow(name, "", "", "", "", "https://x.com/" + name, "", "يدوي", time));
+                added++;
+                if (extracted.add(key)) {
+                    append(file("extracted.txt"), key + "\n");
+                }
+            }
+        }
+        if (csv.isFile()) {
+            copy(csv, file("results.csv.bak"));
+        }
+        writeAtomic(csv, out.toString().getBytes(StandardCharsets.UTF_8));
+        results = kept + added;
+        return new int[] {kept, added};
     }
 
     /** The usernames in the results file, in their order. */
