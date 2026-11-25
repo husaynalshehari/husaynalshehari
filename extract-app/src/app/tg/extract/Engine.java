@@ -82,6 +82,8 @@ final class Engine {
     private static long cryptoMin;
     private static long cryptoMax;
     private static boolean cryptoMore;
+    /** Which badges a crypto account may have: 0 any, 1 any verified, 2 blue, 3 gold. */
+    private static int cryptoBadge;
     /** The direct way's failures in a row (after 3 the task keeps to the page and its scrolling). */
     private static int directFails;
     /** The direct «About» check's failures in a row (after 3 the task keeps to the «About» page). */
@@ -144,7 +146,8 @@ final class Engine {
 
     /** A crypto task: accounts that name crypto in their username, name or bio, within the followers' bounds. */
     static synchronized boolean startCrypto(Context context, Store store, String seed, int count, int listSize, int from,
-                                            int perList, List<String> words, long min, long max, boolean followsMore) {
+                                            int perList, List<String> words, long min, long max, boolean followsMore,
+                                            int badges) {
         if (running) {
             return false;
         }
@@ -161,11 +164,30 @@ final class Engine {
         cryptoMin = min;
         cryptoMax = max;
         cryptoMore = followsMore;
+        cryptoBadge = badges;
         status = "يبدأ...";
         thread = new Thread(() -> run(store, seed, count, listSize, new HashSet<String>()), "extract");
         thread.start();
         changed();
         return true;
+    }
+
+    private static boolean badgeWanted(String badge) {
+        switch (cryptoBadge) {
+            case 1:
+                return "blue".equals(badge) || "gold".equals(badge) || "grey".equals(badge);
+            case 2:
+                return "blue".equals(badge);
+            case 3:
+                return "gold".equals(badge);
+            default:
+                return true;
+        }
+    }
+
+    private static String badgeRule() {
+        return cryptoBadge == 1 ? "موثّق فقط (أزرق أو ذهبي أو رمادي)" : cryptoBadge == 2 ? "العلامة الزرقاء فقط"
+            : cryptoBadge == 3 ? "العلامة الذهبية فقط" : "الكل";
     }
 
     private static String extractCrypto(Store store, String seed, int count, int listSize) {
@@ -174,6 +196,7 @@ final class Engine {
             + " | الحد لكل قائمة: " + maxPerList);
         log("📏 المتابعون من " + cryptoMin + " إلى " + (cryptoMax > 0 ? String.valueOf(cryptoMax) : "بلا حد")
             + (cryptoMore ? " | ويتابع أكثر من متابعيه" : ""));
+        log("🔖 التوثيق: " + badgeRule());
         if (!Web.onMain(Web::loggedIn, 5_000, false)) {
             return "🔴 لم تسجّل الدخول - اضغط «تسجيل الدخول» أولًا";
         }
@@ -185,6 +208,7 @@ final class Engine {
         int notCrypto = 0;
         int outside = 0;
         int unknown = 0;
+        int notVerified = 0;
         while (done < count) {
             checkStop();
             String current = store.poll();
@@ -216,6 +240,11 @@ final class Engine {
                     cached++;
                     continue;
                 }
+                boolean badgeOk = badgeWanted(user.badge);
+                if (!badgeOk && (user.fromPage || user.followers < 0)) {
+                    notVerified++;                              // (nothing asked from X for one that cannot be kept)
+                    continue;
+                }
                 if (user.fromPage || user.followers < 0) {      // (no bio nor counts in hand: the account's data)
                     status("يقرأ بيانات @" + user.username);
                     JSONObject data = userData(user.username);
@@ -240,6 +269,10 @@ final class Engine {
                 if (store.addToQueue(user.username, listSize)) {
                     log("      ➕ @" + user.username + " - أُضيف لقائمة البحث (" + store.queueSize() + "/" + listSize + ")");
                 }
+                if (!badgeOk) {
+                    notVerified++;                              // (it may widen the search, but it is not kept)
+                    continue;
+                }
                 boolean within = user.followers >= cryptoMin && (cryptoMax <= 0 || user.followers <= cryptoMax)
                     && (!cryptoMore || user.following > user.followers);
                 if (!within) {
@@ -254,14 +287,14 @@ final class Engine {
                 store.addCryptoResult(user.username, user.name, user.bio, user.followers, user.following, user.image, current);
                 done++;
                 found++;
-                log("      ✅ @" + user.username + " - crypto | متابعوه " + user.followers + " | يتابع " + user.following
-                    + " - تم الاستخراج (" + done + "/" + count + ")");
+                log("      ✅ @" + user.username + " - crypto " + badgeName(user.badge) + " | متابعوه " + user.followers
+                    + " | يتابع " + user.following + " - تم الاستخراج (" + done + "/" + count + ")");
             }
             if (found > 0) {
                 log("      ✅ الإجمالي: " + done + "/" + count);
             }
             log("   📊 قائمة البحث: " + store.queueSize() + "/" + listSize + " | مكرر: " + duplicates + " | ليس crypto: "
-                + notCrypto + " | خارج الشروط: " + outside + " | تعذّرت بياناته: " + unknown + " | مفحوص: "
+                + notCrypto + " | غير موثّق: " + notVerified + " | خارج الشروط: " + outside + " | تعذّرت بياناته: " + unknown + " | مفحوص: "
                 + store.checkedCount() + " | مؤقت: " + cached);
             sleep(SCROLL_DELAY);
         }

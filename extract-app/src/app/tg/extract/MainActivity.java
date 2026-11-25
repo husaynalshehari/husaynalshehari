@@ -133,6 +133,11 @@ public final class MainActivity extends Activity {
     private RadioButton cFromAll;
     private RadioButton cFromVerified;
     private CheckBox cMore;
+    private RadioButton cBadgeAny;
+    private RadioButton cBadgeVerified;
+    private RadioButton cBadgeBlue;
+    private RadioButton cBadgeGold;
+    private Button cReset;
     private Button cStart;
     private Button cStop;
     private Button cSave;
@@ -1120,6 +1125,18 @@ public final class MainActivity extends Activity {
         from.addView(cFromAll);
         from.addView(cFromVerified);
         add(task, from, 2);
+        add(task, text("التوثيق", 13, INK, true), 10);
+        RadioGroup badges = new RadioGroup(this);
+        badges.setOrientation(RadioGroup.VERTICAL);
+        cBadgeVerified = radio("موثّق فقط (أزرق أو ذهبي أو رمادي)");
+        cBadgeBlue = radio("العلامة الزرقاء فقط");
+        cBadgeGold = radio("العلامة الذهبية فقط");
+        cBadgeAny = radio("الكل (موثّق وغير موثّق)");
+        badges.addView(cBadgeVerified);
+        badges.addView(cBadgeBlue);
+        badges.addView(cBadgeGold);
+        badges.addView(cBadgeAny);
+        add(task, badges, 2);
         add(task, text("عدد الحسابات المطلوبة", 13, INK, true), 10);
         cTarget = input("100", InputType.TYPE_CLASS_NUMBER);
         add(task, cTarget, 4);
@@ -1155,6 +1172,14 @@ public final class MainActivity extends Activity {
         cProgress = text("", 13, INK, false);
         cProgress.setLineSpacing(dp(2), 1f);
         add(task, cProgress, 10);
+        cReset = secondary("تصفير البحث (قائمة البحث والمفحوصين)");
+        cReset.setOnClickListener(v -> confirm("تصفير بحث Crypto", "تُمسح قائمة بحث Crypto (" + cryptoStore.queueSize()
+                + ") وحساباتها المفحوصة (" + cryptoStore.checkedCount() + ")، فتُفحص من جديد بالشروط الحالية. النتائج لا تُمسح.",
+            () -> {
+                cryptoStore.clearSearch();
+                refresh();
+            }));
+        add(task, cReset, 10);
         list.addView(task);
 
         LinearLayout results = card("نتائج Crypto");
@@ -1195,6 +1220,8 @@ public final class MainActivity extends Activity {
         cMin.setText(String.valueOf(prefs.getLong("c_min", 0)));
         cMax.setText(String.valueOf(prefs.getLong("c_max", 10_000)));
         cMore.setChecked(prefs.getBoolean("c_more", false));
+        int badge = prefs.getInt("c_badge", 1);
+        (badge == 0 ? cBadgeAny : badge == 2 ? cBadgeBlue : badge == 3 ? cBadgeGold : cBadgeVerified).setChecked(true);
         cWords.setText(prefs.getString("c_words", Text.CRYPTO_WORDS));
         cPool.setText(String.valueOf(prefs.getInt("c_pool", 50)));
         cPerList.setText(String.valueOf(prefs.getInt("c_perList", 2000)));
@@ -1204,7 +1231,8 @@ public final class MainActivity extends Activity {
         boolean mine = Engine.taskKind == 1;
         enable(cStart, !running);
         enable(cStop, running && mine && !Engine.stopping);
-        for (View box : new View[] {cSeed, cTarget, cMin, cMax, cMore, cWords, cPool, cPerList, cFromFollowing, cFromAll, cFromVerified}) {
+        for (View box : new View[] {cSeed, cTarget, cMin, cMax, cMore, cWords, cPool, cPerList, cFromFollowing, cFromAll, cFromVerified,
+            cBadgeAny, cBadgeVerified, cBadgeBlue, cBadgeGold}) {
             box.setEnabled(!running);
         }
         cProgress.setText(Engine.progress(cryptoStore, mine, prefs.getInt("c_pool", 50)));
@@ -1216,6 +1244,7 @@ public final class MainActivity extends Activity {
         enable(cLinks, count > 0);
         enable(cEdit, !running);
         enable(cClear, count > 0 && !running);
+        enable(cReset, !running);
         String log = Engine.logText(150, true);
         cLog.setText(log.isEmpty() ? "لا شيء بعد." : log);
     }
@@ -1269,14 +1298,15 @@ public final class MainActivity extends Activity {
             return;
         }
         int from = cFromFollowing.isChecked() ? 1 : cFromAll.isChecked() ? 2 : 0;
+        int badges = cBadgeAny.isChecked() ? 0 : cBadgeBlue.isChecked() ? 2 : cBadgeGold.isChecked() ? 3 : 1;
         cSeed.setText(seed);
         prefs.edit().putString("c_seed", seed).putInt("c_source", from).putInt("c_target", (int) count)
             .putLong("c_min", min).putLong("c_max", max).putBoolean("c_more", cMore.isChecked())
             .putString("c_words", cWords.getText().toString()).putInt("c_pool", (int) listSize)
-            .putInt("c_perList", (int) perList).apply();
+            .putInt("c_perList", (int) perList).putInt("c_badge", badges).apply();
         hideKeyboard();
         if (Engine.startCrypto(this, cryptoStore, seed, (int) count, (int) listSize, from, (int) perList, words, min, max,
-            cMore.isChecked())) {
+            cMore.isChecked(), badges)) {
             if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, ASK_NOTIFICATIONS);
