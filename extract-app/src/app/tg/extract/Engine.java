@@ -75,6 +75,9 @@ final class Engine {
     private static boolean aboutWorks;
     /** X's direct «no country»: 0-1 being checked against the page, 2 taken as is, -1 not trusted (task long). */
     private static int noneState;
+    /** The «Following» query found in X's scripts in this task (two tries: the first page may not be X's). */
+    private static JSONObject followingOp;
+    private static int followingOpTries;
     private static Thread thread;
     private static Context app;
     private static final ArrayDeque<String> LOG = new ArrayDeque<>();
@@ -175,6 +178,8 @@ final class Engine {
         aboutFails = 0;
         aboutWorks = false;
         noneState = 0;
+        followingOp = null;
+        followingOpTries = 0;
         int checkedNow = 0;
         int duplicates = 0;
         int notGold = 0;
@@ -192,7 +197,7 @@ final class Engine {
             }
             String listName = following ? "من يتابعهم @" + current : "متابعي @" + current;
             List<Cell> cells = null;
-            if (!following && directFails < 3) {                // (the direct way reads verified followers only)
+            if (directFails < 3) {
                 log("   📂 استخراج " + listName + " (مباشر)...");
                 status("يجلب " + listName + " مباشرة");
                 cells = collectAllDirect(current);
@@ -665,7 +670,7 @@ final class Engine {
         String cursor = null;
         for (int page = 0; page < 120 && all.size() < MAX_PER_PAGE; page++) {  // safety limit
             checkStop();
-            JSONObject pageResult = fetchVerifiedPage(userId, cursor);
+            JSONObject pageResult = following ? fetchFollowingPage(userId, cursor) : fetchVerifiedPage(userId, cursor);
             if (pageResult == null || (pageResult.has("error") && !pageResult.isNull("error"))) {
                 String why = pageResult == null ? "لا رد" : pageResult.optString("error");
                 if (all.isEmpty()) {
@@ -700,7 +705,7 @@ final class Engine {
                 break;                                          // (no one new: the list's end, no use asking on)
             }
             cursor = next;
-            status("يجلب متابعي @" + user + " مباشرة - جُمع " + all.size());
+            status("يجلب قائمة @" + user + " مباشرة - جُمع " + all.size());
             sleep(800);  // small delay between API pages to avoid rate limit
         }
         if (all.isEmpty()) {
@@ -722,6 +727,58 @@ final class Engine {
                     JSONObject obj = new JSONObject((String) val);
                     String id = obj.isNull("id") ? null : obj.optString("id", null);
                     return id == null || id.isEmpty() || "null".equals(id) ? null : id;
+                } catch (JSONException e) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** One page of whom the account follows, with the «Following» query found in X's scripts. */
+    private static JSONObject fetchFollowingPage(String userId, String cursor) {
+        JSONObject op = followingOperation();
+        if (op == null) {
+            return null;                                        // (the page and its scrolling are used)
+        }
+        JSONObject features = op.optJSONObject("features");
+        String script = Scripts.START_FETCH_LIST
+            .replace("%QID%", op.optString("queryId"))
+            .replace("%OP%", "Following")
+            .replace("%FEATURES%", features != null && features.length() > 0 ? features.toString() : "{}")
+            .replace("%USER_ID%", userId)
+            .replace("%CURSOR%", cursor == null ? "null" : cursor);
+        evaluate(script, 3_000);
+        return pollJson(Scripts.POLL_GQL_RESULT, 30);
+    }
+
+    /** X's «Following» query id and features, read once a task from the scripts X loaded in the page. */
+    private static JSONObject followingOperation() {
+        if (followingOp != null || followingOpTries >= 2) {
+            return followingOp;
+        }
+        followingOpTries++;
+        status("يبحث عن استعلام Following في سكربتات X");
+        evaluate(Scripts.FIND_OPERATION.replace("%OP%", "Following"), 3_000);
+        JSONObject found = pollJson(Scripts.POLL_OP_RESULT, 60);     // (up to about 30 s: X's scripts are big)
+        if (found != null && found.isNull("error") && !found.optString("queryId").isEmpty()) {
+            followingOp = found;
+            log("      🔑 وُجد استعلام Following في سكربتات X (" + found.optString("queryId") + ")");
+            return found;
+        }
+        log("      ⚠️ لم يُعثر على استعلام Following (" + (found == null ? "لا رد" : found.optString("error"))
+            + ") - تُستخدم الصفحة والتمرير");
+        return null;
+    }
+
+    /** Polls a page's result (a JSON text the page keeps) every half second, at most this many times. */
+    private static JSONObject pollJson(String pollScript, int tries) {
+        for (int i = 0; i < tries; i++) {
+            sleep(500);
+            Object value = evaluate(pollScript, 2_000);
+            if (value instanceof String) {
+                try {
+                    return new JSONObject((String) value);
                 } catch (JSONException e) {
                     return null;
                 }

@@ -205,4 +205,89 @@ final class Scripts {
         + "})('%USERNAME%')";
 
     static final String POLL_ABOUT_RESULT = "(function(){return window.__aboutResult||null;})()";
+
+    /**
+     * The same list fetch as START_FETCH_VERIFIED for any of X's timeline queries of an account (Following...), with
+     * the query id and features found in X's own scripts (FIND_OPERATION). Result in window.__gqlResult.
+     */
+    static final String START_FETCH_LIST =
+        "(function(userId, cursor){"
+        + "window.__gqlResult = null;"
+        + "var queryId='%QID%';"
+        + "var variables={userId:userId,count:20,includePromotedContent:false};"
+        + "if(cursor && cursor !== 'null')variables.cursor=cursor;"
+        + "var features=%FEATURES%;"
+        + "var url='https://x.com/i/api/graphql/'+queryId+'/%OP%?variables='+encodeURIComponent(JSON.stringify(variables))+'&features='+encodeURIComponent(JSON.stringify(features));"
+        + "var ct0='';try{ct0=(document.cookie.match(/(?:^|; )ct0=([^;]*)/)||[])[1]||'';}catch(ce){}"
+        + "fetch(url,{method:'GET',credentials:'include',headers:{'Authorization':'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA','x-csrf-token':ct0,'x-twitter-active-user':'yes','x-twitter-auth-type':'OAuth2Session'}})"
+        + ".then(function(r){return r.ok ? r.json() : {error:'HTTP '+r.status};})"
+        + ".then(function(data){"
+        + " var users=[], next=null;"
+        + " if(data.error){window.__gqlResult=JSON.stringify({users:[],cursor:null,error:data.error});return;}"
+        + " try{"
+        + "  var timeline=((((data.data||{}).user||{}).result||{}).timeline||{}).timeline||{};"
+        + "  var instructions=timeline.instructions||[];"
+        + "  for(var i=0;i<instructions.length;i++){"
+        + "   var entries=instructions[i].entries||[];"
+        + "   for(var j=0;j<entries.length;j++){"
+        + "    var e=entries[j];"
+        + "    if((e.entryId||'').indexOf('cursor-bottom')===0){next=(e.content||{}).value||null;continue;}"
+        + "    var res=(((e.content||{}).itemContent||{}).user_results||{}).result;"
+        + "    if(!res)continue;"
+        + "    var leg=res.legacy||{},core=res.core||{},av=res.avatar||{};"
+        + "    var username=core.screen_name||leg.screen_name||'';"
+        + "    if(!username)continue;"
+        + "    var badge='none';"
+        + "    var vtype=(res.verification_info && res.verification_info.verified_type) || (res.verification && res.verification.verified_type) || leg.verified_type || '';"
+        + "    if(vtype==='Business' || vtype==='business')badge='gold';"
+        + "    else if(res.is_blue_verified || leg.verified)badge='blue';"
+        + "    else if(vtype==='Government')badge='grey';"
+        + "    users.push({username:username,name:core.name||leg.name||username,bio:leg.description||'',image:(av.image_url||leg.profile_image_url_https||'').replace('_normal','_400x400'),badge:badge});"
+        + "   }"
+        + "  }"
+        + "  window.__gqlResult=JSON.stringify({users:users,cursor:next,error:null});"
+        + " }catch(ex){window.__gqlResult=JSON.stringify({users:[],cursor:null,error:String(ex)});}"
+        + "})"
+        + ".catch(function(e){window.__gqlResult=JSON.stringify({users:[],cursor:null,error:String(e)});});"
+        + "return true;"
+        + "})('%USER_ID%','%CURSOR%')";
+
+    /**
+     * Finds an operation's query id (and the features it asks for, with X's own values) in the scripts X loaded in the
+     * page: X changes these ids when it updates its site. Result in window.__opResult as {queryId, features} or {error}.
+     */
+    static final String FIND_OPERATION =
+        "(function(op){"
+        + "window.__opResult=null;"
+        + "var urls=[];"
+        + "try{performance.getEntriesByType('resource').forEach(function(e){"
+        + " if(e.name.indexOf('.js')>0&&e.name.indexOf('twimg.com')>0&&urls.indexOf(e.name)<0)urls.push(e.name);});}catch(e){}"
+        + "for(var s=0;s<document.scripts.length;s++){var src=document.scripts[s].src;if(src&&urls.indexOf(src)<0)urls.push(src);}"
+        + "urls.sort(function(a,b){return (b.indexOf('/main.')>=0?1:0)-(a.indexOf('/main.')>=0?1:0);});"
+        + "var key='operationName:\"'+op+'\"';"
+        + "function found(t){"
+        + " var at=t.indexOf(key);if(at<0)return null;"
+        + " var q=t.lastIndexOf('queryId:\"',at);if(q<0||at-q>200)return null;"
+        + " var qid=t.slice(q+9,t.indexOf('\"',q+9));"
+        + " var names=[];var f=t.indexOf('featureSwitches:[',at);var fe=f<0?-1:t.indexOf(']',f);"
+        + " if(f>=0&&fe>f&&f-at<400){names=(t.slice(f+17,fe).match(/\"[^\"]+\"/g)||[]).map(function(x){return x.slice(1,-1);});}"
+        + " var fsw=(window.__INITIAL_STATE__||{}).featureSwitch||{};"
+        + " var cfgs=[((fsw.user||{}).config)||{},fsw.defaultConfig||{}];"
+        + " var feats={};"
+        + " names.forEach(function(n){var v;for(var c=0;c<cfgs.length&&v===undefined;c++){var e=cfgs[c][n];"
+        + "  if(e&&e.value!==undefined)v=e.value;}feats[n]=v===undefined?true:!!v;});"
+        + " return {queryId:qid,features:feats};"
+        + "}"
+        + "var i=0;"
+        + "function next(){"
+        + " if(i>=urls.length){window.__opResult=JSON.stringify({error:'not found in '+urls.length+' scripts'});return;}"
+        + " var u=urls[i++];"
+        + " fetch(u).then(function(r){return r.text();}).then(function(t){var r=found(t);"
+        + "  if(r){window.__opResult=JSON.stringify(r);}else{next();}}).catch(function(){next();});"
+        + "}"
+        + "next();"
+        + "return true;"
+        + "})('%OP%')";
+
+    static final String POLL_OP_RESULT = "(function(){return window.__opResult||null;})()";
 }
