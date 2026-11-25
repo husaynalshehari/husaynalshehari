@@ -195,7 +195,7 @@ final class Engine {
         log("📋 المفحوصون مسبقًا: " + store.checkedCount() + " | قائمة البحث: " + store.queueSize() + "/" + listSize
             + " | الحد لكل قائمة: " + maxPerList);
         log("📏 المتابعون من " + cryptoMin + " إلى " + (cryptoMax > 0 ? String.valueOf(cryptoMax) : "بلا حد")
-            + (cryptoMore ? " | ويتابع أكثر من متابعيه" : ""));
+            + (cryptoMore ? " | ومتابعوه أكثر ممن يتابعهم" : ""));
         log("🔖 التوثيق: " + badgeRule());
         if (!Web.onMain(Web::loggedIn, 5_000, false)) {
             return "🔴 لم تسجّل الدخول - اضغط «تسجيل الدخول» أولًا";
@@ -274,7 +274,7 @@ final class Engine {
                     continue;
                 }
                 boolean within = user.followers >= cryptoMin && (cryptoMax <= 0 || user.followers <= cryptoMax)
-                    && (!cryptoMore || user.following > user.followers);
+                    && (!cryptoMore || user.followers > user.following);
                 if (!within) {
                     outside++;
                     log("      ⏭️ @" + user.username + " - crypto | متابعوه " + user.followers + " | يتابع " + user.following

@@ -1145,7 +1145,7 @@ public final class MainActivity extends Activity {
         cMax = input("10000", InputType.TYPE_CLASS_NUMBER);
         add(task, row(cMin, cMax), 4);
         cMore = new CheckBox(this);
-        cMore.setText("يتابع أكثر من عدد متابعيه (Following أكبر من Followers)");
+        cMore.setText("متابعوه أكثر من الذين يتابعهم (Followers أكبر من Following)");
         cMore.setTextColor(INK);
         cMore.setTextSize(14);
         cMore.setButtonTintList(ColorStateList.valueOf(BLUE));
