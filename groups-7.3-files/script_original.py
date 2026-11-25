@@ -5729,17 +5729,23 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
 
 def _press_covered_again(page, path: str, status_id: str, covered: list[str], outcome: dict[str, str], press,
                          answers: XAnswers) -> None:
-    """Something covered these buttons, so they were never pressed: once more, with nothing shown to the user. The
-    tweet is opened again in full (whatever covered them goes with the old page), and only these buttons are
-    pressed, after the tweet has loaded and the usual wait. One that shows on by then is left alone (these buttons
-    switch: a press would undo it). Pressed or not, the result is what this second try finds; a button still
-    covered keeps its failure, for «إعادة المحاولة للفاشلة»."""
+    """Something covered these buttons, or no touch reached them, so they were never pressed: once more, with nothing
+    shown to the user. The tweet is opened again, and only these buttons are pressed, after the tweet has loaded and
+    the usual wait. For a touch that missed, the tweet is opened again inside X's page, with no full load
+    (reopen_in_page), when it can; else, and for a covered button (whatever covered it goes with the old page), it is
+    loaded in full. One that shows on by then is left alone (these buttons switch: a press would undo it). Pressed
+    or not, the result is what this second try finds; a button still not pressed keeps its failure, for «إعادة
+    المحاولة للفاشلة»."""
     trace_click(f"إعادة صامتة للتغريدة {status_id}: زر لم يُضغط ({', '.join(covered)})")
     target = "https://x.com" + path if re.fullmatch(r"/[A-Za-z0-9_]{1,15}/status/\d{6,25}", path or "") \
         else f"https://x.com/i/web/status/{status_id}"
+    missed_only = all(outcome.get(action) == TAP_MISSED for action in covered)
     try:
-        page.goto(target, wait_until="domcontentloaded", timeout=20_000)
-        in_page_loaded(page)
+        if not (missed_only and reopen_in_page(page, status_id, path)):
+            if missed_only:
+                trace_click("إعادة صامتة: تحميل كامل للتغريدة")
+            page.goto(target, wait_until="domcontentloaded", timeout=20_000)
+            in_page_loaded(page)
         state = buttons_when_loaded(page, status_id, covered)
         if state:
             page.wait_for_timeout(pace_ms("settle"))
@@ -10162,6 +10168,115 @@ def in_page_moved(page, shown: bool) -> None:
     if state["missed"] >= 2 and not state["off"]:
         state["off"] = True
         trace_click("الانتقال داخل الصفحة لم ينجح مرتين متتاليتين: كل تغريدة تُحمَّل كاملة في باقي المهمة")
+
+
+# The silent retry («إعادة صامتة») of a button no touch reached opens its tweet again inside the page too, with no
+# full load. X does not draw a tweet anew when sent to the one it shows, so its page goes first to the author's page
+# (as a person tapping the author's name; home when the author is not known), then to the tweet again, both inside
+# X's page. It goes on only once the tweet has left the page, and then only once it is there again drawn anew (none
+# of the page between still showing), so nothing is pressed on what was there before. When either does not come in
+# time, the tweet is loaded in full, as before; after two such misses in a task its retries are loaded in full. While
+# the task loads each tweet in full (X refused, or the move did not work), so do its retries.
+REOPEN_LEFT_SECONDS = 3
+
+REOPEN_LEAVE_JS = r"""
+(statusId) => {
+  if (!/(^|\.)(x|twitter)\.com$/.test(location.hostname)) return {how: "elsewhere"};
+  if (!location.pathname.includes("/status/" + statusId)) return {how: "not-on-it"};
+  if (document.querySelector('[role="dialog"], [data-testid="sheetDialog"]')) return {how: "dialog"};
+  const articles = [...document.querySelectorAll('article[data-testid="tweet"]')];
+  if (!articles.length) return {how: "no-tweet"};
+  let away = "/home";
+  for (const node of document.querySelectorAll('a[href*="/status/' + statusId + '"]')) {
+    const found = /^\/([A-Za-z0-9_]{1,15})\/status\/\d+/.exec(node.getAttribute("href") || "");
+    if (found && found[1].toLowerCase() !== "i") {
+      away = "/" + found[1];
+      break;
+    }
+  }
+  window.__ggBefore = new WeakSet(articles);          // the tweet as it was: none of it may be pressed
+  const state = {key: Math.random().toString(36).slice(2, 8), state: undefined, usr: null,
+                 idx: history.state && typeof history.state.idx === "number" ? history.state.idx + 1 : 0};
+  history.pushState(state, "", away);
+  window.dispatchEvent(new PopStateEvent("popstate", {state}));
+  return {how: "ok", away};
+}
+"""
+
+REOPEN_LEFT_JS = r"""
+(statusId) => {
+  if (location.pathname.includes("/status/" + statusId)) return "back";
+  const before = window.__ggBefore;
+  return before && [...document.querySelectorAll('article[data-testid="tweet"]')].some((article) => before.has(article))
+    ? "before" : "left";
+}
+"""
+
+REOPEN_RETURN_JS = r"""
+({path, statusId}) => {
+  if (location.pathname.includes("/status/" + statusId)) return "back";
+  window.__ggBefore = new WeakSet(document.querySelectorAll('article[data-testid="tweet"]'));   // (the page between)
+  const state = {key: Math.random().toString(36).slice(2, 8), state: undefined, usr: null,
+                 idx: history.state && typeof history.state.idx === "number" ? history.state.idx + 1 : 0};
+  history.pushState(state, "", path);
+  window.dispatchEvent(new PopStateEvent("popstate", {state}));
+  return "ok";
+}
+"""
+
+
+def reopen_in_page(page, status_id: str, path: str) -> bool:
+    """Open the tweet now showing again inside X's page (see above). True once it is there anew; False for the full
+    load, as before."""
+    if not IN_PAGE_MOVES or not status_id:
+        return False
+    state = _in_page_state(page)
+    if state["off"]:
+        trace_click("إعادة صامتة: الانتقال داخل الصفحة متوقف في هذه المهمة")
+        return False
+    if state.get("reopen_missed", 0) >= 2:
+        return False
+    back = path if re.fullmatch(r"/[A-Za-z0-9_]{1,15}/status/\d{6,25}", path or "") else f"/i/web/status/{status_id}"
+
+    def missed(why: str) -> bool:
+        state["reopen_missed"] = state.get("reopen_missed", 0) + 1
+        trace_click(f"إعادة صامتة: {why}")
+        return False
+
+    try:
+        went = page.evaluate(REOPEN_LEAVE_JS, status_id) or {}
+        if went.get("how") != "ok":
+            trace_click(f"إعادة صامتة: لا تُفتح داخل الصفحة الآن ({went.get('how') or '?'})")
+            return False
+        left = ""
+        limit = time.monotonic() + REOPEN_LEFT_SECONDS
+        while time.monotonic() < limit:
+            left = page.evaluate(REOPEN_LEFT_JS, status_id) or ""
+            if left == "left":
+                break
+            page.wait_for_timeout(120)
+        if left != "left":
+            return missed("لم تغادر التغريدة الصفحة")
+        if page.evaluate(REOPEN_RETURN_JS, {"path": back, "statusId": status_id}) != "ok":
+            return missed("لم تُفتح التغريدة من جديد داخل الصفحة")
+        shown = ""
+        limit = time.monotonic() + IN_PAGE_WAIT_SECONDS
+        while time.monotonic() < limit:
+            shown = page.evaluate(MOVED_STATE_JS, status_id) or ""
+            if shown == "ready":
+                break
+            page.wait_for_timeout(120)
+        if shown != "ready":
+            return missed("لم تظهر التغريدة من جديد داخل الصفحة")
+    except Exception as exc:
+        if browser_closed_error(exc):
+            raise
+        return missed(f"تعذر الفتح داخل الصفحة ({type(exc).__name__})")
+    state["since_full"] += 1
+    state["reopen_missed"] = 0
+    via = "الرئيسية" if went.get("away") == "/home" else "صفحة صاحبها"
+    trace_click(f"إعادة صامتة: فُتحت التغريدة من جديد داخل الصفحة عبر {via}، بدون تحميل كامل")
+    return True
 
 
 def open_status_page(page, url: str, skip_if_on: list[str] | None = None, patience: float = 1.0) -> tuple[str | None, str]:
