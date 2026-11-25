@@ -34,7 +34,7 @@ final class Engine {
     }
 
     // How far down a followers' page is read.
-    private static final int MAX_PER_PAGE = 1000;
+    private static final int MAX_PER_PAGE = 2000;
     private static final int QUIET_ROUNDS = 4;              // (scrolls in a row with no one new: the list's end)
     private static final int QUIET_ROUNDS_LOADING = 8;      // (the same while X still shows it is loading)
 
@@ -655,7 +655,7 @@ final class Engine {
         }
         Map<String, Cell> all = new LinkedHashMap<>();
         String cursor = null;
-        for (int page = 0; page < 50 && all.size() < MAX_PER_PAGE; page++) {  // safety limit
+        for (int page = 0; page < 120 && all.size() < MAX_PER_PAGE; page++) {  // safety limit
             checkStop();
             JSONObject pageResult = fetchVerifiedPage(userId, cursor);
             if (pageResult == null || (pageResult.has("error") && !pageResult.isNull("error"))) {
