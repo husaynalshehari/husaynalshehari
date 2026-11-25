@@ -45,6 +45,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
@@ -96,6 +97,7 @@ public final class MainActivity extends Activity {
     private LinearLayout backgroundRow;
     private TextView backgroundText;
     private Button resetButton;
+    private Button listButton;
     private TextView resultsText;
     private Button saveButton;
     private Button shareButton;
@@ -109,7 +111,7 @@ public final class MainActivity extends Activity {
     private int homeTicks;
     private boolean askedBackground;
     private boolean batteryNext;
-    private boolean saveAfterPermission;
+    private Runnable afterStoragePermission;
 
     // ---------------------------------------------------------------- life
 
@@ -334,6 +336,9 @@ public final class MainActivity extends Activity {
         backgroundRow.addView(fix, fixSize);
         add(card, backgroundRow, 10);
 
+        listButton = secondary("⬇  تنزيل يوزرات قائمة البحث");
+        listButton.setOnClickListener(v -> saveSearchList());
+        add(card, listButton, 10);
         resetButton = secondary("تصفير البحث (قائمة البحث والمفحوصين)");
         resetButton.setOnClickListener(v -> resetSearch());
         add(card, resetButton, 10);
@@ -402,6 +407,7 @@ public final class MainActivity extends Activity {
             box.setEnabled(!running);
         }
         enable(resetButton, !running);
+        enable(listButton, store.queueSize() > 0);
         progressText.setText(Engine.progress(store));
 
         int count = store.resultCount();
@@ -710,29 +716,58 @@ public final class MainActivity extends Activity {
         super.onRequestPermissionsResult(code, permissions, results);
         if (code == ASK_NOTIFICATIONS) {
             askBackground(false);
-        } else if (code == ASK_STORAGE && saveAfterPermission) {
-            saveAfterPermission = false;
+        } else if (code == ASK_STORAGE && afterStoragePermission != null) {
+            Runnable retry = afterStoragePermission;
+            afterStoragePermission = null;
             if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
-                saveToDownloads();
+                retry.run();
             } else {
-                toast("بدون إذن التخزين لا يمكن الحفظ في التنزيلات. استخدم «مشاركة الملف».");
+                toast("بدون إذن التخزين لا يمكن الحفظ في التنزيلات.");
             }
         }
     }
 
     // ---------------------------------------------------------------- results
 
-    @SuppressWarnings("deprecation")
+    /** What a saved file holds. */
+    private interface Content {
+        void writeTo(OutputStream out) throws IOException;
+    }
+
     private void saveToDownloads() {
         if (store.resultCount() == 0) {
             return;
         }
-        String name = "extract-" + new SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(new Date()) + ".csv";
+        saveDownload("extract-" + stamp() + ".csv", "text/csv", store::copyResults, this::saveToDownloads);
+    }
+
+    /** The search list's usernames, one a line, in a text file in «Downloads». */
+    private void saveSearchList() {
+        List<String> names = store.queueSnapshot();
+        if (names.isEmpty()) {
+            toast("قائمة البحث فارغة");
+            return;
+        }
+        StringBuilder text = new StringBuilder();
+        for (String name : names) {
+            text.append('@').append(name).append('\n');
+        }
+        byte[] data = text.toString().getBytes(StandardCharsets.UTF_8);
+        saveDownload("search-list-" + stamp() + ".txt", "text/plain", out -> out.write(data), this::saveSearchList);
+    }
+
+    private String stamp() {
+        return new SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(new Date());
+    }
+
+    /** Writes the file to «Downloads» (on Android 8 and 9 after the storage permission: then retry runs again). */
+    @SuppressWarnings("deprecation")
+    private void saveDownload(String name, String type, Content content, Runnable retry) {
         try {
             if (Build.VERSION.SDK_INT >= 29) {
                 ContentValues values = new ContentValues();
                 values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
-                values.put(MediaStore.MediaColumns.MIME_TYPE, "text/csv");
+                values.put(MediaStore.MediaColumns.MIME_TYPE, type);
                 values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
                 Uri saved = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
                 if (saved == null) {
@@ -742,18 +777,18 @@ public final class MainActivity extends Activity {
                     if (out == null) {
                         throw new IOException("no file");
                     }
-                    store.copyResults(out);
+                    content.writeTo(out);
                 }
             } else {
                 if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                    saveAfterPermission = true;
+                    afterStoragePermission = retry;
                     requestPermissions(new String[] {Manifest.permission.WRITE_EXTERNAL_STORAGE}, ASK_STORAGE);
                     return;
                 }
                 File folder = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
                 folder.mkdirs();
                 try (OutputStream out = new FileOutputStream(new File(folder, name))) {
-                    store.copyResults(out);
+                    content.writeTo(out);
                 }
             }
             toast("✅ حُفظ في التنزيلات: " + name);

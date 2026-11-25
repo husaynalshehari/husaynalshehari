@@ -114,6 +114,11 @@ final class Store {
         writeAtomic(list, new JSONArray(queue).toString().getBytes(StandardCharsets.UTF_8));
     }
 
+    /** The search list's usernames, in their order (a copy). */
+    synchronized List<String> queueSnapshot() {
+        return new ArrayList<>(queue);
+    }
+
     synchronized int queueSize() {
         return queue.size();
     }
