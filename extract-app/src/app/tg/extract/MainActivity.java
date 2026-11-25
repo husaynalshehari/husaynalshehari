@@ -94,6 +94,7 @@ public final class MainActivity extends Activity {
     private EditText targetInput;
     private EditText poolInput;
     private EditText perListInput;
+    private EditText maxFollowersInput;
     private RadioButton fromFollowers;
     private RadioButton fromFollowing;
     private Button startButton;
@@ -314,6 +315,9 @@ public final class MainActivity extends Activity {
         add(card, text("الحد الأقصى للجمع من كل قائمة", 13, INK, true), 10);
         perListInput = input("2000", InputType.TYPE_CLASS_NUMBER);
         add(card, perListInput, 4);
+        add(card, text("الحد الأقصى لمتابعي الحساب الذهبي (0 = بلا حد)", 13, INK, true), 10);
+        maxFollowersInput = input("10000", InputType.TYPE_CLASS_NUMBER);
+        add(card, maxFollowersInput, 4);
         add(card, text("الدول", 13, INK, true), 10);
         LinearLayout grid = new LinearLayout(this);
         grid.setOrientation(LinearLayout.VERTICAL);
@@ -439,6 +443,7 @@ public final class MainActivity extends Activity {
         targetInput.setEnabled(!running);
         poolInput.setEnabled(!running);
         perListInput.setEnabled(!running);
+        maxFollowersInput.setEnabled(!running);
         fromFollowers.setEnabled(!running);
         fromFollowing.setEnabled(!running);
         for (CheckBox box : countryBoxes.values()) {
@@ -616,6 +621,7 @@ public final class MainActivity extends Activity {
         targetInput.setText(String.valueOf(prefs.getInt("target", 100)));
         poolInput.setText(String.valueOf(prefs.getInt("pool", 50)));
         perListInput.setText(String.valueOf(prefs.getInt("perList", 2000)));
+        maxFollowersInput.setText(String.valueOf(prefs.getInt("maxFollowers", 10_000)));
         if (!Engine.running) {
             Engine.pool = prefs.getInt("pool", 50);
         }
@@ -673,6 +679,17 @@ public final class MainActivity extends Activity {
             perListInput.requestFocus();
             return;
         }
+        int maxFollowers;
+        try {
+            maxFollowers = Integer.parseInt(maxFollowersInput.getText().toString().trim());
+        } catch (NumberFormatException e) {
+            maxFollowers = -1;
+        }
+        if (maxFollowers < 0) {
+            maxFollowersInput.setError("اكتب عددًا (0 = بلا حد)");
+            maxFollowersInput.requestFocus();
+            return;
+        }
         Set<String> countries = new LinkedHashSet<>();
         for (Map.Entry<String, CheckBox> box : countryBoxes.entrySet()) {
             if (box.getValue().isChecked()) {
@@ -685,10 +702,10 @@ public final class MainActivity extends Activity {
         }
         seedInput.setText(seed);
         prefs.edit().putString("seed", seed).putInt("target", count).putInt("pool", listSize)
-            .putBoolean("following", fromFollowing.isChecked()).putInt("perList", perList)
+            .putBoolean("following", fromFollowing.isChecked()).putInt("perList", perList).putInt("maxFollowers", maxFollowers)
             .putString("countries", TextUtils.join(",", countries)).apply();
         hideKeyboard();
-        if (Engine.start(this, store, seed, count, listSize, countries, fromFollowing.isChecked(), perList)) {
+        if (Engine.start(this, store, seed, count, listSize, countries, fromFollowing.isChecked(), perList, maxFollowers)) {
             if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, ASK_NOTIFICATIONS);

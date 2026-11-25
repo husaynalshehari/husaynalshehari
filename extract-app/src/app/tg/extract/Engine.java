@@ -12,6 +12,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -36,6 +37,10 @@ final class Engine {
     // How far down a followers' page is read.
     /** The most accounts read from one list (the user's choice, 2000 unless changed). */
     static volatile int maxPerList = 2000;
+    /** A gold account is kept only with fewer followers than this (0: no limit). */
+    static volatile int goldMaxFollowers = 10_000;
+    /** The followers counts read in this task (each account's is read once). */
+    private static final Map<String, Long> followerCounts = new HashMap<>();
     private static final int QUIET_ROUNDS = 4;              // (scrolls in a row with no one new: the list's end)
     private static final int QUIET_ROUNDS_LOADING = 8;      // (the same while X still shows it is loading)
 
@@ -97,12 +102,13 @@ final class Engine {
         String bio;
         String image;
         String badge;
+        long followers = -1;                             // (-1: not known yet)
     }
 
     // ---------------------------------------------------------------- start and stop
 
     static synchronized boolean start(Context context, Store store, String seed, int count, int listSize,
-                                      Set<String> countries, boolean followingList, int perList) {
+                                      Set<String> countries, boolean followingList, int perList, int maxFollowers) {
         if (running) {
             return false;
         }
@@ -114,6 +120,7 @@ final class Engine {
         pool = listSize;
         following = followingList;
         maxPerList = perList;
+        goldMaxFollowers = maxFollowers;
         status = "يبدأ...";
         final Set<String> allowed = new HashSet<>(countries);
         thread = new Thread(() -> run(store, seed, count, listSize, allowed), "extract");
@@ -173,6 +180,9 @@ final class Engine {
             + (following ? " (ممن يتابعهم كل حساب)" : " (من المتابعين الموثّقين)"));
         log("📋 المفحوصون مسبقًا: " + store.checkedCount() + " | قائمة البحث: " + store.queueSize() + "/" + listSize
             + " | الحد لكل قائمة: " + maxPerList);
+        if (goldMaxFollowers > 0) {
+            log("📏 تُحفظ الحسابات الذهبية التي متابعوها أقل من " + goldMaxFollowers + " فقط");
+        }
         if (!Web.onMain(Web::loggedIn, 5_000, false)) {
             return "🔴 لم تسجّل الدخول - اضغط «تسجيل الدخول» أولًا";
         }
@@ -183,11 +193,13 @@ final class Engine {
         noneState = 0;
         followingOp = null;
         followingOpTries = 0;
+        followerCounts.clear();
         int checkedNow = 0;
         int duplicates = 0;
         int notGold = 0;
         int cached = 0;
         int unopened = 0;
+        int overLimit = 0;
         int noLocation = 0;
         int navFails = 0;
         Boolean listFull = null;                                // (the search list's state last told in the log)
@@ -309,15 +321,31 @@ final class Engine {
                     cached++;
                     continue;
                 }
-                if (!filling && !isGold) {
-                    unopenedHere++;                             // (the list is full: only gold accounts are opened)
+                // A gold account is wanted only with fewer followers than the limit (when there is one).
+                boolean wanted = isGold;
+                long followers = -1;
+                if (isGold && goldMaxFollowers > 0) {
+                    followers = followersOf(user);
+                    wanted = followers >= 0 && followers < goldMaxFollowers;
+                    if (!wanted) {
+                        overLimit++;
+                        log(followers < 0
+                            ? "      ⚠️ @" + user.username + " - ذهبي، تعذّر معرفة عدد متابعيه (تخطي)"
+                            : "      ⏭️ @" + user.username + " - ذهبي متابعوه " + followers + " (الحد أقل من "
+                                + goldMaxFollowers + ") - تخطي");
+                    }
+                }
+                if (!filling && !wanted) {
+                    if (!isGold) {
+                        unopenedHere++;                         // (the list is full: only wanted gold ones are opened)
+                    }
                     continue;
                 }
                 checkedNow++;
                 status("يفحص @" + user.username);
 
                 int before = Web.generation;
-                String location = locationOf(user.username, isGold);
+                String location = locationOf(user.username, wanted);
                 if (Web.generation != before) {
                     log("🔄 المتصفح انهار أثناء فحص الموقع - إعادة تشغيله...");
                     log("✅ تم إعادة تشغيل المتصفح");
@@ -326,7 +354,7 @@ final class Engine {
                 }
                 if (location != null) {                         // (read for sure: not asked again; else retried later)
                     store.addChecked(user.username);
-                    if (isGold) {
+                    if (wanted) {
                         store.addGoldChecked(user.username);
                     }
                 }
@@ -339,9 +367,11 @@ final class Engine {
                     if (store.addToQueue(user.username, listSize)) {
                         log("      ➕ @" + user.username + " - أُضيف لقائمة البحث (" + store.queueSize() + "/" + listSize + ")");
                     }
-                    if (!isGold) {
-                        notGold++;
-                        log("      ⏭️ @" + user.username + " - ليس ذهبي (تخطي)");
+                    if (!wanted) {
+                        if (!isGold) {
+                            notGold++;
+                            log("      ⏭️ @" + user.username + " - ليس ذهبي (تخطي)");
+                        }
                         sleep(3_000);
                         continue;
                     }
@@ -351,7 +381,8 @@ final class Engine {
                     store.addResult(user.username, user.name, user.bio, location, Text.nameOf(country), user.image, current);
                     done++;
                     found++;
-                    log("      ✅ @" + user.username + " - ذهبي من " + Text.nameOf(country) + " - تم الاستخراج (" + done + "/" + count + ")");
+                    log("      ✅ @" + user.username + " - ذهبي من " + Text.nameOf(country) + " - تم الاستخراج (" + done + "/" + count + ")"
+                        + (followers >= 0 ? " | متابعوه " + followers : ""));
                 } else if (location != null && location.isEmpty()) {
                     noLocation = 0;                             // (X answered for it: the session is fine)
                     log("      ⚪ @" + user.username + " - لا يوجد موقع مذكور");
@@ -396,7 +427,7 @@ final class Engine {
                 log("      ✅ الإجمالي: " + done + "/" + count);
             }
             log("   📊 قائمة البحث: " + store.queueSize() + "/" + listSize + " | مكرر: " + duplicates
-                + " | غير ذهبي: " + notGold + " | بلا فتح: " + unopened + " | مفحوص: " + store.checkedCount()
+                + " | غير ذهبي: " + notGold + " | ذهبي فوق الحد: " + overLimit + " | بلا فتح: " + unopened + " | مفحوص: " + store.checkedCount()
                 + " | مستخرج كليًا: " + store.extractedCount() + " | مؤقت: " + cached);
             sleep(SCROLL_DELAY);
         }
@@ -695,6 +726,7 @@ final class Engine {
                     cell.bio = u.optString("bio");
                     cell.image = u.optString("image");
                     cell.badge = u.optString("badge");
+                    cell.followers = u.optLong("followers", -1);
                     if (cell.username != null && !cell.username.isEmpty()) {
                         all.put(cell.username.toLowerCase(Locale.ROOT), cell);
                     }
@@ -816,6 +848,56 @@ final class Engine {
         }
         log("      ⚠️ لم يُعثر على استعلام " + operation + " في سكربتات X (" + (found == null ? "لا رد" : found.optString("error")) + ")");
         return null;
+    }
+
+    /** The account's followers count: from the list's data, else asked from X, else read on its profile page. */
+    private static long followersOf(Cell user) {
+        if (user.followers >= 0) {
+            return user.followers;
+        }
+        String key = user.username.toLowerCase(Locale.ROOT);
+        Long known = followerCounts.get(key);
+        if (known != null) {
+            return known;
+        }
+        status("يقرأ عدد متابعي @" + user.username);
+        long count = followersDirect(user.username);
+        if (count < 0) {
+            count = followersFromProfile(user.username);
+        }
+        if (count >= 0) {
+            followerCounts.put(key, count);
+        }
+        return count;
+    }
+
+    private static long followersDirect(String user) {
+        evaluate(Scripts.START_FETCH_USER_ID.replace("%SCREEN%", user), 3_000);
+        JSONObject data = pollJson(Scripts.POLL_GQL_RESULT, 20);
+        return data == null ? -1 : data.optLong("followers", -1);
+    }
+
+    /** The count on the account's profile page (its «Followers» link), up to about 8 s after it opens. */
+    private static long followersFromProfile(String user) {
+        String path = "/" + user;
+        if (navigate("https://x.com" + path, path, 30_000) != OK) {
+            return -1;
+        }
+        String script = Scripts.PROFILE_FOLLOWERS.replace("%USER%", user.toLowerCase(Locale.ROOT));
+        long start = SystemClock.elapsedRealtime();
+        while (true) {
+            sleep(1_000);
+            Object value = evaluate(script, 5_000);
+            if (value instanceof JSONObject && !((JSONObject) value).isNull("text")) {
+                long count = Text.parseCount(((JSONObject) value).optString("text"));
+                if (count >= 0) {
+                    return count;
+                }
+            }
+            if (SystemClock.elapsedRealtime() - start >= 8_000) {
+                return -1;
+            }
+        }
     }
 
     /** Polls a page's result (a JSON text the page keeps) every half second, at most this many times. */

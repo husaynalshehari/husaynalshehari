@@ -56,6 +56,17 @@ public final class TextTest {
         same(String.join("|", Text.handlesIn("one, two، three", null)), "one|two|three");
         same(String.valueOf(Text.handlesIn("", bad).size()), "0");
 
+        // Followers counts as X shows them.
+        same(String.valueOf(Text.parseCount("12.3K Followers")), "12300");
+        same(String.valueOf(Text.parseCount("1,234 Followers")), "1234");
+        same(String.valueOf(Text.parseCount("9,999")), "9999");
+        same(String.valueOf(Text.parseCount("1.2M Followers")), "1200000");
+        same(String.valueOf(Text.parseCount("٩٨٧ متابعًا")), "987");
+        same(String.valueOf(Text.parseCount("١٢٫٣ ألف متابع")), "12300");
+        same(String.valueOf(Text.parseCount("12.3 ألف متابِع")), "12300");
+        same(String.valueOf(Text.parseCount("Followers")), "-1");
+        same(String.valueOf(Text.parseCount(null)), "-1");
+
         // CSV cells.
         same(Text.csvCell("a \"quoted\" name"), "\"a \"\"quoted\"\" name\"");
         same(Text.csvCell("two\nlines"), "\"two lines\"");

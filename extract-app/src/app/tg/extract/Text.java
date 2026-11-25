@@ -124,6 +124,49 @@ final class Text {
         return names;
     }
 
+    private static final Pattern COUNT = Pattern.compile(
+        "([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*(آلاف|ألف|الف|ملايين|مليون|مليار|k|m|b)?", Pattern.CASE_INSENSITIVE);
+
+    /** A count as X shows it ("12.3K", "1,234", "١٢٫٣ ألف"...) as a number; -1 when there is none. */
+    static long parseCount(String text) {
+        if (text == null) {
+            return -1;
+        }
+        StringBuilder plain = new StringBuilder();
+        for (char c : text.toCharArray()) {
+            if (c >= '٠' && c <= '٩') {
+                plain.append((char) ('0' + (c - '٠')));
+            } else if (c >= '۰' && c <= '۹') {
+                plain.append((char) ('0' + (c - '۰')));
+            } else if (c == '٫') {
+                plain.append('.');
+            } else if (c == '٬') {
+                plain.append(',');
+            } else {
+                plain.append(c);
+            }
+        }
+        Matcher m = COUNT.matcher(plain);
+        if (!m.find()) {
+            return -1;
+        }
+        double value;
+        try {
+            value = Double.parseDouble(m.group(1).replace(",", ""));
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+        String unit = m.group(2) == null ? "" : m.group(2).toLowerCase(Locale.ROOT);
+        if (unit.equals("k") || unit.equals("ألف") || unit.equals("الف") || unit.equals("آلاف")) {
+            value *= 1_000;
+        } else if (unit.equals("m") || unit.equals("مليون") || unit.equals("ملايين")) {
+            value *= 1_000_000;
+        } else if (unit.equals("b") || unit.equals("مليار")) {
+            value *= 1_000_000_000;
+        }
+        return Math.round(value);
+    }
+
     /** One CSV cell: quoted, on one line, and never read as a formula by a spreadsheet. */
     static String csvCell(String value) {
         String v = value == null ? "" : value.replace("\r", " ").replace("\n", " ").trim();

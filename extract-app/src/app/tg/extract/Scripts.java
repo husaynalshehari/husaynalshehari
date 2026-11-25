@@ -151,7 +151,7 @@ final class Scripts {
         + "    if(vtype==='Business' || vtype==='business')badge='gold';"
         + "    else if(res.is_blue_verified || leg.verified)badge='blue';"
         + "    else if(vtype==='Government')badge='grey';"
-        + "    users.push({username:username,name:core.name||leg.name||username,bio:leg.description||'',image:(av.image_url||leg.profile_image_url_https||'').replace('_normal','_400x400'),badge:badge});"
+        + "    users.push({username:username,name:core.name||leg.name||username,bio:leg.description||'',image:(av.image_url||leg.profile_image_url_https||'').replace('_normal','_400x400'),badge:badge,followers:(typeof leg.followers_count==='number'?leg.followers_count:((res.relationship_counts&&typeof res.relationship_counts.followers==='number')?res.relationship_counts.followers:-1))});"
         + "   }"
         + "  }"
         + "  window.__gqlResult=JSON.stringify({users:users,cursor:next,error:null});"
@@ -173,7 +173,8 @@ final class Scripts {
         + "var ct0='';try{ct0=(document.cookie.match(/(?:^|; )ct0=([^;]*)/)||[])[1]||'';}catch(ce){}"
         + "fetch(url,{method:'GET',credentials:'include',headers:{'Authorization':'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA','x-csrf-token':ct0}})"
         + ".then(function(r){return r.ok?r.json():null;})"
-        + ".then(function(data){try{var id=((data.data||{}).user||{}).result.rest_id; window.__gqlResult=JSON.stringify({id:id});}catch(e){window.__gqlResult=JSON.stringify({id:null});}})"
+        + ".then(function(data){try{var r=((data.data||{}).user||{}).result;var fc=(r.legacy||{}).followers_count;"
+        + "window.__gqlResult=JSON.stringify({id:r.rest_id,followers:typeof fc==='number'?fc:-1});}catch(e){window.__gqlResult=JSON.stringify({id:null});}})"
         + ".catch(function(){window.__gqlResult=JSON.stringify({id:null});});"
         + "return true;"
         + "})('%SCREEN%')";
@@ -247,7 +248,7 @@ final class Scripts {
         + "    if(vtype==='Business' || vtype==='business')badge='gold';"
         + "    else if(res.is_blue_verified || leg.verified)badge='blue';"
         + "    else if(vtype==='Government')badge='grey';"
-        + "    users.push({username:username,name:core.name||leg.name||username,bio:leg.description||'',image:(av.image_url||leg.profile_image_url_https||'').replace('_normal','_400x400'),badge:badge});"
+        + "    users.push({username:username,name:core.name||leg.name||username,bio:leg.description||'',image:(av.image_url||leg.profile_image_url_https||'').replace('_normal','_400x400'),badge:badge,followers:(typeof leg.followers_count==='number'?leg.followers_count:((res.relationship_counts&&typeof res.relationship_counts.followers==='number')?res.relationship_counts.followers:-1))});"
         + "   }"
         + "  }"
         + "  window.__gqlResult=JSON.stringify({users:users,cursor:next,error:null});"
@@ -293,6 +294,19 @@ final class Scripts {
         + "next();"
         + "return true;"
         + "})('%OP%')";
+
+    /** The followers count's text on an account's profile page (its «Followers» link), or null. */
+    static final String PROFILE_FOLLOWERS =
+        "(function(user){"
+        + "var want=['/'+user+'/verified_followers','/'+user+'/followers'];"
+        + "var links=document.querySelectorAll('a[href]');"
+        + "for(var w=0;w<want.length;w++){"
+        + " for(var i=0;i<links.length;i++){"
+        + "  if((links[i].getAttribute('href')||'').toLowerCase()===want[w])return {text:(links[i].innerText||links[i].textContent||'')};"
+        + " }"
+        + "}"
+        + "return {text:null};"
+        + "})('%USER%')";
 
     static final String POLL_OP_RESULT = "(function(){return window.__opResult||null;})()";
 }
