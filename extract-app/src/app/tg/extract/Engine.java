@@ -735,39 +735,83 @@ final class Engine {
         return null;
     }
 
-    /** One page of whom the account follows, with the «Following» query found in X's scripts. */
+    /** X's «Following» query id (from the user; looked for in X's scripts if X answers 404 to it). */
+    private static final String FOLLOWING_QUERY_ID = "9l9tzqLGQU9eutAJffqqMw";
+    /** The features X's site sends with its timeline queries (any X says are missing are added as it asks). */
+    private static final String FOLLOWING_FEATURES = "{\"rweb_video_screen_enabled\":false,\"profile_label_improvements_pcf_label_in_post_enabled\":true,\"rweb_tipjar_consumption_enabled\":true,\"verified_phone_label_enabled\":false,\"creator_subscriptions_tweet_preview_api_enabled\":true,\"responsive_web_graphql_timeline_navigation_enabled\":true,\"responsive_web_graphql_skip_user_profile_image_extensions_enabled\":false,\"premium_content_api_read_enabled\":false,\"communities_web_enable_tweet_community_results_fetch\":true,\"c9s_tweet_anatomy_moderator_badge_enabled\":true,\"responsive_web_grok_analyze_button_fetch_trends_enabled\":false,\"responsive_web_grok_analyze_post_followups_enabled\":true,\"responsive_web_jetfuel_frame\":false,\"responsive_web_grok_share_attachment_enabled\":true,\"articles_preview_enabled\":true,\"responsive_web_edit_tweet_api_enabled\":true,\"graphql_is_translatable_rweb_tweet_is_translatable_enabled\":true,\"view_counts_everywhere_api_enabled\":true,\"longform_notetweets_consumption_enabled\":true,\"responsive_web_twitter_article_tweet_consumption_enabled\":true,\"tweet_awards_web_tipping_enabled\":false,\"responsive_web_grok_show_grok_translated_post\":false,\"responsive_web_grok_analysis_button_from_backend\":true,\"creator_subscriptions_quote_tweet_preview_enabled\":false,\"freedom_of_speech_not_reach_fetch_enabled\":true,\"standardized_nudges_misinfo\":true,\"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled\":true,\"longform_notetweets_rich_text_read_enabled\":true,\"longform_notetweets_inline_media_enabled\":true,\"responsive_web_grok_image_annotation_enabled\":true,\"responsive_web_enhance_cards_enabled\":false,\"responsive_web_graphql_exclude_directive_enabled\":true}";
+
+    /** One page of whom the account follows: X's «Following» query, asked again when X names what it misses. */
     private static JSONObject fetchFollowingPage(String userId, String cursor) {
-        JSONObject op = followingOperation();
-        if (op == null) {
-            return null;                                        // (the page and its scrolling are used)
+        if (followingOp == null) {
+            try {
+                followingOp = new JSONObject().put("queryId", FOLLOWING_QUERY_ID).put("features", new JSONObject(FOLLOWING_FEATURES));
+            } catch (JSONException e) {
+                return null;
+            }
         }
-        JSONObject features = op.optJSONObject("features");
-        String script = Scripts.START_FETCH_LIST
-            .replace("%QID%", op.optString("queryId"))
-            .replace("%OP%", "Following")
-            .replace("%FEATURES%", features != null && features.length() > 0 ? features.toString() : "{}")
-            .replace("%USER_ID%", userId)
-            .replace("%CURSOR%", cursor == null ? "null" : cursor);
-        evaluate(script, 3_000);
-        return pollJson(Scripts.POLL_GQL_RESULT, 30);
+        JSONObject result = null;
+        for (int attempt = 0; attempt < 4; attempt++) {
+            JSONObject features = followingOp.optJSONObject("features");
+            String script = Scripts.START_FETCH_LIST
+                .replace("%QID%", followingOp.optString("queryId"))
+                .replace("%OP%", "Following")
+                .replace("%FEATURES%", features != null ? features.toString() : "{}")
+                .replace("%USER_ID%", userId)
+                .replace("%CURSOR%", cursor == null ? "null" : cursor);
+            evaluate(script, 3_000);
+            result = pollJson(Scripts.POLL_GQL_RESULT, 30);
+            if (result == null || result.isNull("error")) {
+                return result;
+            }
+            JSONArray missing = result.optJSONArray("missing");
+            if (missing != null && missing.length() > 0 && features != null) {
+                try {
+                    for (int i = 0; i < missing.length(); i++) {
+                        String name = missing.optString(i).trim();
+                        if (!name.isEmpty()) {
+                            features.put(name, true);
+                        }
+                    }
+                } catch (JSONException e) {
+                    return result;
+                }
+                log("      🔧 طلبت X ميزات ناقصة (" + missing.length() + ") - أُضيفت وأُعيد الطلب");
+                continue;
+            }
+            if (result.optString("error").startsWith("HTTP 404") && followingOpTries < 2) {
+                JSONObject found = findOperation("Following");  // (X may have changed the query id)
+                if (found != null && !found.optString("queryId").equals(followingOp.optString("queryId"))) {
+                    try {
+                        followingOp.put("queryId", found.optString("queryId"));
+                        JSONObject more = found.optJSONObject("features");
+                        if (more != null && features != null) {
+                            for (java.util.Iterator<String> it = more.keys(); it.hasNext(); ) {
+                                String name = it.next();
+                                features.put(name, more.opt(name));
+                            }
+                        }
+                    } catch (JSONException e) {
+                        return result;
+                    }
+                    continue;
+                }
+            }
+            return result;
+        }
+        return result;
     }
 
-    /** X's «Following» query id and features, read once a task from the scripts X loaded in the page. */
-    private static JSONObject followingOperation() {
-        if (followingOp != null || followingOpTries >= 2) {
-            return followingOp;
-        }
+    /** An operation's query id and features, looked for in the scripts X loaded in the page (two tries a task). */
+    private static JSONObject findOperation(String operation) {
         followingOpTries++;
-        status("يبحث عن استعلام Following في سكربتات X");
-        evaluate(Scripts.FIND_OPERATION.replace("%OP%", "Following"), 3_000);
+        status("يبحث عن استعلام " + operation + " في سكربتات X");
+        evaluate(Scripts.FIND_OPERATION.replace("%OP%", operation), 3_000);
         JSONObject found = pollJson(Scripts.POLL_OP_RESULT, 60);     // (up to about 30 s: X's scripts are big)
         if (found != null && found.isNull("error") && !found.optString("queryId").isEmpty()) {
-            followingOp = found;
-            log("      🔑 وُجد استعلام Following في سكربتات X (" + found.optString("queryId") + ")");
+            log("      🔑 وُجد استعلام " + operation + " في سكربتات X (" + found.optString("queryId") + ")");
             return found;
         }
-        log("      ⚠️ لم يُعثر على استعلام Following (" + (found == null ? "لا رد" : found.optString("error"))
-            + ") - تُستخدم الصفحة والتمرير");
+        log("      ⚠️ لم يُعثر على استعلام " + operation + " في سكربتات X (" + (found == null ? "لا رد" : found.optString("error")) + ")");
         return null;
     }
 
