@@ -112,4 +112,67 @@ final class Scripts {
         + "var n=b?(b.innerText||'').match(/@([A-Za-z0-9_]{1,15})/):null;"
         + "return n?n[1]:null;"
         + "})()";
+
+    /**
+     * Starts a GraphQL fetch for verified followers and stores the result in window.__gqlResult (async).
+     * Engine polls for the result.
+     */
+    static final String START_FETCH_VERIFIED =
+        "(function(userId, cursor){"
+        + "window.__gqlResult = null;"
+        + "var queryId='HP_mH6gi0qyrYpnRxVovew';"
+        + "var variables={userId:userId,count:20,includePromotedContent:false};"
+        + "if(cursor && cursor !== 'null')variables.cursor=cursor;"
+        + "var features={\"articles_preview_enabled\":true,\"responsive_web_graphql_timeline_navigation_enabled\":true,\"verified_phone_label_enabled\":false,\"view_counts_everywhere_api_enabled\":true,\"responsive_web_graphql_exclude_directive_enabled\":true};"
+        + "var url='https://x.com/i/api/graphql/'+queryId+'/BlueVerifiedFollowers?variables='+encodeURIComponent(JSON.stringify(variables))+'&features='+encodeURIComponent(JSON.stringify(features));"
+        + "var ct0=(document.cookie.match(/(?:^|; )ct0=([^;]*)/)||[])[1]||'';"
+        + "fetch(url,{method:'GET',credentials:'include',headers:{'Authorization':'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA','x-csrf-token':ct0,'x-twitter-active-user':'yes','x-twitter-auth-type':'OAuth2Session'}})"
+        + ".then(function(r){return r.ok ? r.json() : {error:'HTTP '+r.status};})"
+        + ".then(function(data){"
+        + " var users=[], next=null;"
+        + " if(data.error){window.__gqlResult=JSON.stringify({users:[],cursor:null,error:data.error});return;}"
+        + " try{"
+        + "  var timeline=((((data.data||{}).user||{}).result||{}).timeline||{}).timeline||{};"
+        + "  var instructions=timeline.instructions||[];"
+        + "  for(var i=0;i<instructions.length;i++){"
+        + "   var entries=instructions[i].entries||[];"
+        + "   for(var j=0;j<entries.length;j++){"
+        + "    var e=entries[j];"
+        + "    if((e.entryId||'').indexOf('cursor-bottom')===0){next=(e.content||{}).value||null;continue;}"
+        + "    var res=(((e.content||{}).itemContent||{}).user_results||{}).result;"
+        + "    if(!res)continue;"
+        + "    var leg=res.legacy||{},core=res.core||{},av=res.avatar||{};"
+        + "    var username=core.screen_name||leg.screen_name||'';"
+        + "    if(!username)continue;"
+        + "    var badge='none';"
+        + "    var vtype=(res.verification_info && res.verification_info.verified_type) || (res.verification && res.verification.verified_type) || leg.verified_type || '';"
+        + "    if(vtype==='Business' || vtype==='business')badge='gold';"
+        + "    else if(res.is_blue_verified || leg.verified)badge='blue';"
+        + "    else if(vtype==='Government')badge='grey';"
+        + "    users.push({username:username,name:core.name||leg.name||username,bio:leg.description||'',image:(av.image_url||leg.profile_image_url_https||'').replace('_normal','_400x400'),badge:badge});"
+        + "   }"
+        + "  }"
+        + "  window.__gqlResult=JSON.stringify({users:users,cursor:next,error:null});"
+        + " }catch(ex){window.__gqlResult=JSON.stringify({users:[],cursor:null,error:String(ex)});}"
+        + "})"
+        + ".catch(function(e){window.__gqlResult=JSON.stringify({users:[],cursor:null,error:String(e)});});"
+        + "return true;"
+        + "})('%USER_ID%','%CURSOR%')";
+
+    static final String POLL_GQL_RESULT = "(function(){return window.__gqlResult||null;})()";
+
+    static final String START_FETCH_USER_ID =
+        "(function(screenName){"
+        + "window.__gqlResult = null;"
+        + "var queryId='AMIBMjtxEEATh4z8V9GtRg';"
+        + "var variables={screen_name:screenName,withSafetyModeUserFields:true};"
+        + "var features={\"responsive_web_graphql_timeline_navigation_enabled\":true};"
+        + "var url='https://x.com/i/api/graphql/'+queryId+'/UserByScreenName?variables='+encodeURIComponent(JSON.stringify(variables))+'&features='+encodeURIComponent(JSON.stringify(features));"
+        + "var ct0=(document.cookie.match(/(?:^|; )ct0=([^;]*)/)||[])[1]||'';"
+        + "fetch(url,{method:'GET',credentials:'include',headers:{'Authorization':'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA','x-csrf-token':ct0}})"
+        + ".then(function(r){return r.ok?r.json():null;})"
+        + ".then(function(data){try{var id=((data.data||{}).user||{}).result.rest_id; window.__gqlResult=JSON.stringify({id:id});}catch(e){window.__gqlResult=JSON.stringify({id:null});}})"
+        + ".catch(function(){window.__gqlResult=JSON.stringify({id:null});});"
+        + "return true;"
+        + "})('%SCREEN%')";
 }

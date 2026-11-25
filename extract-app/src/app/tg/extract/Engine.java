@@ -66,6 +66,8 @@ final class Engine {
     static volatile int target;
     /** The search list's size (the user's choice, 50 unless changed). */
     static volatile int pool = 50;
+    /** The direct way's failures in a row (after 3 the task keeps to the page and its scrolling). */
+    private static int directFails;
     private static Thread thread;
     private static Context app;
     private static final ArrayDeque<String> LOG = new ArrayDeque<>();
@@ -160,6 +162,7 @@ final class Engine {
             return "🔴 لم تسجّل الدخول - اضغط «تسجيل الدخول» أولًا";
         }
         store.prepare(seed);
+        directFails = 0;
         int checkedNow = 0;
         int duplicates = 0;
         int notGold = 0;
@@ -175,60 +178,73 @@ final class Engine {
             if (current == null) {
                 break;
             }
-            log("   📂 استخراج متابعي @" + current + "...");
-            status("يفتح متابعي @" + current);
-            int generation = Web.generation;
-            int page = openFollowers(current);
-            if (Web.generation != generation) {
-                log("🔄 المتصفح انهار - إعادة تشغيله...");
-                log("✅ تم إعادة تشغيل المتصفح");
-                store.pushFront(current);
-                noLocation = 0;
-                continue;
-            }
-            if (page == SIGNED_OUT || page == LOCKED) {
-                store.pushFront(current);
-                return page == LOCKED ? LOCKED_END : SIGNED_OUT_END;
-            }
-            if (page == EMPTY) {
-                navFails = 0;
-                log("      ⚪ لا يوجد متابعون موثّقون ظاهرون لـ @" + current + " (تخطي)");
-                sleep(SCROLL_DELAY);
-                continue;
-            }
-            if (page == FAILED) {
-                navFails++;
-                log("      ⚠️ تخطي @" + current + " - فشل التحميل");
-                log("      📉 فشل متتالي: " + navFails);
-                if (navFails >= NAV_FAIL_LONG_PAUSE) {
-                    log("🔴 " + navFails + " فشل متتالي - توقف ساعة كاملة...");
-                    store.pushFront(current);
-                    pause(NAV_FAIL_LONG_WAIT);
-                    log("🔄 فتح متصفح جديد بعد التوقف الطويل...");
-                    freshBrowser();
-                    log("▶️ استئناف العمل...");
-                    navFails = 0;
-                } else if (navFails >= NAV_FAIL_PAUSE) {
-                    log("⏸️ " + navFails + " فشل متتالي - توقف دقيقة + متصفح جديد...");
-                    store.pushFront(current);
-                    pause(NAV_FAIL_SHORT_WAIT);
-                    freshBrowser();
-                    log("▶️ استئناف العمل...");
-                }
-                continue;
-            }
-            navFails = 0;
-            sleep(4_000);
-
-            List<Cell> cells = collectAll(current, generation);
-            if (Web.generation != generation) {
-                log("🔄 المتصفح انهار أثناء الاستخراج - إعادة تشغيله...");
-                store.pushFront(current);
-                noLocation = 0;
-                continue;
+            log("   📂 استخراج متابعي @" + current + " (مباشر)...");
+            status("يجلب متابعي @" + current + " مباشرة");
+            List<Cell> cells = directFails >= 3 ? null : collectAllDirect(current);
+            if (cells != null) {
+                directFails = 0;
+            } else if (directFails < 3 && ++directFails == 3) {
+                log("   ↩️ الطريقة المباشرة فشلت 3 مرات متتالية - تُستخدم الصفحة والتمرير لبقية المهمة");
             }
             if (cells == null) {
-                log("      ⚠️ تعذّر قراءة صفحة @" + current + " (تخطي)");
+                // Fall back to traditional page + scroll
+                log("   ↩️ العودة لطريقة التحميل والتمرير لـ @" + current);
+                status("يفتح متابعي @" + current);
+                int generation = Web.generation;
+                int page = openFollowers(current);
+                if (Web.generation != generation) {
+                    log("🔄 المتصفح انهار - إعادة تشغيله...");
+                    log("✅ تم إعادة تشغيل المتصفح");
+                    store.pushFront(current);
+                    noLocation = 0;
+                    continue;
+                }
+                if (page == SIGNED_OUT || page == LOCKED) {
+                    store.pushFront(current);
+                    return page == LOCKED ? LOCKED_END : SIGNED_OUT_END;
+                }
+                if (page == EMPTY) {
+                    navFails = 0;
+                    log("      ⚪ لا يوجد متابعون موثّقون ظاهرون لـ @" + current + " (تخطي)");
+                    sleep(SCROLL_DELAY);
+                    continue;
+                }
+                if (page == FAILED) {
+                    navFails++;
+                    log("      ⚠️ تخطي @" + current + " - فشل التحميل");
+                    log("      📉 فشل متتالي: " + navFails);
+                    if (navFails >= NAV_FAIL_LONG_PAUSE) {
+                        log("🔴 " + navFails + " فشل متتالي - توقف ساعة كاملة...");
+                        store.pushFront(current);
+                        pause(NAV_FAIL_LONG_WAIT);
+                        log("🔄 فتح متصفح جديد بعد التوقف الطويل...");
+                        freshBrowser();
+                        log("▶️ استئناف العمل...");
+                        navFails = 0;
+                    } else if (navFails >= NAV_FAIL_PAUSE) {
+                        log("⏸️ " + navFails + " فشل متتالي - توقف دقيقة + متصفح جديد...");
+                        store.pushFront(current);
+                        pause(NAV_FAIL_SHORT_WAIT);
+                        freshBrowser();
+                        log("▶️ استئناف العمل...");
+                    }
+                    continue;
+                }
+                navFails = 0;
+                sleep(4_000);
+                cells = collectAll(current, generation);
+                if (Web.generation != generation) {
+                    log("🔄 المتصفح انهار أثناء الاستخراج - إعادة تشغيله...");
+                    store.pushFront(current);
+                    noLocation = 0;
+                    continue;
+                }
+                if (cells == null) {
+                    log("      ⚠️ تعذّر قراءة صفحة @" + current + " (تخطي)");
+                    continue;
+                }
+            } else if (cells.isEmpty()) {
+                log("      ⚪ لا يوجد متابعون موثّقون لـ @" + current + " (تخطي)");
                 continue;
             }
             int gold = 0;
@@ -506,6 +522,98 @@ final class Engine {
      * MAX_PER_PAGE are read. X keeps only the accounts near the screen in the page, so they are read at each step.
      * Null when the page could not be read at all (or the browser was made anew meanwhile).
      */
+
+    /** Direct extraction of verified followers via GraphQL (no page load / scroll). Falls back if it fails. */
+    private static List<Cell> collectAllDirect(String user) {
+        String userId = fetchUserId(user);
+        if (userId == null || userId.isEmpty()) {
+            log("      ⚠️ تعذّر جلب معرف المستخدم لـ @" + user + " - سيتم استخدام الطريقة التقليدية");
+            return null;
+        }
+        Map<String, Cell> all = new LinkedHashMap<>();
+        String cursor = null;
+        for (int page = 0; page < 50 && all.size() < MAX_PER_PAGE; page++) {  // safety limit
+            checkStop();
+            JSONObject pageResult = fetchVerifiedPage(userId, cursor);
+            if (pageResult == null) {
+                log("      ⚠️ فشل جلب الصفحة المباشرة - العودة للطريقة التقليدية");
+                return null;
+            }
+            if (pageResult.has("error") && !pageResult.isNull("error")) {
+                log("      ⚠️ خطأ API: " + pageResult.optString("error"));
+                return null;
+            }
+            JSONArray users = pageResult.optJSONArray("users");
+            if (users != null) {
+                for (int i = 0; i < users.length(); i++) {
+                    JSONObject u = users.optJSONObject(i);
+                    if (u == null) continue;
+                    Cell cell = new Cell();
+                    cell.username = u.optString("username");
+                    cell.name = u.optString("name");
+                    cell.bio = u.optString("bio");
+                    cell.image = u.optString("image");
+                    cell.badge = u.optString("badge");
+                    if (cell.username != null && !cell.username.isEmpty()) {
+                        all.put(cell.username.toLowerCase(Locale.ROOT), cell);
+                    }
+                }
+            }
+            String next = pageResult.optString("cursor", null);
+            if (next == null || next.isEmpty() || "null".equals(next)) {
+                break;
+            }
+            cursor = next;
+            status("يجلب متابعي @" + user + " مباشرة - جُمع " + all.size());
+            sleep(800);  // small delay between API pages to avoid rate limit
+        }
+        if (all.isEmpty()) {
+            log("      ⚠️ لم يُقرأ أحد بالطريقة المباشرة - العودة للطريقة التقليدية");
+            return null;
+        }
+        List<Cell> cells = new ArrayList<>(all.values());
+        return cells.size() > MAX_PER_PAGE ? new ArrayList<>(cells.subList(0, MAX_PER_PAGE)) : cells;
+    }
+
+    private static String fetchUserId(String screenName) {
+        String script = Scripts.START_FETCH_USER_ID.replace("%SCREEN%", screenName.replace("'", "\'"));
+        evaluate(script, 3_000);
+        for (int i = 0; i < 20; i++) {  // poll up to ~10s
+            sleep(500);
+            Object val = evaluate(Scripts.POLL_GQL_RESULT, 2_000);
+            if (val instanceof String) {
+                try {
+                    JSONObject obj = new JSONObject((String) val);
+                    String id = obj.isNull("id") ? null : obj.optString("id", null);
+                    return id == null || id.isEmpty() || "null".equals(id) ? null : id;
+                } catch (JSONException e) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static JSONObject fetchVerifiedPage(String userId, String cursor) {
+        String cur = (cursor == null) ? "null" : cursor.replace("'", "\'");
+        String script = Scripts.START_FETCH_VERIFIED
+            .replace("%USER_ID%", userId)
+            .replace("%CURSOR%", cur);
+        evaluate(script, 3_000);
+        for (int i = 0; i < 30; i++) {  // poll up to ~15s
+            sleep(500);
+            Object val = evaluate(Scripts.POLL_GQL_RESULT, 2_000);
+            if (val instanceof String) {
+                try {
+                    return new JSONObject((String) val);
+                } catch (JSONException e) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
     private static List<Cell> collectAll(String user, int generation) {
         Map<String, Cell> all = new LinkedHashMap<>();
         boolean readOnce = false;
