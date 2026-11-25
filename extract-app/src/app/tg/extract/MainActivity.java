@@ -93,6 +93,7 @@ public final class MainActivity extends Activity {
     private EditText seedInput;
     private EditText targetInput;
     private EditText poolInput;
+    private EditText perListInput;
     private RadioButton fromFollowers;
     private RadioButton fromFollowing;
     private Button startButton;
@@ -307,6 +308,9 @@ public final class MainActivity extends Activity {
         add(card, text("حجم قائمة البحث (حسابات خليجية يُبحث في متابعيها)", 13, INK, true), 10);
         poolInput = input("50", InputType.TYPE_CLASS_NUMBER);
         add(card, poolInput, 4);
+        add(card, text("الحد الأقصى للجمع من كل قائمة", 13, INK, true), 10);
+        perListInput = input("2000", InputType.TYPE_CLASS_NUMBER);
+        add(card, perListInput, 4);
         add(card, text("الدول", 13, INK, true), 10);
         LinearLayout grid = new LinearLayout(this);
         grid.setOrientation(LinearLayout.VERTICAL);
@@ -422,6 +426,7 @@ public final class MainActivity extends Activity {
         seedInput.setEnabled(!running);
         targetInput.setEnabled(!running);
         poolInput.setEnabled(!running);
+        perListInput.setEnabled(!running);
         fromFollowers.setEnabled(!running);
         fromFollowing.setEnabled(!running);
         for (CheckBox box : countryBoxes.values()) {
@@ -595,6 +600,7 @@ public final class MainActivity extends Activity {
         (prefs.getBoolean("following", false) ? fromFollowing : fromFollowers).setChecked(true);
         targetInput.setText(String.valueOf(prefs.getInt("target", 100)));
         poolInput.setText(String.valueOf(prefs.getInt("pool", 50)));
+        perListInput.setText(String.valueOf(prefs.getInt("perList", 2000)));
         if (!Engine.running) {
             Engine.pool = prefs.getInt("pool", 50);
         }
@@ -641,6 +647,17 @@ public final class MainActivity extends Activity {
             poolInput.requestFocus();
             return;
         }
+        int perList;
+        try {
+            perList = Integer.parseInt(perListInput.getText().toString().trim());
+        } catch (NumberFormatException e) {
+            perList = -1;
+        }
+        if (perList < 1 || perList > 20_000) {
+            perListInput.setError("اكتب عددًا من 1 إلى 20000");
+            perListInput.requestFocus();
+            return;
+        }
         Set<String> countries = new LinkedHashSet<>();
         for (Map.Entry<String, CheckBox> box : countryBoxes.entrySet()) {
             if (box.getValue().isChecked()) {
@@ -653,10 +670,10 @@ public final class MainActivity extends Activity {
         }
         seedInput.setText(seed);
         prefs.edit().putString("seed", seed).putInt("target", count).putInt("pool", listSize)
-            .putBoolean("following", fromFollowing.isChecked())
+            .putBoolean("following", fromFollowing.isChecked()).putInt("perList", perList)
             .putString("countries", TextUtils.join(",", countries)).apply();
         hideKeyboard();
-        if (Engine.start(this, store, seed, count, listSize, countries, fromFollowing.isChecked())) {
+        if (Engine.start(this, store, seed, count, listSize, countries, fromFollowing.isChecked(), perList)) {
             if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, ASK_NOTIFICATIONS);

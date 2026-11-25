@@ -34,7 +34,8 @@ final class Engine {
     }
 
     // How far down a followers' page is read.
-    private static final int MAX_PER_PAGE = 2000;
+    /** The most accounts read from one list (the user's choice, 2000 unless changed). */
+    static volatile int maxPerList = 2000;
     private static final int QUIET_ROUNDS = 4;              // (scrolls in a row with no one new: the list's end)
     private static final int QUIET_ROUNDS_LOADING = 8;      // (the same while X still shows it is loading)
 
@@ -101,7 +102,7 @@ final class Engine {
     // ---------------------------------------------------------------- start and stop
 
     static synchronized boolean start(Context context, Store store, String seed, int count, int listSize,
-                                      Set<String> countries, boolean followingList) {
+                                      Set<String> countries, boolean followingList, int perList) {
         if (running) {
             return false;
         }
@@ -112,6 +113,7 @@ final class Engine {
         target = count;
         pool = listSize;
         following = followingList;
+        maxPerList = perList;
         status = "يبدأ...";
         final Set<String> allowed = new HashSet<>(countries);
         thread = new Thread(() -> run(store, seed, count, listSize, allowed), "extract");
@@ -169,7 +171,8 @@ final class Engine {
     private static String extract(Store store, String seed, int count, int listSize, Set<String> allowed) {
         log("🔍 بدء استخراج " + count + " حساب ذهبي من @" + seed
             + (following ? " (ممن يتابعهم كل حساب)" : " (من المتابعين الموثّقين)"));
-        log("📋 المفحوصون مسبقًا: " + store.checkedCount() + " | قائمة البحث: " + store.queueSize() + "/" + listSize);
+        log("📋 المفحوصون مسبقًا: " + store.checkedCount() + " | قائمة البحث: " + store.queueSize() + "/" + listSize
+            + " | الحد لكل قائمة: " + maxPerList);
         if (!Web.onMain(Web::loggedIn, 5_000, false)) {
             return "🔴 لم تسجّل الدخول - اضغط «تسجيل الدخول» أولًا";
         }
@@ -655,7 +658,7 @@ final class Engine {
 
     /**
      * Every follower the page shows, scrolling down step by step until the list ends (no one new for a few steps) or
-     * MAX_PER_PAGE are read. X keeps only the accounts near the screen in the page, so they are read at each step.
+     * maxPerList are read. X keeps only the accounts near the screen in the page, so they are read at each step.
      * Null when the page could not be read at all (or the browser was made anew meanwhile).
      */
 
@@ -668,7 +671,7 @@ final class Engine {
         }
         Map<String, Cell> all = new LinkedHashMap<>();
         String cursor = null;
-        for (int page = 0; page < 120 && all.size() < MAX_PER_PAGE; page++) {  // safety limit
+        for (int page = 0; page < maxPerList / 20 + 10 && all.size() < maxPerList; page++) {  // safety limit
             checkStop();
             JSONObject pageResult = following ? fetchFollowingPage(userId, cursor) : fetchVerifiedPage(userId, cursor);
             if (pageResult == null || (pageResult.has("error") && !pageResult.isNull("error"))) {
@@ -713,7 +716,7 @@ final class Engine {
             return null;
         }
         List<Cell> cells = new ArrayList<>(all.values());
-        return cells.size() > MAX_PER_PAGE ? new ArrayList<>(cells.subList(0, MAX_PER_PAGE)) : cells;
+        return cells.size() > maxPerList ? new ArrayList<>(cells.subList(0, maxPerList)) : cells;
     }
 
     private static String fetchUserId(String screenName) {
@@ -857,7 +860,7 @@ final class Engine {
         int quiet = 0;
         evaluate(Scripts.TOP, 5_000);
         sleep(800);
-        for (int round = 0; round < 600; round++) {
+        for (int round = 0; round < maxPerList / 4 + 100; round++) {
             List<Cell> seen = collect();
             if (Web.generation != generation) {
                 return null;
@@ -872,7 +875,7 @@ final class Engine {
                     }
                 }
             }
-            if (all.size() >= MAX_PER_PAGE) {
+            if (all.size() >= maxPerList) {
                 break;
             }
             quiet = all.size() > before ? 0 : quiet + 1;
@@ -889,7 +892,7 @@ final class Engine {
             return null;
         }
         List<Cell> cells = new ArrayList<>(all.values());
-        return cells.size() > MAX_PER_PAGE ? new ArrayList<>(cells.subList(0, MAX_PER_PAGE)) : cells;
+        return cells.size() > maxPerList ? new ArrayList<>(cells.subList(0, maxPerList)) : cells;
     }
 
     private static Object evaluate(String script, long timeoutMs) {
