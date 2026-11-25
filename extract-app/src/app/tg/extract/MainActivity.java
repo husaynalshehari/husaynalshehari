@@ -37,6 +37,8 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -91,6 +93,8 @@ public final class MainActivity extends Activity {
     private EditText seedInput;
     private EditText targetInput;
     private EditText poolInput;
+    private RadioButton fromFollowers;
+    private RadioButton fromFollowing;
     private Button startButton;
     private Button stopButton;
     private TextView progressText;
@@ -289,6 +293,14 @@ public final class MainActivity extends Activity {
         seedInput = input("يوزر أو رابط، مثل: vextrand",
             InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS | InputType.TYPE_TEXT_VARIATION_URI);
         add(card, seedInput, 4);
+        add(card, text("اجمع من", 13, INK, true), 10);
+        RadioGroup source = new RadioGroup(this);
+        source.setOrientation(RadioGroup.VERTICAL);
+        fromFollowers = radio("متابعيه الموثّقين (الذين يتابعون الحساب)");
+        fromFollowing = radio("الذين يتابعهم الحساب (Following)");
+        source.addView(fromFollowers);
+        source.addView(fromFollowing);
+        add(card, source, 2);
         add(card, text("عدد الحسابات الذهبية المطلوبة", 13, INK, true), 10);
         targetInput = input("100", InputType.TYPE_CLASS_NUMBER);
         add(card, targetInput, 4);
@@ -313,7 +325,7 @@ public final class MainActivity extends Activity {
             countryBoxes.put(Text.CODES[i], box);
         }
         add(card, grid, 2);
-        add(card, text("يمرّر صفحة المتابعين حتى نهايتها. يُفحص موقع كل الحسابات حتى تكتمل قائمة البحث، ثم يُفتح موقع "
+        add(card, text("يمرّر القائمة حتى نهايتها. يُفحص موقع كل الحسابات حتى تكتمل قائمة البحث، ثم يُفتح موقع "
             + "الحسابات الذهبية فقط، وكل حساب يُبحث فيه يُعوَّض بغيره فتبقى القائمة مكتملة. تُحفظ الحسابات الذهبية "
             + "فقط (الشركات والمنظمات).", 12, MUTED, false), 6);
         startButton = primary("▶  بدء");
@@ -410,6 +422,8 @@ public final class MainActivity extends Activity {
         seedInput.setEnabled(!running);
         targetInput.setEnabled(!running);
         poolInput.setEnabled(!running);
+        fromFollowers.setEnabled(!running);
+        fromFollowing.setEnabled(!running);
         for (CheckBox box : countryBoxes.values()) {
             box.setEnabled(!running);
         }
@@ -578,6 +592,7 @@ public final class MainActivity extends Activity {
 
     private void restoreInputs() {
         seedInput.setText(prefs.getString("seed", ""));
+        (prefs.getBoolean("following", false) ? fromFollowing : fromFollowers).setChecked(true);
         targetInput.setText(String.valueOf(prefs.getInt("target", 100)));
         poolInput.setText(String.valueOf(prefs.getInt("pool", 50)));
         if (!Engine.running) {
@@ -638,9 +653,10 @@ public final class MainActivity extends Activity {
         }
         seedInput.setText(seed);
         prefs.edit().putString("seed", seed).putInt("target", count).putInt("pool", listSize)
+            .putBoolean("following", fromFollowing.isChecked())
             .putString("countries", TextUtils.join(",", countries)).apply();
         hideKeyboard();
-        if (Engine.start(this, store, seed, count, listSize, countries)) {
+        if (Engine.start(this, store, seed, count, listSize, countries, fromFollowing.isChecked())) {
             if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, ASK_NOTIFICATIONS);
@@ -933,6 +949,15 @@ public final class MainActivity extends Activity {
         b.setMinimumHeight(dp(44));
         b.setPadding(dp(10), 0, dp(10), 0);
         return b;
+    }
+
+    private RadioButton radio(String label) {
+        RadioButton choice = new RadioButton(this);
+        choice.setText(label);
+        choice.setTextColor(INK);
+        choice.setTextSize(14);
+        choice.setButtonTintList(ColorStateList.valueOf(BLUE));
+        return choice;
     }
 
     private Button primary(String label) {

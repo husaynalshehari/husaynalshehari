@@ -66,6 +66,8 @@ final class Engine {
     static volatile int target;
     /** The search list's size (the user's choice, 50 unless changed). */
     static volatile int pool = 50;
+    /** Which list is read: whom each account follows (true), or its verified followers (false). */
+    static volatile boolean following;
     /** The direct way's failures in a row (after 3 the task keeps to the page and its scrolling). */
     private static int directFails;
     /** The direct «About» check's failures in a row (after 3 the task keeps to the «About» page). */
@@ -96,7 +98,7 @@ final class Engine {
     // ---------------------------------------------------------------- start and stop
 
     static synchronized boolean start(Context context, Store store, String seed, int count, int listSize,
-                                      Set<String> countries) {
+                                      Set<String> countries, boolean followingList) {
         if (running) {
             return false;
         }
@@ -106,6 +108,7 @@ final class Engine {
         done = 0;
         target = count;
         pool = listSize;
+        following = followingList;
         status = "يبدأ...";
         final Set<String> allowed = new HashSet<>(countries);
         thread = new Thread(() -> run(store, seed, count, listSize, allowed), "extract");
@@ -161,7 +164,8 @@ final class Engine {
     // ---------------------------------------------------------------- the task (the script's extract_users)
 
     private static String extract(Store store, String seed, int count, int listSize, Set<String> allowed) {
-        log("🔍 بدء استخراج " + count + " حساب ذهبي من @" + seed);
+        log("🔍 بدء استخراج " + count + " حساب ذهبي من @" + seed
+            + (following ? " (ممن يتابعهم كل حساب)" : " (من المتابعين الموثّقين)"));
         log("📋 المفحوصون مسبقًا: " + store.checkedCount() + " | قائمة البحث: " + store.queueSize() + "/" + listSize);
         if (!Web.onMain(Web::loggedIn, 5_000, false)) {
             return "🔴 لم تسجّل الدخول - اضغط «تسجيل الدخول» أولًا";
@@ -186,18 +190,22 @@ final class Engine {
             if (current == null) {
                 break;
             }
-            log("   📂 استخراج متابعي @" + current + " (مباشر)...");
-            status("يجلب متابعي @" + current + " مباشرة");
-            List<Cell> cells = directFails >= 3 ? null : collectAllDirect(current);
-            if (cells != null) {
-                directFails = 0;
-            } else if (directFails < 3 && ++directFails == 3) {
-                log("   ↩️ الطريقة المباشرة فشلت 3 مرات متتالية - تُستخدم الصفحة والتمرير لبقية المهمة");
+            String listName = following ? "من يتابعهم @" + current : "متابعي @" + current;
+            List<Cell> cells = null;
+            if (!following && directFails < 3) {                // (the direct way reads verified followers only)
+                log("   📂 استخراج " + listName + " (مباشر)...");
+                status("يجلب " + listName + " مباشرة");
+                cells = collectAllDirect(current);
+                if (cells != null) {
+                    directFails = 0;
+                } else if (++directFails == 3) {
+                    log("   ↩️ الطريقة المباشرة فشلت 3 مرات متتالية - تُستخدم الصفحة والتمرير لبقية المهمة");
+                }
             }
             if (cells == null) {
-                // Fall back to traditional page + scroll
-                log("   ↩️ العودة لطريقة التحميل والتمرير لـ @" + current);
-                status("يفتح متابعي @" + current);
+                // The page and its scrolling.
+                log("   📂 استخراج " + listName + " (الصفحة والتمرير)...");
+                status("يفتح " + listName);
                 int generation = Web.generation;
                 int page = openFollowers(current);
                 if (Web.generation != generation) {
@@ -213,7 +221,7 @@ final class Engine {
                 }
                 if (page == EMPTY) {
                     navFails = 0;
-                    log("      ⚪ لا يوجد متابعون موثّقون ظاهرون لـ @" + current + " (تخطي)");
+                    log("      ⚪ القائمة فارغة: " + listName + " (تخطي)");
                     sleep(SCROLL_DELAY);
                     continue;
                 }
@@ -252,7 +260,7 @@ final class Engine {
                     continue;
                 }
             } else if (cells.isEmpty()) {
-                log("      ⚪ لا يوجد متابعون موثّقون لـ @" + current + " (تخطي)");
+                log("      ⚪ القائمة فارغة: " + listName + " (تخطي)");
                 continue;
             }
             int gold = 0;
@@ -268,7 +276,7 @@ final class Engine {
                     }
                 }
             }
-            log("      📜 جُمع " + cells.size() + " حساب من صفحة المتابعين | 🟡 الذهبية: " + gold
+            log("      📜 جُمع " + cells.size() + " حساب من القائمة | 🟡 الذهبية: " + gold
                 + (gold > 0 ? " (جديدة: " + (gold - goldDone - goldSeen) + "، مستخرجة سابقًا: " + goldDone
                 + "، فُحص موقعها سابقًا: " + goldSeen + ")" : ""));
             List<String> names = new ArrayList<>();
@@ -404,7 +412,7 @@ final class Engine {
 
     /** The account's verified followers (the script: load, 7 s, then up to 60 s for the first account cell). */
     private static int openFollowers(String user) {
-        String path = "/" + user + "/verified_followers";
+        String path = "/" + user + (following ? "/following" : "/verified_followers");
         int opened = navigate("https://x.com" + path, path, 30_000);
         if (opened != OK) {
             return opened;
@@ -773,7 +781,7 @@ final class Engine {
             if (quiet >= (loading ? QUIET_ROUNDS_LOADING : bottom ? 2 : QUIET_ROUNDS)) {
                 break;                                          // (the list's end: no use waiting on)
             }
-            status("يمرّر متابعي @" + user + " - جُمع " + all.size());
+            status("يمرّر قائمة @" + user + " - جُمع " + all.size());
             sleep(1_500);
         }
         if (!readOnce) {
