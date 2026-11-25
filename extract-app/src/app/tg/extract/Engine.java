@@ -71,6 +71,8 @@ final class Engine {
     /** The direct «About» check's failures in a row (after 3 the task keeps to the «About» page). */
     private static int aboutFails;
     private static boolean aboutWorks;
+    /** X's direct «no country»: 0-1 being checked against the page, 2 taken as is, -1 not trusted (task long). */
+    private static int noneState;
     private static Thread thread;
     private static Context app;
     private static final ArrayDeque<String> LOG = new ArrayDeque<>();
@@ -168,6 +170,7 @@ final class Engine {
         directFails = 0;
         aboutFails = 0;
         aboutWorks = false;
+        noneState = 0;
         int checkedNow = 0;
         int duplicates = 0;
         int notGold = 0;
@@ -291,7 +294,7 @@ final class Engine {
                     noLocation = 0;
                     break;
                 }
-                String country = location == null ? null : Text.countryOf(location, allowed);
+                String country = location == null || location.isEmpty() ? null : Text.countryOf(location, allowed);
 
                 if (country != null) {
                     noLocation = 0;
@@ -313,12 +316,15 @@ final class Engine {
                     done++;
                     found++;
                     log("      ✅ @" + user.username + " - ذهبي من " + Text.nameOf(country) + " - تم الاستخراج (" + done + "/" + count + ")");
+                } else if (location != null && location.isEmpty()) {
+                    noLocation = 0;                             // (X answered for it: the session is fine)
+                    log("      ⚪ @" + user.username + " - لا يوجد موقع مذكور");
                 } else if (location != null) {
                     noLocation = 0;
                     log("      ❌ @" + user.username + " - " + location);
                 } else {
                     noLocation++;
-                    log("      ❌ @" + user.username + " - بدون موقع (متتالي: " + noLocation + ")");
+                    log("      ❌ @" + user.username + " - تعذّر قراءة الموقع (متتالي: " + noLocation + ")");
                     if (noLocation >= NO_LOCATION_STOP) {
                         log("🔴 إيقاف - " + noLocation + " بدون موقع متتالية");
                         return "🔴 توقفت المهمة: " + noLocation + " حسابات متتالية بلا موقع - " + done + "/" + count;
@@ -407,12 +413,35 @@ final class Engine {
         }
     }
 
-    /** The account's country: asked straight from X first, and read on its «About» page if that gives none. */
+    /**
+     * The account's country, asked straight from X first and read on its «About» page if that does not tell. "" when
+     * X shows no country for the account (nothing to wait for), null when it could not be told.
+     */
     private static String locationOf(String user) {
         if (aboutFails < 3) {
-            String country = aboutDirect(user);
-            if (country != null) {
-                return country;
+            String direct = aboutDirect(user);
+            if (direct != null && !direct.isEmpty()) {
+                return direct;
+            }
+            if (direct != null) {                               // (X's data: no country for this account)
+                if (noneState >= 2) {
+                    return "";
+                }
+                if (noneState < 0) {
+                    return locationFromPage(user);
+                }
+                // The task's first two such answers are checked against the page: if it shows a country after all,
+                // a missing country is always checked on the page from then on.
+                String page = locationFromPage(user);
+                if (page != null && !page.isEmpty()) {
+                    noneState = -1;
+                    log("   ⚠️ صفحة «حول» أظهرت موقعًا لم يُظهره الفحص المباشر - تُفتح «حول» لكل حساب بلا موقع");
+                    return page;
+                }
+                if (page != null && ++noneState == 2) {
+                    log("   ✅ «لا يوجد موقع» من الفحص المباشر مطابق للصفحة - لا تُفتح «حول» لهذه الحسابات بعد الآن");
+                }
+                return "";
             }
         }
         return locationFromPage(user);
@@ -441,7 +470,12 @@ final class Engine {
                     }
                     // (Android gives "null" as text for a JSON null: a missing country is never taken as a place)
                     String country = result.isNull("country") ? "" : result.optString("country", "").trim();
-                    return country.isEmpty() ? null : country;
+                    if (!country.isEmpty()) {
+                        return country;
+                    }
+                    // X's «About» data without a country: none is shown for the account (""). Without the data at
+                    // all, the page is read instead (null).
+                    return result.optBoolean("about") ? "" : null;
                 }
                 error = result.optString("error", "خطأ");
             } catch (JSONException e) {
@@ -457,26 +491,33 @@ final class Engine {
         return null;
     }
 
-    /** The country on the account's «About» page; null when the page has none (or did not open). */
+    /**
+     * The country on the account's «About» page, read as soon as the page shows it. "" when the page is there with
+     * its details (the date joined...) but no country; null when it did not open or show its details in time.
+     */
     private static String locationFromPage(String user) {
         String path = "/" + user + "/about";
         if (navigate("https://x.com" + path, path, 30_000) != OK) {
             return null;
         }
         long start = SystemClock.elapsedRealtime();
-        sleep(5_000);                                            // (the script reads after 5 s)
+        sleep(1_500);
         while (true) {
             Object value = evaluate(Scripts.LOCATION, 5_000);
-            if (value instanceof JSONObject && !((JSONObject) value).isNull("loc")) {
-                String location = ((JSONObject) value).optString("loc").trim();
+            if (value instanceof JSONObject) {
+                JSONObject page = (JSONObject) value;
+                String location = page.isNull("loc") ? "" : page.optString("loc").trim();
                 if (!location.isEmpty()) {
                     return location;
                 }
+                if (page.optBoolean("loaded")) {
+                    return "";                                  // (no country on this account: no use waiting)
+                }
             }
-            if (SystemClock.elapsedRealtime() - start >= 12_000) {    // (a slow phone gets a few seconds more)
+            if (SystemClock.elapsedRealtime() - start >= 8_000) {
                 return null;
             }
-            sleep(1_500);
+            sleep(1_000);
         }
     }
 

@@ -96,7 +96,8 @@ final class Scripts {
         + "  }"
         + " }"
         + "}"
-        + "return {loc:null,len:body.length};"
+        + "var loaded=/date joined|joined|verified since|connected via|username change|تاريخ الانضمام|انضم/i.test(body);"
+        + "return {loc:null,len:body.length,loaded:loaded};"
         + "})()";
 
     /** The signed-in account's username, from the links X shows only to it. */
@@ -196,7 +197,7 @@ final class Scripts {
         + " var res=((d.user_result_by_screen_name||{}).result)||((d.user||{}).result)||((d.user_result||{}).result);"
         + " if(!res){window.__aboutResult=JSON.stringify({error:'no user'});return;}"
         + " var about=res.about_profile||{};"
-        + " window.__aboutResult=JSON.stringify({country:about.account_based_in||about.accountBasedIn||null});"
+        + " window.__aboutResult=JSON.stringify({country:about.account_based_in||about.accountBasedIn||null,about:!!res.about_profile});"
         + "})"
         + ".catch(function(e){window.__aboutResult=JSON.stringify({error:String(e)});});"
         + "return true;"
